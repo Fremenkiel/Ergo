@@ -1,33 +1,25 @@
 # Makefile
 
-phony: db-create, cl-create, dev-up, dev-down
+phony: ch-create, dev-up, dev-down
 
-ADMIN_DB_URL ?= postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
-MAIN_DB_URL ?= postgres://admin:admin@localhost:5432/db?sslmode=disable
+CH_ADDR ?= localhost
+CH_PORT ?= 9000
+CH_USER ?= default
+CH_PASS ?= clickhouse
+CH_DB ?= audit_log
 
-CL_ADDR ?= localhost
-CL_PORT ?= 9000
-CL_USER ?= default
-CL_PASS ?= clickhouse
-CL_DB ?= audit_log
-
-db-create:
-	psql "$(ADMIN_DB_URL)" -v ON_ERROR_STOP=1 -f db/init.sql
-	psql "$(MAIN_DB_URL)" -v ON_ERROR_STOP=1 -f db/seed.sql
-
-cl-create:
+ch-create:
 	clickhouse-client \
-  --host "$(CL_ADDR)" \
-  --port "$(CL_PORT)" \
-  --user "$(CL_USER)" \
-  --password "$(CL_PASS)" \
-	--database "$(CL_DB)" \
-	--queries-file cl/init.sql
+  --host "$(CH_ADDR)" \
+  --port "$(CH_PORT)" \
+  --user "$(CH_USER)" \
+  --password "$(CH_PASS)" \
+	--database "$(CH_DB)" \
+	--queries-file infra/ch/init.sql
 
 dev-up: 
-	docker-compose -f ./compose.yml up -d --wait
-	make db-create
-	make cl-create
+	docker-compose -f ./infra/compose.yml up -d --wait
+	make ch-create
 
 dev-down:
-	docker-compose -f ./compose.yml down -v
+	docker-compose -f ./infra/compose.yml down -v
