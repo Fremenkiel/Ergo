@@ -16,3 +16,7 @@ SELECT pg_logical_emit_message(
 );
 ### OBS
 No json parse func, string has to be this.
+
+## Credits
+https://github.com/karlseguin/pg.zig
+https://github.com/0xrinegade/clickhouse-zig
