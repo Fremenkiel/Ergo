@@ -3,6 +3,20 @@ const Io = std.Io;
 const net = Io.net;
 const mem = std.mem;
 const ch = @import("ch");
+const types = @import("types.zig");
+
+const columns = [10]ch.bulk_insert.ColumnDef{
+    .{ .name = "event_time", .type_str = "DateTime64" },
+    .{ .name = "transaction_id", .type_str = "UInt64" },
+    .{ .name = "user_id", .type_str = "String" },
+    .{ .name = "table_name", .type_str = "LowCardinality(String)" },
+    .{ .name = "action", .type_str = "Enum8('INSERT' = 1, 'UPDATE' = 2, 'DELETE' = 3)" },
+    .{ .name = "primary_key", .type_str = "String" },
+    .{ .name = "changed_columns", .type_str = "Array(String)" },
+    .{ .name = "old_values", .type_str = "Map(String, String)" },
+    .{ .name = "new_values", .type_str = "Map(String, String)" },
+    .{ .name = "ip_address", .type_str = "IPv4" },
+};
 
 pub const ChClient = struct {
     config: ch.ClickHouseConfig,
@@ -285,6 +299,113 @@ pub const ChClient = struct {
                 },
                 else => {},
             }
+        }
+    }
+
+    pub fn writeLog(self: *@This(), io: std.Io, data: [][]types.AuditEntry) !void {
+        var bulk = try ch.BulkInsert.init(self.allocator, "entries", &columns, 1000);
+        defer bulk.deinit();
+
+        std.debug.print("Initialized bulk insert\n", .{});
+
+        bulk.setCompression(.LZ4);
+
+        self.startInsert(io, "INSERT INTO entries FORMAT Native") catch |err| {
+            if (err == error.QueryFailed) {
+                std.debug.print("Query failed: {s}\n", .{self.last_error.?.message});
+            }
+            return err;
+        };
+
+        std.debug.print("Sending data\n", .{});
+
+        var buf = std.ArrayList(ch.bulk_insert.Value).empty;
+        defer buf.deinit(self.allocator);
+
+        var old_values = std.StringHashMap([]const u8).init(self.allocator);
+        defer old_values.deinit();
+
+        var new_values = std.StringHashMap([]const u8).init(self.allocator);
+        defer new_values.deinit();
+
+        var i: u32 = 0;
+        while (i < data.len) : (i += 1) {
+            for (data[i]) |row| {
+                buf.clearRetainingCapacity();
+                old_values.clearRetainingCapacity();
+                new_values.clearRetainingCapacity();
+
+                try buf.ensureUnusedCapacity(self.allocator, row.changed_columns.capacity());
+                if (row.old_values.capacity() > 0) { try old_values.ensureUnusedCapacity(row.changed_columns.capacity()); }
+                if (row.new_values.capacity() > 0) { try new_values.ensureUnusedCapacity(row.changed_columns.capacity()); }
+
+                var it = row.changed_columns.iterator();
+                while (it.next()) |col| {
+                    if (!col.value_ptr.*.has_changes) continue;
+
+                    buf.appendAssumeCapacity(.{ .String = col.key_ptr.* });
+
+                    if (row.old_values.capacity() > 0) {
+                        const val = row.old_values.get(col.key_ptr.*);
+                        try old_values.put(col.key_ptr.*, val.?);
+                    }
+
+                    if (row.new_values.capacity() > 0) {
+                        const val = row.new_values.get(col.key_ptr.*);
+                        try new_values.put(col.key_ptr.*, val.?);
+                    }
+                }
+
+                const values = [_]ch.bulk_insert.Value{
+                    .{ .DateTime64 = row.event_time },
+                    .{ .UInt64 = row.transaction_id },
+                    .{ .String = row.user_id},
+                    .{ .LowCardinality = row.table_name },
+                    .{ .Enum8 = row.action },
+                    .{ .String = row.primary_key },
+                    .{ .Array = buf.items },
+                    .{ .Map = old_values },
+                    .{ .Map = new_values },
+                    .{ .IPv4 = row.ip_address },
+                };
+
+                if (try bulk.addRow(&values)) {
+                    bulk.flush(io, self.stream.?) catch |err| {
+                        std.debug.print("flush failed: {}\n", .{err});
+                        self.processQueryResponse(io) catch {};
+                        if (self.last_error) |e| {
+                            std.debug.print("SERVER EXCEPTION: {s}\n", .{e.message});
+                        }
+                        return err;
+                    };
+                }
+            }
+        }
+
+        // Flush any remaining rows
+        bulk.flush(io, self.stream.?) catch |err| {
+            std.debug.print("flush failed: {}\n", .{err});
+            self.processQueryResponse(io) catch {};
+            if (self.last_error) |e| {
+                std.debug.print("SERVER EXCEPTION: {s}\n", .{e.message});
+            }
+            return err;
+        };
+
+        std.debug.print("Executed insert\n", .{});
+
+        self.closeStream(io) catch |err| {
+            std.debug.print("close failed: {}\n", .{err});
+            if (self.last_error) |e| {
+                std.debug.print("SERVER EXCEPTION: {s}\n", .{e.message});
+            }
+            return err;
+        };
+
+        std.debug.print("Closed stream\n", .{});
+
+        if (self.last_error) |err| {
+            std.debug.print("Insert failed: {s}\n", .{err.message});
         }
     }
 

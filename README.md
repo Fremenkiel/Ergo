@@ -9,7 +9,7 @@ https://github.com/lz4/lz4/archive/refs/heads/dev.zip
 Each LowCardinality insert can at max contain 65,536 unique column names.
 
 ## Emit
-SELECT pg_logical_emit_message(
+SELECT/PERFORM pg_logical_emit_message(
     true, 
     'ergo_meta', 
     '{"user_id": 42, "ip": "192.168.1.50"}'
