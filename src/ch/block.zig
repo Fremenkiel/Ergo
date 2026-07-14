@@ -37,7 +37,6 @@ pub const Block = struct {
         };
     }
     pub fn addColumn(self: *Block, name: []const u8, type_str: []const u8) !void {
-        std.debug.print("Add column name: {s}, type: {s}\n", .{name,type_str});
         const column = try Column.init(self.allocator, name, type_str);
         const new_columns = try self.allocator.realloc(self.columns, self.columns.len + 1);
         new_columns[new_columns.len - 1] = column;

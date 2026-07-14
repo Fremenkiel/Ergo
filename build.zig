@@ -25,6 +25,7 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.addImport("metrics", metrics_dep.module("metrics"));
 
+    // CH Module
     const ch_module = b.createModule(.{
         .root_source_file = b.path("src/ch/ch.zig"),
         .target = target,
@@ -37,6 +38,16 @@ pub fn build(b: *std.Build) void {
     ch_module.addIncludePath(b.path("deps/lz4/lib"));
     exe.root_module.addImport("ch", ch_module);
 
+    // CH Client
+    const ch_client_module = b.createModule(.{
+        .root_source_file = b.path("src/ch_client.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ch_client_module.addImport("ch", ch_module);
+    exe.root_module.addImport("ch_client", ch_client_module);
+
+    // Pg Module
     const openssl_lib_name = b.option([]const u8, "openssl_lib_name", "");
     const openssl_lib_path = b.option(std.Build.LazyPath, "openssl_lib_path", "");
     const openssl_include_path = b.option(std.Build.LazyPath, "openssl_include_path", "");
@@ -84,8 +95,16 @@ pub fn build(b: *std.Build) void {
         options.addOption(bool, "column_names", column_names);
         pg_module.addOptions("config", options);
     }
-    
     exe.root_module.addImport("pg", pg_module);
+
+    // PG Client
+    const pg_client_module = b.createModule(.{
+        .root_source_file = b.path("src/pg_client.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pg_client_module.addImport("pg", pg_module);
+    exe.root_module.addImport("pg_client", pg_client_module);
 
     b.installArtifact(exe);
 
@@ -104,4 +123,21 @@ pub fn build(b: *std.Build) void {
     const run_exe_tests = b.addRunArtifact(exe_tests);
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_exe_tests.step);
+
+    const bench = b.addExecutable(.{
+        .name = "ergo_bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/clickhouse_integration.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+        }),
+    });
+    bench.root_module.addImport("ch", ch_module);
+    bench.root_module.addImport("ch_client", ch_client_module);
+
+    const run_bench_tests = b.addRunArtifact(bench);
+
+    const bench_step = b.step("bench", "Run ClickHouse connection benchmarks");
+    bench_step.dependOn(&run_bench_tests.step);
+    run_cmd.step.dependOn(b.getInstallStep());
 }

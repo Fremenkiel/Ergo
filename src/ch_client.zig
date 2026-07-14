@@ -66,6 +66,12 @@ pub const ChClient = struct {
         try self.readServerHello(io);
     }
 
+    pub fn disconnect(self: *ChClient, io: std.Io) !void {
+        if (self.stream) |stream| {
+            stream.close(io);
+        }
+    }
+
     fn sendHello(self: *ChClient, io: Io) !void {
         var buf: [1024]u8 = undefined;
         var writer = self.stream.?.writer(io, &buf);
@@ -196,16 +202,12 @@ pub const ChClient = struct {
         std.debug.print("revision: {d}\n", .{revision});
 
         if (revision >= 50264) {
-            std.debug.print("reading table name\n", .{});
             const table_name = try ch.protocol.readString(r);
-            std.debug.print("table name: {s}\n", .{table_name});
             self.allocator.free(table_name);
         }
 
-        std.debug.print("reading block info fields\n", .{});
         while (true) {
             const field_num = try ch.protocol.readVarInt(r);
-            std.debug.print("field_num: {d}\n", .{field_num});
             if (field_num == 0) break;
             if (field_num == 1) {
                 _ = try r.takeByte(); // is_overflows
@@ -214,11 +216,8 @@ pub const ChClient = struct {
             }
         }
 
-        std.debug.print("reading num_columns\n", .{});
         const num_columns = try ch.protocol.readVarInt(r);
-        std.debug.print("reading num_rows\n", .{});
         const num_rows = try ch.protocol.readVarInt(r);
-        std.debug.print("num_cols: {d}, num_rows: {d}\n", .{num_columns, num_rows});
 
         if (self.current_block) |*b| {
             b.rows = num_rows;
@@ -226,12 +225,10 @@ pub const ChClient = struct {
 
         for (0..num_columns) |_| {
             const col_name = try ch.protocol.readString(r);
-            std.debug.print("SERVER SCHEMA COL: {s}\n", .{col_name});
             const col_type_str = try ch.protocol.readString(r);
 
             if (self.current_block) |*b| {
                 const ch_type = try ch.ClickHouseType.fromStr(col_type_str);
-                std.debug.print("col: {s} {s}\n", .{col_name, col_type_str});
                 try b.addColumn(col_name, col_type_str);
                 
                 const col_idx = b.columns.len - 1;
