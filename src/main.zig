@@ -3,12 +3,11 @@ const Io = std.Io;
 
 const pg = @import("pg");
 const ch = @import("ch");
-const types = @import("types.zig");
+const types = @import("types");
 
-const PgClient = @import("pg_client.zig").PgClient;
-const ChClient = @import("ch_client.zig").ChClient;
+const PgClient = @import("pg_client").PgClient;
+const ChClient = @import("ch_client").ChClient;
 const WalProcessor = @import("wal_processor.zig").WalProcessor;
-
 
 pub fn main(init: std.process.Init) !void {
     std.debug.print("Initializing database connection\n", .{});
@@ -52,10 +51,4 @@ pub fn main(init: std.process.Init) !void {
     };
 
     try processor.startStreaming();
-}
-
-const MockPgClient = struct {
-};
-
-test "processor correctly acknowledges messages" {
 }

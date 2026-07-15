@@ -3,7 +3,7 @@ const Io = std.Io;
 const net = Io.net;
 const mem = std.mem;
 const ch = @import("ch");
-const types = @import("types.zig");
+const types = @import("types");
 
 const columns = [10]ch.bulk_insert.ColumnDef{
     .{ .name = "event_time", .type_str = "DateTime64" },

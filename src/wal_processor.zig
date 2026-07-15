@@ -1,5 +1,6 @@
 const std = @import("std");
-const types = @import("types.zig");
+const types = @import("types");
+const pg_client = @import("pg_client");
 
 pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
     return struct {
@@ -15,14 +16,21 @@ pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
         ch_client: *ChClient,
 
         pub fn startStreaming(self: *@This()) !void {
-            try self.pg_client.startWALReader();
+            self.pg_client.startWALReader() catch |err| switch (err) {
+                pg_client.PgClientError.WalConnectionNotInitialized => {
+                    self.pg_client.*.createWalConn(self.allocator, self.io, self.pg_client.*.conn_opts);
+                    try self.pg_client.startWALReader();
+                },
+                else => return err,
+            };
 
             var transaction_array: std.ArrayList(types.AuditEntry) = .empty;
 
             errdefer transaction_array.deinit(self.allocator);
 
             while (true) {
-                const response = try self.pg_client.readWAL();
+                var response = try self.pg_client.readWAL();
+                defer response.deinit(self.allocator);
                 if (response.entry) |entry| {
                     try transaction_array.append(self.allocator, entry);
                 }

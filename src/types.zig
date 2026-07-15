@@ -12,8 +12,15 @@ pub const AuditEntry = struct {
     user_id: []const u8,
     table_name: []const u8,
     action: i8,
-    changed_columns: std.StringHashMapUnmanaged(ChangedColumns) = .empty,
+    changed_columns: std.StringHashMap(ChangedColumns),
     old_values: std.StringHashMapUnmanaged([]const u8) = .empty,
     new_values: std.StringHashMapUnmanaged([]const u8) = .empty,
     ip_address: []const u8,
+
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        defer allocator.free(self.table_name);
+        defer self.changed_columns.deinit();
+        defer self.old_values.deinit(allocator);
+        defer self.new_values.deinit(allocator);
+    }
 };

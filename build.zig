@@ -13,6 +13,14 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    // Types
+    const types = b.createModule(.{
+        .root_source_file = b.path("src/types.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    exe.root_module.addImport("types", types);
+
     const buffer_dep = b.dependency("buffer", .{
         .target = target,
         .optimize = optimize,
@@ -45,6 +53,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     ch_client_module.addImport("ch", ch_module);
+    ch_client_module.addImport("types", types);
     exe.root_module.addImport("ch_client", ch_client_module);
 
     // Pg Module
@@ -104,6 +113,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     pg_client_module.addImport("pg", pg_module);
+    pg_client_module.addImport("types", types);
     exe.root_module.addImport("pg_client", pg_client_module);
 
     b.installArtifact(exe);
@@ -123,6 +133,12 @@ pub fn build(b: *std.Build) void {
     const run_exe_tests = b.addRunArtifact(exe_tests);
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_exe_tests.step);
+
+    const pg_client_tests = b.addTest(.{
+        .root_module = pg_client_module,
+    });
+    const run_pg_client_tests = b.addRunArtifact(pg_client_tests);
+    test_step.dependOn(&run_pg_client_tests.step);
 
     const bench = b.addExecutable(.{
         .name = "ergo_bench",
