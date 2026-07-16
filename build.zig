@@ -51,9 +51,11 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/ch_client.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{
+            .{ .name = "ch", .module = ch_module },
+            .{ .name = "types", .module = types },
+        }
     });
-    ch_client_module.addImport("ch", ch_module);
-    ch_client_module.addImport("types", types);
     exe.root_module.addImport("ch_client", ch_client_module);
 
     // Pg Module
@@ -111,10 +113,25 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/pg_client.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{
+            .{ .name = "pg", .module = pg_module },
+            .{ .name = "types", .module = types },
+        }
     });
-    pg_client_module.addImport("pg", pg_module);
-    pg_client_module.addImport("types", types);
     exe.root_module.addImport("pg_client", pg_client_module);
+
+    // Wal processor
+    const wal_processor_module = b.createModule(.{
+        .root_source_file = b.path("src/wal_processor.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "pg", .module = pg_module },
+            .{ .name = "types", .module = types },
+            .{ .name = "pg_client", .module = pg_client_module },
+        }
+    });
+    exe.root_module.addImport("wal_processor", wal_processor_module);
 
     b.installArtifact(exe);
 
@@ -140,16 +157,24 @@ pub fn build(b: *std.Build) void {
     const run_pg_client_tests = b.addRunArtifact(pg_client_tests);
     test_step.dependOn(&run_pg_client_tests.step);
 
+    const wal_processor_tests = b.addTest(.{
+        .root_module = wal_processor_module,
+    });
+    const run_wal_processor_tests = b.addRunArtifact(wal_processor_tests);
+    test_step.dependOn(&run_wal_processor_tests.step);
+
     const bench = b.addExecutable(.{
         .name = "ergo_bench",
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/clickhouse_integration.zig"),
             .target = target,
             .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "ch", .module = ch_module },
+                .{ .name = "ch_module", .module = ch_client_module },
+            }
         }),
     });
-    bench.root_module.addImport("ch", ch_module);
-    bench.root_module.addImport("ch_client", ch_client_module);
 
     const run_bench_tests = b.addRunArtifact(bench);
 

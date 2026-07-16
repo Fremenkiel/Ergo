@@ -5,14 +5,27 @@ const pg = @import("pg");
 const types = @import("types");
 
 pub const PgClientError = error{
-    PostgresReplicationError,
-    WalConnectionNotInitialized,
-    ConnectionPoolNotInitialized,
+PostgresReplicationError,
+WalConnectionNotInitialized,
+ConnectionPoolNotInitialized,
 };
 
 pub const ReadResponse = struct {
     entry: ?types.AuditEntry,
     commit_timestamp: ?i64,
+    eof: bool = false,
+
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (self.entry) |*entry| {
+            entry.deinit(allocator);
+        }
+    }
+};
+
+pub const EOFReadResponse: ReadResponse = .{
+    .entry = null,
+    .commit_timestamp = null,
+    .eof = true,
 };
 
 pub const ParseResponse = struct {
@@ -47,6 +60,11 @@ pub const TableDef = struct {
     columns: std.ArrayList(ColumnDef),
 };
 
+pub const Opts = struct {
+    auth: pg.Conn.AuthOpts = .{},
+    connect: pg.Conn.Opts = .{},
+};
+
 pub const PgClient = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -62,16 +80,11 @@ pub const PgClient = struct {
     pool: ?*pg.Pool,
     wal_conn: ?*pg.Conn,
 
-    pub const Opts = struct {
-        auth: pg.Conn.AuthOpts = .{},
-        connect: pg.Conn.Opts = .{},
-    };
-
     pub fn init(io: std.Io, allocator: std.mem.Allocator, opts: Opts) !PgClient{
-        var pool = createConnPool(allocator, io, opts);
+        var pool = try createConnPool(allocator, io, opts);
         errdefer pool.deinit();
 
-        var conn = createWalConn(allocator, io, opts);
+        var conn = try createWalConn(allocator, io, opts);
         errdefer conn.deinit();
 
         var changed_columns = std.StringHashMap(types.ChangedColumns).init(allocator);
@@ -96,39 +109,6 @@ pub const PgClient = struct {
         };
     }
 
-    pub fn createWalConn(allocator: std.mem.Allocator, io:  std.Io, opts: Opts) *pg.Conn {
-        var conn = try allocator.create(pg.Conn);
-        conn.* = pg.Conn.open(io, allocator, opts.connect) catch |err| {
-            std.debug.print("Failed to connect: {}\n", .{err});
-            std.process.exit(1);
-        };
-
-        var authOpts = opts.auth;
-
-        if (authOpts.startup_parameters == null) {
-            authOpts.startup_parameters = std.StringHashMap([]const u8).init(allocator);
-        }
-        try authOpts.startup_parameters.?.put("replication", "database");
-
-        conn.auth(authOpts) catch |err| {
-            if (conn.err) |pg_err| {
-                std.debug.print("Failed to auth: {} {s}: {s}\n", .{err, pg_err.code, pg_err.message});
-            } else {
-                std.debug.print("Failed to auth: {}\n", .{err});
-            }
-            std.process.exit(1);
-        };
-
-        return conn;
-    }
-
-    pub fn createConnPool(allocator: std.mem.Allocator, io: std.Io, opts: Opts) *pg.Pool {
-        return pg.Pool.init(io, allocator, .{ .size = 1, .connect = opts.connect, .auth = opts.auth}) catch |err| {
-            std.debug.print("Failed to connect: {}\n", .{err});
-            std.process.exit(1);
-        };
-    }
-
     pub fn deinit(self: *PgClient) void {
         if (self.wal_conn) |wal_conn| {
             self.endFlow() catch {};
@@ -148,6 +128,8 @@ pub const PgClient = struct {
 
         self.table_reg.deinit();
         self.context.changed_columns.deinit();
+        self.allocator.free(self.context.user_id);
+        self.allocator.free(self.context.ip_address);
     }
 
     fn resetContext(self: *PgClient) void {
@@ -182,6 +164,7 @@ pub const PgClient = struct {
         if (self.wal_conn == null) return PgClientError.WalConnectionNotInitialized;
 
         const msg = try self.wal_conn.?._reader.next();
+
         var response = ReadResponse{
             .entry = null,
             .commit_timestamp = null,
@@ -205,7 +188,7 @@ pub const PgClient = struct {
 
                     const payload = msg.data[25..];
 
-                    const parse_response = try self.parsePgOutput(payload, &self.table_reg);
+                    const parse_response = try self.parsePgOutput(payload);
 
                     if (parse_response.commit_lsn) |lsn| {
                         response.commit_timestamp = pgWalToClickHouseMs(parse_response.commit_timestamp.?);
@@ -274,6 +257,7 @@ pub const PgClient = struct {
 
         switch (msg_type) {
             'B' => {
+                std.debug.print("\n--- COPY THIS HEX FROR BEGIN ---\n{x}\n---------------------\n", .{payload});
                 const final_lsn = try reader.takeInt(u64, .big);
                 const commit_timestamp = try reader.takeInt(u64, .big);
                 const xid = try reader.takeInt(u32, .big);
@@ -283,12 +267,13 @@ pub const PgClient = struct {
                 std.debug.print("BEGIN: xid={d}, lsn={x}\n", .{xid, final_lsn});
             },
             'C' => {
-                const flags = try reader.takeByte();
+                std.debug.print("\n--- COPY THIS HEX FROR COMMIT ---\n{x}\n---------------------\n", .{payload});
+                // flags
+                _ = try reader.takeByte();
                 const commit_lsn = try reader.takeInt(u64, .big);
                 response.commit_lsn = try reader.takeInt(u64, .big);
                 response.commit_timestamp = try reader.takeInt(u64, .big);
 
-                _ = flags;
                 std.debug.print("COMMIT: lsn={x}\n", .{commit_lsn});
 
                 self.resetContext();
@@ -308,13 +293,14 @@ pub const PgClient = struct {
                 const repl_ident = try reader.takeByte();
                 _ = repl_ident;
 
+                std.debug.print("\n--- COPY THIS HEX FROR RELATION ---\n{x}\n---------------------\n", .{payload});
                 const num_columns = try reader.takeInt(u16, .big);
                 const table_name = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{namespace, rel_name});
                 defer self.allocator.free(table_name);
 
                 const columns = self.readSchemaKeys(table_name) catch |err| switch (err) {
                     PgClientError.ConnectionPoolNotInitialized => blk: {
-                        self.pool = createConnPool(self.allocator, self.io, self.conn_opts);
+                        self.pool = try createConnPool(self.allocator, self.io, self.conn_opts);
 
                         break :blk try self.readSchemaKeys(table_name);
                     },
@@ -355,7 +341,7 @@ pub const PgClient = struct {
                     std.debug.print("Error: Received insert with invalid tuple type: {c}\n", .{tuple_type});
                 }
 
-                std.debug.print("\n--- COPY THIS HEX ---\n{x}\n---------------------\n", .{payload});
+                std.debug.print("\n--- COPY THIS HEX FROR INSERT ---\n{x}\n---------------------\n", .{payload});
 
                 if (self.table_reg.get(rel_id)) |table| {
                     std.debug.print("INSERT INTO {s}.{s}:\n", .{table.namespace, table.name});
@@ -392,6 +378,7 @@ pub const PgClient = struct {
 
                         tuple_type = try reader.takeByte();
                     }
+                    std.debug.print("\n--- COPY THIS HEX FROR UPDATE ---\n{x}\n---------------------\n", .{payload});
 
                     if (tuple_type == 'N') {
                         std.debug.print("   -> Has new data (N):\n", .{});
@@ -463,6 +450,7 @@ pub const PgClient = struct {
                 _ = flags;
                 _ = lsn;
                 if (std.mem.eql(u8, prefix, "ergo_meta")) {
+                    std.debug.print("\n--- COPY THIS HEX FROR META ---\n{x}\n---------------------\n", .{payload});
                     var it = std.mem.splitAny(u8, content, ",");
 
                     const user_id_str = it.next() orelse return error.InvalidMapType;
@@ -492,6 +480,7 @@ pub const PgClient = struct {
                     const ip_address_value = std.mem.trim(u8, std.mem.trim(u8, ip_address_value_str, " "), "\"");
 
                     const check_str = try std.fmt.allocPrint(self.allocator, "{s}: \"{s}\", {s}: \"{s}\"", .{user_id_key, user_id_value, ip_address_key, ip_address_value});
+                    defer self.allocator.free(check_str);
                     assert(std.mem.eql(u8, check_str, content));
 
                     self.context.user_id = try self.allocator.dupe(u8, user_id_value);
@@ -538,7 +527,7 @@ pub const PgClient = struct {
 
                     try changes.put(self.allocator, col_name, val_buf);
                     const changed_column = try self.context.changed_columns.getOrPut(col_name);
-                    
+
                     if (!changed_column.found_existing) {
                         changed_column.value_ptr.* = .{
                             .value = val_buf,
@@ -566,14 +555,14 @@ pub const PgClient = struct {
         var conn = try self.pool.?.acquire();
         defer conn.release();
         var result = try conn.queryOpts(
-            \\ SELECT
-            \\   a.attname AS column_name,
-            \\   c.contype AS constraint_type
-            \\ FROM pg_constraint c
-            \\ JOIN pg_attribute a ON a.attnum = ANY(c.conkey)
-            \\   AND a.attrelid = c.conrelid
-            \\ WHERE c.conrelid = $1::regclass
-            \\   AND c.contype IN ('p', 'f');
+        \\ SELECT
+\\   a.attname AS column_name,
+\\   c.contype AS constraint_type
+\\ FROM pg_constraint c
+\\ JOIN pg_attribute a ON a.attnum = ANY(c.conkey)
+\\   AND a.attrelid = c.conrelid
+\\ WHERE c.conrelid = $1::regclass
+\\   AND c.contype IN ('p', 'f');
         , .{table_name}, .{ .column_names = true });
         defer result.deinit();
 
@@ -609,6 +598,39 @@ pub const PgClient = struct {
         if (self.wal_conn == null) return PgClientError.WalConnectionNotInitialized;
 
         try self.wal_conn.?._reader.endFlow();
+    }
+
+    pub fn createWalConn(allocator: std.mem.Allocator, io:  std.Io, opts: Opts) !*pg.Conn {
+        var conn = try allocator.create(pg.Conn);
+        conn.* = pg.Conn.open(io, allocator, opts.connect) catch |err| {
+            std.debug.print("Failed to connect: {}\n", .{err});
+            std.process.exit(1);
+        };
+
+        var authOpts = opts.auth;
+
+        if (authOpts.startup_parameters == null) {
+            authOpts.startup_parameters = std.StringHashMap([]const u8).init(allocator);
+        }
+        try authOpts.startup_parameters.?.put("replication", "database");
+
+        conn.auth(authOpts) catch |err| {
+            if (conn.err) |pg_err| {
+                std.debug.print("Failed to auth: {} {s}: {s}\n", .{err, pg_err.code, pg_err.message});
+            } else {
+                std.debug.print("Failed to auth: {}\n", .{err});
+            }
+            std.process.exit(1);
+        };
+
+        return conn;
+    }
+
+    pub fn createConnPool(allocator: std.mem.Allocator, io: std.Io, opts: Opts) !*pg.Pool {
+        return pg.Pool.init(io, allocator, .{ .size = 1, .connect = opts.connect, .auth = opts.auth}) catch |err| {
+            std.debug.print("Failed to connect: {}\n", .{err});
+            std.process.exit(1);
+        };
     }
 };
 
@@ -651,6 +673,63 @@ fn setupMockClient(allocator: std.mem.Allocator, io: std.Io) !PgClient {
     };
 }
 
+test "parsePgOutput maps BEGIN correctly" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var client = try setupMockClient(allocator, io);
+    defer client.deinit();
+
+    const commit_hex = "420000000001c160880002f9a2afe34ece00000317";
+    const xid: u64 = 791;
+
+    const commit_bytes = try allocator.alloc(u8, commit_hex.len / 2);
+    defer allocator.free(commit_bytes);
+    _ = try std.fmt.hexToBytes(commit_bytes, commit_hex);
+
+    var result = try client.parsePgOutput(commit_bytes);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(xid, client.context.xid);
+    try std.testing.expectEqualStrings("", client.context.ip_address);
+    try std.testing.expectEqualStrings("", client.context.user_id);
+    try std.testing.expectEqual(null, result.entry);
+    try std.testing.expectEqual(null, result.commit_lsn);
+    try std.testing.expectEqual(null, result.commit_timestamp);
+}
+
+test "parsePgOutput maps METADATA correctly" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var client = try setupMockClient(allocator, io);
+    defer client.deinit();
+
+    // PERFORM pg_logical_emit_message(
+    //     true, 
+    //     'ergo_meta', 
+    //     '"user_id": "42", "ip": "192.168.1.50"'
+    // );
+    const metadata_hex = "4d010000000001c15f186572676f5f6d657461000000002522757365725f6964223a20223432222c20226970223a20223139322e3136382e312e353022";
+
+    const metadata_bytes = try allocator.alloc(u8, metadata_hex.len / 2);
+    defer allocator.free(metadata_bytes);
+    _ = try std.fmt.hexToBytes(metadata_bytes, metadata_hex);
+
+    var result = try client.parsePgOutput(metadata_bytes);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqualStrings("42", client.context.user_id);
+    try std.testing.expectEqualStrings("192.168.1.50", client.context.ip_address);
+
+    try std.testing.expectEqual(null, result.entry);
+    try std.testing.expectEqual(null, result.commit_lsn);
+    try std.testing.expectEqual(null, result.commit_timestamp);
+}
+
+test "parsePgOutput maps RELATION correctly" {
+}
+
 test "parsePgOutput maps INSERT correctly" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -658,6 +737,8 @@ test "parsePgOutput maps INSERT correctly" {
     var client = try setupMockClient(allocator, io);
     defer client.deinit();
 
+    // INSERT INTO addresses (address_line_1, postal_code, city, country) 
+    // VALUES ('1 Apple Park Way', '95014', 'Cupertino', 'US');
     const insert_hex = "49000040064e0006740000000131740000001031204170706c65205061726b205761796e740000000539353031347400000009437570657274696e6f74000000025553";
 
     const insert_bytes = try allocator.alloc(u8, insert_hex.len / 2);
@@ -687,7 +768,7 @@ test "parsePgOutput maps INSERT correctly" {
 
     try std.testing.expectEqual(true, result.entry.?.changed_columns.get("country").?.has_changes);
     try std.testing.expectEqualStrings("US", result.entry.?.changed_columns.get("country").?.value);
-    
+
     // Old values
     try std.testing.expectEqual(0, result.entry.?.old_values.capacity());
 
@@ -698,6 +779,215 @@ test "parsePgOutput maps INSERT correctly" {
     try std.testing.expectEqualStrings("95014", result.entry.?.new_values.get("postal_code").?);
     try std.testing.expectEqualStrings("Cupertino", result.entry.?.new_values.get("city").?);
     try std.testing.expectEqualStrings("US", result.entry.?.new_values.get("country").?);
+
+    try std.testing.expectEqual(0, client.context.xid);
+    try std.testing.expectEqualStrings("", client.context.ip_address);
+    try std.testing.expectEqualStrings("", client.context.user_id);
+    try std.testing.expectEqual(null, result.commit_lsn);
+    try std.testing.expectEqual(null, result.commit_timestamp);
 }
 
+test "parsePgOutput maps UPDATE correctly" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
 
+    var client = try setupMockClient(allocator, io);
+    defer client.deinit();
+
+    // UPDATE addresses SET 
+    //  address_line_1 = 'Googleplex',
+    //  city = 'Mountain View',
+    //  postal_code = '94043'
+    // WHERE id = 1;
+    const update_hex = "55000040064f0006740000000131740000001031204170706c65205061726b205761796e740000000539353031347400000009437570657274696e6f740000000255534e0006740000000131740000000a476f6f676c65706c65786e74000000053934303433740000000d4d6f756e7461696e205669657774000000025553";
+
+    const update_bytes = try allocator.alloc(u8, update_hex.len / 2);
+    defer allocator.free(update_bytes);
+    _ = try std.fmt.hexToBytes(update_bytes, update_hex);
+
+    var result = try client.parsePgOutput(update_bytes);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(2, result.entry.?.action);
+    try std.testing.expectEqualStrings("public.addresses", result.entry.?.table_name);
+
+    // Changed columns
+    try std.testing.expectEqual(false, result.entry.?.changed_columns.get("id").?.has_changes);
+    try std.testing.expectEqualStrings("1", result.entry.?.changed_columns.get("id").?.value);
+
+    try std.testing.expectEqual(true, result.entry.?.changed_columns.get("address_line_1").?.has_changes);
+    try std.testing.expectEqualStrings("1 Apple Park Way", result.entry.?.changed_columns.get("address_line_1").?.value);
+
+    try std.testing.expectEqual(null, result.entry.?.changed_columns.get("address_line_2"));
+
+    try std.testing.expectEqual(true, result.entry.?.changed_columns.get("postal_code").?.has_changes);
+    try std.testing.expectEqualStrings("95014", result.entry.?.changed_columns.get("postal_code").?.value);
+
+    try std.testing.expectEqual(true, result.entry.?.changed_columns.get("city").?.has_changes);
+    try std.testing.expectEqualStrings("Cupertino", result.entry.?.changed_columns.get("city").?.value);
+
+    try std.testing.expectEqual(false, result.entry.?.changed_columns.get("country").?.has_changes);
+    try std.testing.expectEqualStrings("US", result.entry.?.changed_columns.get("country").?.value);
+
+    // Old values
+    try std.testing.expectEqualStrings("1 Apple Park Way", result.entry.?.old_values.get("address_line_1").?);
+    try std.testing.expectEqual(null, result.entry.?.old_values.get("address_line_2"));
+    try std.testing.expectEqualStrings("95014", result.entry.?.old_values.get("postal_code").?);
+    try std.testing.expectEqualStrings("Cupertino", result.entry.?.old_values.get("city").?);
+    try std.testing.expectEqualStrings("US", result.entry.?.old_values.get("country").?);
+
+    // New values
+    try std.testing.expectEqualStrings("Googleplex", result.entry.?.new_values.get("address_line_1").?);
+    try std.testing.expectEqual(null, result.entry.?.new_values.get("address_line_2"));
+    try std.testing.expectEqualStrings("94043", result.entry.?.new_values.get("postal_code").?);
+    try std.testing.expectEqualStrings("Mountain View", result.entry.?.new_values.get("city").?);
+    try std.testing.expectEqualStrings("US", result.entry.?.new_values.get("country").?);
+
+    try std.testing.expectEqual(0, client.context.xid);
+    try std.testing.expectEqualStrings("", client.context.ip_address);
+    try std.testing.expectEqualStrings("", client.context.user_id);
+    try std.testing.expectEqual(null, result.commit_lsn);
+    try std.testing.expectEqual(null, result.commit_timestamp);
+}
+
+test "parsePgOutput maps DELETE correctly" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var client = try setupMockClient(allocator, io);
+    defer client.deinit();
+
+    // DELETE FROM addresses WHERE id = 1;
+    const delete_hex = "44000040064f0006740000000131740000000a476f6f676c65706c65786e74000000053934303433740000000d4d6f756e7461696e205669657774000000025553";
+
+    const delete_bytes = try allocator.alloc(u8, delete_hex.len / 2);
+    defer allocator.free(delete_bytes);
+    _ = try std.fmt.hexToBytes(delete_bytes, delete_hex);
+
+    var result = try client.parsePgOutput(delete_bytes);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(3, result.entry.?.action);
+    try std.testing.expectEqualStrings("public.addresses", result.entry.?.table_name);
+
+    // Changed columns
+    try std.testing.expectEqual(true, result.entry.?.changed_columns.get("id").?.has_changes);
+    try std.testing.expectEqualStrings("1", result.entry.?.changed_columns.get("id").?.value);
+
+    try std.testing.expectEqual(true, result.entry.?.changed_columns.get("address_line_1").?.has_changes);
+    try std.testing.expectEqualStrings("Googleplex", result.entry.?.changed_columns.get("address_line_1").?.value);
+
+    try std.testing.expectEqual(null, result.entry.?.changed_columns.get("address_line_2"));
+
+    try std.testing.expectEqual(true, result.entry.?.changed_columns.get("postal_code").?.has_changes);
+    try std.testing.expectEqualStrings("94043", result.entry.?.changed_columns.get("postal_code").?.value);
+
+    try std.testing.expectEqual(true, result.entry.?.changed_columns.get("city").?.has_changes);
+    try std.testing.expectEqualStrings("Mountain View", result.entry.?.changed_columns.get("city").?.value);
+
+    try std.testing.expectEqual(true, result.entry.?.changed_columns.get("country").?.has_changes);
+    try std.testing.expectEqualStrings("US", result.entry.?.changed_columns.get("country").?.value);
+
+    // Old values
+    try std.testing.expectEqualStrings("1", result.entry.?.old_values.get("id").?);
+    try std.testing.expectEqualStrings("Googleplex", result.entry.?.old_values.get("address_line_1").?);
+    try std.testing.expectEqual(null, result.entry.?.old_values.get("address_line_2"));
+    try std.testing.expectEqualStrings("94043", result.entry.?.old_values.get("postal_code").?);
+    try std.testing.expectEqualStrings("Mountain View", result.entry.?.old_values.get("city").?);
+    try std.testing.expectEqualStrings("US", result.entry.?.old_values.get("country").?);
+
+    // New values
+    try std.testing.expectEqual(0, result.entry.?.new_values.capacity());
+
+    try std.testing.expectEqual(0, client.context.xid);
+    try std.testing.expectEqualStrings("", client.context.ip_address);
+    try std.testing.expectEqualStrings("", client.context.user_id);
+    try std.testing.expectEqual(null, result.commit_lsn);
+    try std.testing.expectEqual(null, result.commit_timestamp);
+}
+
+test "parsePgOutput maps COMMIT correctly" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var client = try setupMockClient(allocator, io);
+    defer client.deinit();
+
+    const insert_hex = "43000000000001c160880000000001c160b80002f9a2afe34ece";
+    const commit_lsn: u64 = 29450424;
+    const commit_timestamp: u64 = 837427084349134;
+
+    const insert_bytes = try allocator.alloc(u8, insert_hex.len / 2);
+    defer allocator.free(insert_bytes);
+    _ = try std.fmt.hexToBytes(insert_bytes, insert_hex);
+
+    var result = try client.parsePgOutput(insert_bytes);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(0, client.context.xid);
+    try std.testing.expectEqualStrings("", client.context.ip_address);
+    try std.testing.expectEqualStrings("", client.context.user_id);
+    try std.testing.expectEqual(null, result.entry);
+    try std.testing.expectEqual(commit_lsn, result.commit_lsn);
+    try std.testing.expectEqual(commit_timestamp, result.commit_timestamp);
+}
+
+test "resetContext clears context correctly" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var client = try setupMockClient(allocator, io);
+    defer client.deinit();
+
+    client.context.ip_address = "192.168.1.50";
+    client.context.user_id = "42";
+    client.context.xid = 791;
+
+    const commit_hex = "43000000000001c160880000000001c160b80002f9a2afe34ece";
+
+    const commit_bytes = try allocator.alloc(u8, commit_hex.len / 2);
+    defer allocator.free(commit_bytes);
+    _ = try std.fmt.hexToBytes(commit_bytes, commit_hex);
+
+    var result = try client.parsePgOutput(commit_bytes);
+    result.deinit(allocator);
+
+    try std.testing.expectEqual(null, result.entry);
+
+    try std.testing.expectEqual(0, client.context.xid);
+    try std.testing.expectEqualStrings("", client.context.ip_address);
+    try std.testing.expectEqualStrings("", client.context.user_id);
+}
+
+test "parseTupleData" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var client = try setupMockClient(allocator, io);
+    defer client.deinit();
+
+    const commit_hex = "0006740000000131740000001031204170706c65205061726b205761796e740000000539353031347400000009437570657274696e6f74000000025553";
+
+    const commit_bytes = try allocator.alloc(u8, commit_hex.len / 2);
+    defer allocator.free(commit_bytes);
+    _ = try std.fmt.hexToBytes(commit_bytes, commit_hex);
+
+    var reader = std.Io.Reader.fixed(commit_bytes);
+
+    var result = try client.parseTupleData(&reader, client.table_reg.get(16390).?);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqualStrings("1", result.get("id").?);
+    try std.testing.expectEqualStrings("1 Apple Park Way", result.get("address_line_1").?);
+    try std.testing.expectEqual(null, result.get("address_line_2"));
+    try std.testing.expectEqualStrings("95014", result.get("postal_code").?);
+    try std.testing.expectEqualStrings("Cupertino", result.get("city").?);
+    try std.testing.expectEqualStrings("US", result.get("country").?);
+
+    try std.testing.expectEqual(0, client.context.xid);
+    try std.testing.expectEqualStrings("", client.context.ip_address);
+    try std.testing.expectEqualStrings("", client.context.user_id);
+}
+
+test "readSchemaKeys" {
+}
