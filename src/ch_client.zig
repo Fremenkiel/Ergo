@@ -91,8 +91,8 @@ pub const ChClient = struct {
         self.stream = stream;
         self.stream_reader = stream.reader(self.io, &self.read_buf);
 
-        try self.sendHello(self.io);
-        try self.readServerHello(self.io);
+        try self.sendHello();
+        try self.readServerHello();
     }
 
     pub fn disconnect(self: *ChClient, io: std.Io) !void {
@@ -131,7 +131,7 @@ pub const ChClient = struct {
             return ch.ClickHouseError.ProtocolError;
         }
 
-        self.server_info = try ch.server_info.ServerInfo.read(r);
+        self.server_info = try ch.server_info.ServerInfo.read(self.allocator, r);
     }
 
     pub fn startInsert(self: *ChClient, query_str: []const u8) !void {
@@ -188,14 +188,14 @@ pub const ChClient = struct {
             const packet_type = try ch.protocol.readVarInt(r); std.debug.print("startInsert packet: {d}\n", .{packet_type});
             switch (@as(ch.packet.ServerPacket, @enumFromInt(packet_type))) {
                 .Data => {
-                    try self.readBlock(self.io);
+                    try self.readBlock();
                     return; // Schema received, ready for bulk push
                 },
                 .TableColumns => {
-                    const table_name = try ch.protocol.readString(r);
-                    const cols_desc = try ch.protocol.readString(r);
-                    self.allocator.free(table_name);
-                    self.allocator.free(cols_desc);
+                    _ = try ch.protocol.readString(r);
+                    _ = try ch.protocol.readString(r);
+                    // self.allocator.free(table_name);
+                    // self.allocator.free(cols_desc);
                 },
                 .Exception => {
                     const err_code = try r.takeInt(u32, .little);
@@ -229,8 +229,8 @@ pub const ChClient = struct {
         std.debug.print("revision: {d}\n", .{revision});
 
         if (revision >= 50264) {
-            const table_name = try ch.protocol.readString(r);
-            self.allocator.free(table_name);
+            _ = try ch.protocol.readString(r);
+            // self.allocator.free(table_name);
         }
 
         while (true) {
@@ -264,9 +264,6 @@ pub const ChClient = struct {
                     _ = ch_type; _ = col_idx;
                 }
             }
-            
-            self.allocator.free(col_name);
-            self.allocator.free(col_type_str);
         }
     }
 
@@ -281,7 +278,7 @@ pub const ChClient = struct {
                     if (self.current_block == null) {
                         self.current_block = ch.block.Block.init(self.allocator);
                     }
-                    try self.readBlock(self.io);
+                    try self.readBlock();
                     
                     if (self.current_block) |*b| {
                         self.current_result = try ch.results.QueryResult.init(self.allocator, b);
@@ -326,22 +323,23 @@ pub const ChClient = struct {
         }
     }
 
-    pub fn writeLog(self: *@This(), data: [][]types.AuditEntry) !void {
+    pub fn initBulk(self: *@This()) !ch.bulk_insert.BulkInsert {
         var bulk = try ch.BulkInsert.init(self.allocator, "entries", &columns, 1000);
-        defer bulk.deinit();
-
-        std.debug.print("Initialized bulk insert\n", .{});
 
         bulk.setCompression(.LZ4);
 
-        self.startInsert(self.io, "INSERT INTO entries FORMAT Native") catch |err| {
+        self.startInsert("INSERT INTO entries FORMAT Native") catch |err| {
             if (err == error.QueryFailed) {
                 std.debug.print("Query failed: {s}\n", .{self.last_error.?.message});
             }
             return err;
         };
+        return bulk;
+    }
 
-        std.debug.print("Sending data\n", .{});
+    pub fn writeLog(self: *@This(), data: [][]types.AuditEntry) !void {
+        var bulk = try self.initBulk();
+        defer bulk.deinit();
 
         var buf = std.ArrayList(ch.bulk_insert.Value).empty;
         defer buf.deinit(self.allocator);
@@ -357,7 +355,7 @@ pub const ChClient = struct {
             for (data[i]) |row| {
                 const insert_values = self.parseRow(row, &buf, &old_values, &new_values);
 
-                try self.insertRow(bulk, insert_values);
+                try self.insertRow(&bulk, insert_values);
             }
         }
 
@@ -424,7 +422,7 @@ pub const ChClient = struct {
         };
     }
 
-    pub fn insertRow(self: *@This(), bulk: ch.BulkInsert, insert_values: InsertValues) !void {
+    pub fn insertRow(self: *@This(), bulk: *ch.BulkInsert, insert_values: InsertValues) !void {
         const values = [_]ch.bulk_insert.Value{
             .{ .DateTime64 = insert_values.row.event_time },
             .{ .UInt64 = insert_values.row.transaction_id },
@@ -432,16 +430,16 @@ pub const ChClient = struct {
             .{ .LowCardinality = insert_values.row.table_name },
             .{ .Enum8 = insert_values.row.action },
             .{ .String = insert_values.row.primary_key },
-            .{ .Array = insert_values.changed_columns },
-            .{ .Map = insert_values.old_values },
-            .{ .Map = insert_values.new_values },
+            .{ .Array = insert_values.changed_columns.items },
+            .{ .Map = insert_values.old_values.* },
+            .{ .Map = insert_values.new_values.* },
             .{ .IPv4 = insert_values.row.ip_address },
         };
 
         if (try bulk.addRow(&values)) {
             bulk.flush(self.io, self.stream.?) catch |err| {
                 std.debug.print("flush failed: {}\n", .{err});
-                self.processQueryResponse(self.io) catch {};
+                self.processQueryResponse() catch {};
                 if (self.last_error) |e| {
                     std.debug.print("SERVER EXCEPTION: {s}\n", .{e.message});
                 }
@@ -476,14 +474,14 @@ fn setupMockClient(allocator: std.mem.Allocator, io: std.Io) !ChClient {
         .allocator = allocator,
         .io = io,
         .config = undefined,
-        .stream = undefined,
-        .stream_reader = undefined,
+        .stream = null,
+        .stream_reader = null,
         .read_buf = undefined,
-        .current_block = undefined,
-        .current_result = undefined,
-        .server_info = undefined,
-        .query_info = undefined,
-        .last_error = undefined,
+        .current_block = null,
+        .current_result = null,
+        .server_info = null,
+        .query_info = null,
+        .last_error = null,
     };
 }
 
@@ -495,6 +493,7 @@ test "parseRow ensure correct output" {
     client.deinit();
 
     var changed_columns = std.StringHashMap(types.ChangedColumns).init(allocator);
+    defer changed_columns.deinit();
     try changed_columns.ensureUnusedCapacity(1);
 
     try changed_columns.put("id", .{ .has_changes = false, .value = "1" });
@@ -505,6 +504,7 @@ test "parseRow ensure correct output" {
     try changed_columns.put("country", .{ .has_changes = false, .value = "US" });
 
     var new_values = std.StringHashMapUnmanaged([]const u8).empty;
+    defer new_values.deinit(allocator);
     try new_values.ensureUnusedCapacity(allocator, 6);
 
     try new_values.put(allocator, "id", "1");
@@ -515,6 +515,7 @@ test "parseRow ensure correct output" {
     try new_values.put(allocator, "country", "US");
 
     var old_values = std.StringHashMapUnmanaged([]const u8).empty;
+    defer old_values.deinit(allocator);
     try old_values.ensureUnusedCapacity(allocator, 6);
 
     try old_values.put(allocator, "id", "1");
@@ -529,13 +530,14 @@ test "parseRow ensure correct output" {
         .table_name = try allocator.dupe(u8, "addresses"),
         .new_values = new_values,
         .old_values = old_values,
-        .action = 1,
+        .action = 2,
         .changed_columns = changed_columns,
         .transaction_id = 793,
         .user_id = "42",
         .ip_address = "192.168.1.50",
         .primary_key = "1",
     };
+    defer allocator.free(row.table_name);
 
     var row_changed_columns = std.ArrayList(ch.bulk_insert.Value).empty;
     defer row_changed_columns.deinit(allocator);
@@ -549,4 +551,90 @@ test "parseRow ensure correct output" {
     const insert_values = try client.parseRow(row, &row_changed_columns, &row_old_values, &row_new_values);
 
     try std.testing.expectEqual(3, insert_values.changed_columns.items.len);
+    try std.testing.expectEqual(3, insert_values.new_values.count());
+    try std.testing.expectEqual(3, insert_values.old_values.count());
+
+    try std.testing.expectEqualStrings("address_line_1", insert_values.changed_columns.items[0].String);
+    try std.testing.expectEqualStrings("postal_code", insert_values.changed_columns.items[1].String);
+    try std.testing.expectEqualStrings("city", insert_values.changed_columns.items[2].String);
+
+    try std.testing.expectEqualStrings("1 Apple Park Way", insert_values.new_values.get("address_line_1").?);
+    try std.testing.expectEqualStrings("95014", insert_values.new_values.get("postal_code").?);
+    try std.testing.expectEqualStrings("Cupertino", insert_values.new_values.get("city").?);
+
+    try std.testing.expectEqualStrings("Googleplex", insert_values.old_values.get("address_line_1").?);
+    try std.testing.expectEqualStrings("94043", insert_values.old_values.get("postal_code").?);
+    try std.testing.expectEqualStrings("Mountain View", insert_values.old_values.get("city").?);
+
+    try std.testing.expectEqualStrings("42", insert_values.row.user_id);
+    try std.testing.expectEqualStrings("192.168.1.50", insert_values.row.ip_address);
+    try std.testing.expectEqualStrings("1", insert_values.row.primary_key);
+    try std.testing.expectEqualStrings("addresses", insert_values.row.table_name);
+    try std.testing.expectEqual(2, insert_values.row.action);
+    try std.testing.expectEqual(793, insert_values.row.transaction_id);
+    try std.testing.expectEqual(10, insert_values.row.event_time);
+}
+
+test "insertRow ensure correct insertion" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var ch_client = ChClient.init(allocator, io, .{
+        .host = "localhost",
+        .port = 9000,
+        .username = "default",
+        .password = "clickhouse",
+        .database = "audit_log",
+    });
+    defer ch_client.deinit();
+
+    try ch_client.connect();
+
+    var changed_columns = std.ArrayList(ch.bulk_insert.Value).empty;
+    defer changed_columns.deinit(allocator);
+    try changed_columns.ensureUnusedCapacity(allocator, 3);
+
+    changed_columns.appendAssumeCapacity(.{ .String = "address_line_1" });
+    changed_columns.appendAssumeCapacity(.{ .String = "postal_code" });
+    changed_columns.appendAssumeCapacity(.{ .String = "city" });
+
+    var new_values = std.StringHashMap([]const u8).init(allocator);
+    defer new_values.deinit();
+    try new_values.ensureUnusedCapacity(3);
+
+    new_values.putAssumeCapacity("address_line_1", "1 Apple Park Way");
+    new_values.putAssumeCapacity("postal_code", "94043");
+    new_values.putAssumeCapacity("city", "Cupertino");
+
+    var old_values = std.StringHashMap([]const u8).init(allocator);
+    defer old_values.deinit();
+    try old_values.ensureUnusedCapacity(3);
+
+    old_values.putAssumeCapacity("address_line_1", "Googleplex");
+    old_values.putAssumeCapacity("postal_code", "95014");
+    old_values.putAssumeCapacity("city", "Mountain View");
+
+    const values = InsertValues{
+        .changed_columns = &changed_columns,
+        .new_values = &new_values,
+        .old_values = &old_values,
+        .row = .{
+            .event_time = 10,
+            .table_name = try allocator.dupe(u8, "addresses"),
+            .new_values = undefined,
+            .old_values = undefined,
+            .action = 2,
+            .changed_columns = undefined,
+            .transaction_id = 793,
+            .user_id = "42",
+            .ip_address = "192.168.1.50",
+            .primary_key = "1",
+        },
+    };
+    defer allocator.free(values.row.table_name);
+
+    var bulk = try ch_client.initBulk();
+    defer bulk.deinit();
+
+    try ch_client.insertRow(&bulk, values);
 }

@@ -29,16 +29,16 @@ pub fn main(init: std.process.Init) !void {
     });
     errdefer pg_client.deinit();
 
-    var ch_client = ChClient.init(allocator, .{
+    var ch_client = ChClient.init(allocator, io, .{
         .host = "localhost",
         .port = 9000,
         .username = "default",
         .password = "clickhouse",
         .database = "audit_log",
     });
-    defer ch_client.deinit(io);
+    defer ch_client.deinit();
 
-    try ch_client.connect(io);
+    try ch_client.connect();
 
     std.debug.print("calling BulkInsert.init\n", .{});
 

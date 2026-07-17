@@ -47,7 +47,6 @@ pub const ClickHouseType = enum {
 
 pub const TypeInfo = struct {
     base_type: ClickHouseType,
-    precision: ?u8 = null,
     enum_values: ?[]const u8 = null,
     key_type: ?* TypeInfo = null,
     value_type: ?* TypeInfo = null,
@@ -111,25 +110,18 @@ pub const TypeInfo = struct {
         return result;
     }
 
-    pub fn deinit(self: *TypeInfo, allocator: std.mem.Allocator) void {
-        if (self.map_key_type) |key_type| {
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        // if (self.enum_values) |enum_value| {
+        //     allocator.free(enum_value);
+        // }
+        if (self.key_type) |key_type| {
             key_type.deinit(allocator);
             allocator.destroy(key_type);
         }
-        if (self.map_value_type) |value_type| {
+        if (self.value_type) |value_type| {
             value_type.deinit(allocator);
             allocator.destroy(value_type);
         }
-        if (self.low_cardinality_type) |lc_type| {
-            lc_type.deinit(allocator);
-            allocator.destroy(lc_type);
-        }
-        if (self.nested_types) |nested| {
-            for (nested) |*field| {
-                allocator.free(field.name);
-                field.type_info.deinit(allocator);
-            }
-            allocator.free(nested);
-        }
+        
     }
 };

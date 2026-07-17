@@ -63,6 +63,7 @@ pub const BulkInsert = struct {
             column.map_keys.clearRetainingCapacity();
             column.array_offset.clearRetainingCapacity();
             column.key_count = 0;
+            column.type_info.deinit(self.allocator);
         }
         self.allocator.free(self.columns);
         self.allocator.free(self.table);
