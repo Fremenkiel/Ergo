@@ -6,3 +6,5 @@ clean up memory
 tls/SSL
 asserts
 tests
+
+Clean up wal on eof

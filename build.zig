@@ -151,12 +151,21 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_exe_tests.step);
 
+    // PG Client test
     const pg_client_tests = b.addTest(.{
         .root_module = pg_client_module,
     });
     const run_pg_client_tests = b.addRunArtifact(pg_client_tests);
     test_step.dependOn(&run_pg_client_tests.step);
 
+    // CH Client test
+    const ch_client_tests = b.addTest(.{
+        .root_module = ch_client_module,
+    });
+    const run_ch_client_tests = b.addRunArtifact(ch_client_tests);
+    test_step.dependOn(&run_ch_client_tests.step);
+
+    // Wal processor test
     const wal_processor_tests = b.addTest(.{
         .root_module = wal_processor_module,
     });

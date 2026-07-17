@@ -18,23 +18,34 @@ const columns = [10]ch.bulk_insert.ColumnDef{
     .{ .name = "ip_address", .type_str = "IPv4" },
 };
 
+const InsertValues = struct {
+    row: types.AuditEntry,
+    changed_columns: *std.ArrayList(ch.bulk_insert.Value),
+    old_values: *std.StringHashMap([]const u8),
+    new_values: *std.StringHashMap([]const u8),
+};
+
 pub const ChClient = struct {
+    allocator: mem.Allocator,
+    io: std.Io,
+
     config: ch.ClickHouseConfig,
     stream: ?net.Stream,
-    allocator: mem.Allocator,
+    stream_reader: ?net.Stream.Reader = null,
+    read_buf: [8192]u8 = undefined,
+
     current_block: ?ch.block.Block,
     current_result: ?ch.results.QueryResult,
     server_info: ?ch.server_info.ServerInfo,
     query_info: ?ch.query_info.QueryInfo,
     last_error: ?*ch.ch_error.Error,
-    read_buf: [8192]u8 = undefined,
-    stream_reader: ?net.Stream.Reader = null,
 
-    pub fn init(allocator: mem.Allocator, config: ch.ClickHouseConfig) ChClient {
+    pub fn init(allocator: mem.Allocator, io: std.Io, config: ch.ClickHouseConfig) ChClient {
         return .{
+            .allocator = allocator,
+            .io = io,
             .config = config,
             .stream = null,
-            .allocator = allocator,
             .current_block = null,
             .current_result = null,
             .server_info = null,
@@ -43,7 +54,25 @@ pub const ChClient = struct {
         };
     }
 
-    pub fn connect(self: *ChClient, io: Io) !void {
+    pub fn deinit(self: *ChClient) void {
+        if (self.current_result) |*result| {
+            result.deinit();
+        }
+        if (self.current_block) |*b| {
+            b.deinit();
+        }
+        if (self.server_info) |*info| {
+            info.deinit(self.allocator);
+        }
+        if (self.last_error) |err| {
+            err.deinit();
+        }
+        if (self.stream) |stream| {
+            stream.close(self.io);
+        }
+    }
+
+    pub fn connect(self: *ChClient) !void {
         const is_unix = self.config.host.len > 0 and self.config.host[0] == '/';
 
         const stream = try blk: {
@@ -52,18 +81,18 @@ pub const ChClient = struct {
                     return error.UnixPathNotSupported;
                 }
                 const addr: Io.net.UnixAddress = try .init(self.config.host);
-                break :blk addr.connect(io);
+                break :blk addr.connect(self.io);
             }
             const hostname: Io.net.HostName = try .init(self.config.host);
-            break :blk hostname.connect(io, self.config.port, .{ .mode = .stream });
+            break :blk hostname.connect(self.io, self.config.port, .{ .mode = .stream });
         };
-        errdefer stream.close(io);
+        errdefer stream.close(self.io);
 
         self.stream = stream;
-        self.stream_reader = stream.reader(io, &self.read_buf);
+        self.stream_reader = stream.reader(self.io, &self.read_buf);
 
-        try self.sendHello(io);
-        try self.readServerHello(io);
+        try self.sendHello(self.io);
+        try self.readServerHello(self.io);
     }
 
     pub fn disconnect(self: *ChClient, io: std.Io) !void {
@@ -72,9 +101,9 @@ pub const ChClient = struct {
         }
     }
 
-    fn sendHello(self: *ChClient, io: Io) !void {
+    fn sendHello(self: *ChClient) !void {
         var buf: [1024]u8 = undefined;
-        var writer = self.stream.?.writer(io, &buf);
+        var writer = self.stream.?.writer(self.io, &buf);
         var w = &writer.interface;
         
         try ch.packet.writeClientPacketHeader(w, .Hello);
@@ -92,8 +121,7 @@ pub const ChClient = struct {
         try w.flush();
     }
 
-    fn readServerHello(self: *ChClient, io: Io) !void {
-        _ = io;
+    fn readServerHello(self: *ChClient) !void {
         const r = &self.stream_reader.?.interface;
         
         const server_packet = try ch.protocol.readVarInt(r);
@@ -106,7 +134,7 @@ pub const ChClient = struct {
         self.server_info = try ch.server_info.ServerInfo.read(r);
     }
 
-    pub fn startInsert(self: *ChClient, io: std.Io, query_str: []const u8) !void {
+    pub fn startInsert(self: *ChClient, query_str: []const u8) !void {
         if (self.stream == null) {
             return ch.ClickHouseError.ConnectionFailed;
         }
@@ -124,7 +152,7 @@ pub const ChClient = struct {
         self.query_info = ch.query_info.QueryInfo.init();
 
         var write_buf: [4096]u8 = undefined;
-        var writer = self.stream.?.writer(io, &write_buf);
+        var writer = self.stream.?.writer(self.io, &write_buf);
         var w = &writer.interface;
 
         var address_buf: [256]u8 = undefined;
@@ -160,7 +188,7 @@ pub const ChClient = struct {
             const packet_type = try ch.protocol.readVarInt(r); std.debug.print("startInsert packet: {d}\n", .{packet_type});
             switch (@as(ch.packet.ServerPacket, @enumFromInt(packet_type))) {
                 .Data => {
-                    try self.readBlock(io);
+                    try self.readBlock(self.io);
                     return; // Schema received, ready for bulk push
                 },
                 .TableColumns => {
@@ -193,9 +221,8 @@ pub const ChClient = struct {
         }
     }
 
-    pub fn readBlock(self: *ChClient, io: std.Io) !void {
+    pub fn readBlock(self: *ChClient) !void {
         std.debug.print("entering readBlock\n", .{});
-        _ = io;
         var r = &self.stream_reader.?.interface;
         
         const revision = if (self.server_info) |info| info.revision else 0;
@@ -243,7 +270,7 @@ pub const ChClient = struct {
         }
     }
 
-    pub fn processQueryResponse(self: *ChClient, io: std.Io) !void {
+    pub fn processQueryResponse(self: *ChClient) !void {
         var r = &self.stream_reader.?.interface;
         
         while (true) {
@@ -254,7 +281,7 @@ pub const ChClient = struct {
                     if (self.current_block == null) {
                         self.current_block = ch.block.Block.init(self.allocator);
                     }
-                    try self.readBlock(io);
+                    try self.readBlock(self.io);
                     
                     if (self.current_block) |*b| {
                         self.current_result = try ch.results.QueryResult.init(self.allocator, b);
@@ -299,7 +326,7 @@ pub const ChClient = struct {
         }
     }
 
-    pub fn writeLog(self: *@This(), io: std.Io, data: [][]types.AuditEntry) !void {
+    pub fn writeLog(self: *@This(), data: [][]types.AuditEntry) !void {
         var bulk = try ch.BulkInsert.init(self.allocator, "entries", &columns, 1000);
         defer bulk.deinit();
 
@@ -307,7 +334,7 @@ pub const ChClient = struct {
 
         bulk.setCompression(.LZ4);
 
-        self.startInsert(io, "INSERT INTO entries FORMAT Native") catch |err| {
+        self.startInsert(self.io, "INSERT INTO entries FORMAT Native") catch |err| {
             if (err == error.QueryFailed) {
                 std.debug.print("Query failed: {s}\n", .{self.last_error.?.message});
             }
@@ -328,61 +355,16 @@ pub const ChClient = struct {
         var i: u32 = 0;
         while (i < data.len) : (i += 1) {
             for (data[i]) |row| {
-                buf.clearRetainingCapacity();
-                old_values.clearRetainingCapacity();
-                new_values.clearRetainingCapacity();
+                const insert_values = self.parseRow(row, &buf, &old_values, &new_values);
 
-                try buf.ensureUnusedCapacity(self.allocator, row.changed_columns.capacity());
-                if (row.old_values.capacity() > 0) { try old_values.ensureUnusedCapacity(row.changed_columns.capacity()); }
-                if (row.new_values.capacity() > 0) { try new_values.ensureUnusedCapacity(row.changed_columns.capacity()); }
-
-                var it = row.changed_columns.iterator();
-                while (it.next()) |col| {
-                    if (!col.value_ptr.*.has_changes) continue;
-
-                    buf.appendAssumeCapacity(.{ .String = col.key_ptr.* });
-
-                    if (row.old_values.capacity() > 0) {
-                        const val = row.old_values.get(col.key_ptr.*);
-                        try old_values.put(col.key_ptr.*, val.?);
-                    }
-
-                    if (row.new_values.capacity() > 0) {
-                        const val = row.new_values.get(col.key_ptr.*);
-                        try new_values.put(col.key_ptr.*, val.?);
-                    }
-                }
-
-                const values = [_]ch.bulk_insert.Value{
-                    .{ .DateTime64 = row.event_time },
-                    .{ .UInt64 = row.transaction_id },
-                    .{ .String = row.user_id},
-                    .{ .LowCardinality = row.table_name },
-                    .{ .Enum8 = row.action },
-                    .{ .String = row.primary_key },
-                    .{ .Array = buf.items },
-                    .{ .Map = old_values },
-                    .{ .Map = new_values },
-                    .{ .IPv4 = row.ip_address },
-                };
-
-                if (try bulk.addRow(&values)) {
-                    bulk.flush(io, self.stream.?) catch |err| {
-                        std.debug.print("flush failed: {}\n", .{err});
-                        self.processQueryResponse(io) catch {};
-                        if (self.last_error) |e| {
-                            std.debug.print("SERVER EXCEPTION: {s}\n", .{e.message});
-                        }
-                        return err;
-                    };
-                }
+                try self.insertRow(bulk, insert_values);
             }
         }
 
         // Flush any remaining rows
-        bulk.flush(io, self.stream.?) catch |err| {
+        bulk.flush(self.io, self.stream.?) catch |err| {
             std.debug.print("flush failed: {}\n", .{err});
-            self.processQueryResponse(io) catch {};
+            self.processQueryResponse(self.io) catch {};
             if (self.last_error) |e| {
                 std.debug.print("SERVER EXCEPTION: {s}\n", .{e.message});
             }
@@ -391,7 +373,7 @@ pub const ChClient = struct {
 
         std.debug.print("Executed insert\n", .{});
 
-        self.closeStream(io) catch |err| {
+        self.closeStream(self.io) catch |err| {
             std.debug.print("close failed: {}\n", .{err});
             if (self.last_error) |e| {
                 std.debug.print("SERVER EXCEPTION: {s}\n", .{e.message});
@@ -406,9 +388,71 @@ pub const ChClient = struct {
         }
     }
 
-    pub fn closeStream(self: *ChClient, io: std.Io) !void {
+    pub fn parseRow(self: *@This(), row: types.AuditEntry, changed_columns: *std.ArrayList(ch.bulk_insert.Value), old_values: *std.StringHashMap([]const u8), new_values: *std.StringHashMap([]const u8)) !InsertValues {
+        changed_columns.clearRetainingCapacity();
+        old_values.clearRetainingCapacity();
+        new_values.clearRetainingCapacity();
+
+        try changed_columns.ensureUnusedCapacity(self.allocator, row.changed_columns.count());
+        if (row.old_values.count() > 0) { try old_values.ensureUnusedCapacity(row.old_values.count()); }
+        if (row.new_values.count() > 0) { try new_values.ensureUnusedCapacity(row.new_values.count()); }
+
+        var it = row.changed_columns.iterator();
+        while (it.next()) |col| {
+            if (!col.value_ptr.*.has_changes) continue;
+
+            changed_columns.appendAssumeCapacity(.{ .String = col.key_ptr.* });
+
+            if (row.old_values.capacity() > 0) {
+                const val = row.old_values.get(col.key_ptr.*);
+                try old_values.put(col.key_ptr.*, val.?);
+            }
+
+            if (row.new_values.capacity() > 0) {
+                const val = row.new_values.get(col.key_ptr.*);
+                try new_values.put(col.key_ptr.*, val.?);
+            }
+        }
+
+        // TODO: change the type to not contain row
+        // Does not feal right
+        return .{
+            .row = row,
+            .changed_columns = changed_columns,
+            .old_values = old_values,
+            .new_values = new_values,
+        };
+    }
+
+    pub fn insertRow(self: *@This(), bulk: ch.BulkInsert, insert_values: InsertValues) !void {
+        const values = [_]ch.bulk_insert.Value{
+            .{ .DateTime64 = insert_values.row.event_time },
+            .{ .UInt64 = insert_values.row.transaction_id },
+            .{ .String = insert_values.row.user_id},
+            .{ .LowCardinality = insert_values.row.table_name },
+            .{ .Enum8 = insert_values.row.action },
+            .{ .String = insert_values.row.primary_key },
+            .{ .Array = insert_values.changed_columns },
+            .{ .Map = insert_values.old_values },
+            .{ .Map = insert_values.new_values },
+            .{ .IPv4 = insert_values.row.ip_address },
+        };
+
+        if (try bulk.addRow(&values)) {
+            bulk.flush(self.io, self.stream.?) catch |err| {
+                std.debug.print("flush failed: {}\n", .{err});
+                self.processQueryResponse(self.io) catch {};
+                if (self.last_error) |e| {
+                    std.debug.print("SERVER EXCEPTION: {s}\n", .{e.message});
+                }
+                return err;
+            };
+        }
+    }
+
+    pub fn closeStream(self: *ChClient) !void {
         var buf: [1024]u8 = undefined;
-        var writer = self.stream.?.writer(io, &buf);
+        var writer = self.stream.?.writer(self.io, &buf);
         var w = &writer.interface;
 
         try ch.packet.writeClientPacketHeader(w, .Data);
@@ -423,25 +467,86 @@ pub const ChClient = struct {
         try ch.protocol.writeVarInt(w, 0); // num_rows = 0
         try w.flush();
 
-        try self.processQueryResponse(io);
-    }
-
-
-    pub fn deinit(self: *ChClient, io: Io) void {
-        if (self.current_result) |*result| {
-            result.deinit();
-        }
-        if (self.current_block) |*b| {
-            b.deinit();
-        }
-        if (self.server_info) |*info| {
-            info.deinit(self.allocator);
-        }
-        if (self.last_error) |err| {
-            err.deinit();
-        }
-        if (self.stream) |stream| {
-            stream.close(io);
-        }
+        try self.processQueryResponse(self.io);
     }
 };
+
+fn setupMockClient(allocator: std.mem.Allocator, io: std.Io) !ChClient {
+    return .{
+        .allocator = allocator,
+        .io = io,
+        .config = undefined,
+        .stream = undefined,
+        .stream_reader = undefined,
+        .read_buf = undefined,
+        .current_block = undefined,
+        .current_result = undefined,
+        .server_info = undefined,
+        .query_info = undefined,
+        .last_error = undefined,
+    };
+}
+
+test "parseRow ensure correct output" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var client = try setupMockClient(allocator, io);
+    client.deinit();
+
+    var changed_columns = std.StringHashMap(types.ChangedColumns).init(allocator);
+    try changed_columns.ensureUnusedCapacity(1);
+
+    try changed_columns.put("id", .{ .has_changes = false, .value = "1" });
+    try changed_columns.put("address_line_1", .{ .has_changes = true, .value = "Googleplex" });
+    try changed_columns.put("address_line_2", .{ .has_changes = false, .value = "" });
+    try changed_columns.put("postal_code", .{ .has_changes = true, .value = "94043" });
+    try changed_columns.put("city", .{ .has_changes = true, .value = "Mountain View" });
+    try changed_columns.put("country", .{ .has_changes = false, .value = "US" });
+
+    var new_values = std.StringHashMapUnmanaged([]const u8).empty;
+    try new_values.ensureUnusedCapacity(allocator, 6);
+
+    try new_values.put(allocator, "id", "1");
+    try new_values.put(allocator, "address_line_1", "1 Apple Park Way");
+    try new_values.put(allocator, "address_line_2", "");
+    try new_values.put(allocator, "postal_code", "95014");
+    try new_values.put(allocator, "city", "Cupertino");
+    try new_values.put(allocator, "country", "US");
+
+    var old_values = std.StringHashMapUnmanaged([]const u8).empty;
+    try old_values.ensureUnusedCapacity(allocator, 6);
+
+    try old_values.put(allocator, "id", "1");
+    try old_values.put(allocator, "address_line_1", "Googleplex");
+    try old_values.put(allocator, "address_line_2", "");
+    try old_values.put(allocator, "postal_code", "94043");
+    try old_values.put(allocator, "city", "Mountain View");
+    try old_values.put(allocator, "country", "US");
+
+    const row: types.AuditEntry = .{
+        .event_time = 10,
+        .table_name = try allocator.dupe(u8, "addresses"),
+        .new_values = new_values,
+        .old_values = old_values,
+        .action = 1,
+        .changed_columns = changed_columns,
+        .transaction_id = 793,
+        .user_id = "42",
+        .ip_address = "192.168.1.50",
+        .primary_key = "1",
+    };
+
+    var row_changed_columns = std.ArrayList(ch.bulk_insert.Value).empty;
+    defer row_changed_columns.deinit(allocator);
+
+    var row_old_values = std.StringHashMap([]const u8).init(allocator);
+    defer row_old_values.deinit();
+
+    var row_new_values = std.StringHashMap([]const u8).init(allocator);
+    defer row_new_values.deinit();
+
+    const insert_values = try client.parseRow(row, &row_changed_columns, &row_old_values, &row_new_values);
+
+    try std.testing.expectEqual(3, insert_values.changed_columns.items.len);
+}

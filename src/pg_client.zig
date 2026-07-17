@@ -118,7 +118,7 @@ pub const PgClient = struct {
 
         if (self.pool) |pool| {
             pool.deinit();
-            self.allocator.destroy(pool);
+            // self.allocator.destroy(pool);
         }
 
         var it = self.table_reg.valueIterator();
@@ -285,9 +285,11 @@ pub const PgClient = struct {
                 const rel_id = try reader.takeInt(u32, .big);
 
                 const namespace = try self.allocator.dupe(u8, try reader.takeDelimiterExclusive(0));
+                defer self.allocator.free(namespace);
                 _ = try reader.takeByte();
 
                 const rel_name = try self.allocator.dupe(u8, try reader.takeDelimiterExclusive(0));
+                defer self.allocator.free(rel_name);
                 _ = try reader.takeByte();
 
                 const repl_ident = try reader.takeByte();
@@ -313,7 +315,7 @@ pub const PgClient = struct {
                     _ = try reader.takeByte();
 
                     // col name
-                    _ = try self.allocator.dupe(u8, try reader.takeDelimiterExclusive(0));
+                    _ = try reader.takeDelimiterExclusive(0);
                     _ = try reader.takeByte();
 
                     // type_id
@@ -500,7 +502,7 @@ pub const PgClient = struct {
     fn parseTupleData(self: *PgClient, reader: *std.Io.Reader, table: TableDef) !std.StringHashMapUnmanaged([]const u8) {
         const num_columns = try reader.takeInt(u16, .big);
 
-        if (num_columns > table.columns.capacity) {
+        if (num_columns > table.columns.items.len) {
             return error.ColumnMismatch;
         }
 
@@ -557,22 +559,22 @@ pub const PgClient = struct {
         var result = try conn.queryOpts(
         \\ SELECT
 \\   a.attname AS column_name,
-\\   c.contype AS constraint_type
+\\   array_agg(c.contype) AS constraint_types
 \\ FROM pg_constraint c
 \\ JOIN pg_attribute a ON a.attnum = ANY(c.conkey)
 \\   AND a.attrelid = c.conrelid
 \\ WHERE c.conrelid = $1::regclass
-\\   AND c.contype IN ('p', 'f');
+\\ GROUP BY column_name;
         , .{table_name}, .{ .column_names = true });
         defer result.deinit();
 
         var columns = std.ArrayList(ColumnDef).empty;
         const column_name_index = result.columnIndex("column_name").?;
-        const constraint_type_index = result.columnIndex("constraint_type").?;
+        const constraint_types_index = result.columnIndex("constraint_types").?;
         while (try result.next()) |row| {
             const column_name = try row.get([]const u8, column_name_index);
-            const constraint_type = try row.get([]const u8, constraint_type_index);
-            try columns.append(self.allocator, .{ .name = column_name, .is_key = std.mem.eql(u8, constraint_type, "p") });
+            const constraint_types = try row.get([]const u8, constraint_types_index);
+            try columns.append(self.allocator, .{ .name = column_name, .is_key = std.mem.containsAtLeast(u8, constraint_types, 1, "p") });
         }
         return columns;
     }
@@ -728,6 +730,51 @@ test "parsePgOutput maps METADATA correctly" {
 }
 
 test "parsePgOutput maps RELATION correctly" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var client = PgClient{
+        .allocator = allocator,
+        .io = io,
+        .conn_opts = undefined,
+        .last_lsn = 0,
+        .last_timestamp = 0,
+        .context = .{
+            .xid = 0,
+            .user_id = "",
+            .ip_address = "",
+            .primary_key = "",
+            .changed_columns = .init(allocator),
+        },
+        .table_reg = .init(allocator),
+        .wal_conn = null,
+        .pool = try PgClient.createConnPool(allocator, io, .{
+            .connect = .{  
+                .port = 5432,
+                .host = "localhost",
+            },
+            .auth = .{
+                .username = "db_rp",
+                .password = "12345678",
+                .database = "db",
+                .timeout = 10_000,
+            } 
+        }),
+    };
+    defer client.deinit();
+
+    // INSERT INTO addresses (address_line_1, postal_code, city, country) 
+    // VALUES ('1 Apple Park Way', '95014', 'Cupertino', 'US');
+    const insert_hex = "52000040067075626c696300616464726573736573006600060169640000000014ffffffff01616464726573735f6c696e655f3100000004130000010301616464726573735f6c696e655f3200000004130000010301706f7374616c5f636f6465000000041300000014016369747900000004130000010301636f756e747279000000041300000006";
+
+    const insert_bytes = try allocator.alloc(u8, insert_hex.len / 2);
+    defer allocator.free(insert_bytes);
+    _ = try std.fmt.hexToBytes(insert_bytes, insert_hex);
+
+    var result = try client.parsePgOutput(insert_bytes);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(1, client.table_reg.count());
 }
 
 test "parsePgOutput maps INSERT correctly" {
@@ -990,4 +1037,44 @@ test "parseTupleData" {
 }
 
 test "readSchemaKeys" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var client = PgClient{
+        .allocator = allocator,
+        .io = undefined,
+        .context = undefined,
+        .conn_opts = undefined,
+        .last_lsn = undefined,
+        .last_timestamp = undefined,
+        .pool = try PgClient.createConnPool(allocator, io, .{
+            .connect = .{  
+                .port = 5432,
+                .host = "localhost",
+            },
+            .auth = .{
+                .username = "db_rp",
+                .password = "12345678",
+                .database = "db",
+                .timeout = 10_000,
+            } 
+        }),
+        .table_reg = undefined,
+        .wal_conn = null,
+    };
+    defer client.deinit();
+
+    var columns = try client.readSchemaKeys("users");
+    defer columns.deinit(allocator);
+
+    try std.testing.expectEqual(6, columns.items.len);
+
+    for (columns.items) |item|  {
+        if (std.mem.eql(u8, "id", item.name)) { try std.testing.expectEqual(true, item.is_key); }
+        else if (std.mem.eql(u8, "address_id", item.name)) { try std.testing.expectEqual(false, item.is_key); }
+        else if (std.mem.eql(u8, "age", item.name)) { try std.testing.expectEqual(false, item.is_key); }
+        else if (std.mem.eql(u8, "email_address", item.name)) { try std.testing.expectEqual(false, item.is_key); }
+        else if (std.mem.eql(u8, "gender", item.name)) { try std.testing.expectEqual(false, item.is_key); }
+        else if (std.mem.eql(u8, "name", item.name)) { try std.testing.expectEqual(false, item.is_key); }
+    }
 }
