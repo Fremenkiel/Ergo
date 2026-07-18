@@ -30,9 +30,16 @@ pub const ChClient = struct {
     io: std.Io,
 
     config: ch.ClickHouseConfig,
+
     stream: ?net.Stream,
-    stream_reader: ?net.Stream.Reader = null,
+    stream_reader: ?@TypeOf(@as(net.Stream, undefined).reader(@as(Io, undefined), @as(*[8192]u8, undefined))) = null,
+    stream_writer: ?@TypeOf(@as(net.Stream, undefined).writer(@as(Io, undefined), @as(*[4096]u8, undefined))) = null,
+
+    reader: ?*Io.Reader = null,
+    writer: ?*Io.Writer = null,
+
     read_buf: [8192]u8 = undefined,
+    write_buf: [4096]u8 = undefined,
 
     current_block: ?ch.block.Block,
     current_result: ?ch.results.QueryResult,
@@ -89,7 +96,12 @@ pub const ChClient = struct {
         errdefer stream.close(self.io);
 
         self.stream = stream;
-        self.stream_reader = stream.reader(self.io, &self.read_buf);
+
+        self.stream_reader = self.stream.?.reader(self.io, &self.read_buf);
+        self.reader = &self.stream_reader.?.interface;
+
+        self.stream_writer = self.stream.?.writer(self.io, &self.write_buf);
+        self.writer = &self.stream_writer.?.interface;
 
         try self.sendHello();
         try self.readServerHello();
@@ -99,45 +111,71 @@ pub const ChClient = struct {
         if (self.stream) |stream| {
             stream.close(io);
         }
+        self.stream = null;
+        self.reader = null;
+        self.writer = null;
+        
+        self.read_buf = undefined;
+        self.write_buf = undefined;
+    }
+
+    fn ensureStream(self: *@This()) !void {
+        if (self.stream == null) {
+            return ch.ClickHouseError.ConnectionFailed;
+        }
+
+        if (self.stream_reader == null) {
+            self.read_buf = undefined;
+            self.stream_reader = self.stream.?.reader(self.io, &self.read_buf);
+            
+            if (self.stream_reader) |*r| {
+                self.reader = &r.interface;
+            }
+        }
+
+        if (self.stream_writer == null) {
+            self.write_buf = undefined;
+            self.stream_writer = self.stream.?.writer(self.io, &self.write_buf);
+            
+            if (self.stream_writer) |*w| {
+                self.writer = &w.interface;
+            }
+        }
     }
 
     fn sendHello(self: *ChClient) !void {
-        var buf: [1024]u8 = undefined;
-        var writer = self.stream.?.writer(self.io, &buf);
-        var w = &writer.interface;
-        
-        try ch.packet.writeClientPacketHeader(w, .Hello);
-        try ch.protocol.ClientHello.write(w);
-        
-        try w.writeInt(u8, @as(u8, @truncate(self.config.database.len)), .little);
-        try w.writeAll(self.config.database);
-        
-        try w.writeInt(u8, @as(u8, @truncate(self.config.username.len)), .little);
-        try w.writeAll(self.config.username);
-        
-        try w.writeInt(u8, @as(u8, @truncate(self.config.password.len)), .little);
-        try w.writeAll(self.config.password);
+        try self.ensureStream();
 
-        try w.flush();
+        try ch.packet.writeClientPacketHeader(self.writer.?, .Hello);
+        try ch.protocol.ClientHello.write(self.writer.?);
+        
+        try self.writer.?.writeInt(u8, @as(u8, @truncate(self.config.database.len)), .little);
+        try self.writer.?.writeAll(self.config.database);
+        
+        try self.writer.?.writeInt(u8, @as(u8, @truncate(self.config.username.len)), .little);
+        try self.writer.?.writeAll(self.config.username);
+        
+        try self.writer.?.writeInt(u8, @as(u8, @truncate(self.config.password.len)), .little);
+        try self.writer.?.writeAll(self.config.password);
+
+        try self.writer.?.flush();
     }
 
     fn readServerHello(self: *ChClient) !void {
-        const r = &self.stream_reader.?.interface;
-        
-        const server_packet = try ch.protocol.readVarInt(r);
+        try self.ensureStream();
+
+        const server_packet = try ch.protocol.readVarInt(self.reader.?);
 
         std.debug.print("Got {d}, expected {d}\n", .{server_packet, @intFromEnum(ch.packet.ServerPacket.Hello)});
         if (server_packet != @intFromEnum(ch.packet.ServerPacket.Hello)) {
             return ch.ClickHouseError.ProtocolError;
         }
 
-        self.server_info = try ch.server_info.ServerInfo.read(self.allocator, r);
+        self.server_info = try ch.server_info.ServerInfo.read(self.allocator, self.reader.?);
     }
 
     pub fn startInsert(self: *ChClient, query_str: []const u8) !void {
-        if (self.stream == null) {
-            return ch.ClickHouseError.ConnectionFailed;
-        }
+        try self.ensureStream();
 
         if (self.current_result) |*result| {
             result.deinit();
@@ -151,60 +189,51 @@ pub const ChClient = struct {
 
         self.query_info = ch.query_info.QueryInfo.init();
 
-        var write_buf: [4096]u8 = undefined;
-        var writer = self.stream.?.writer(self.io, &write_buf);
-        var w = &writer.interface;
-
         var address_buf: [256]u8 = undefined;
         const address = try std.fmt.bufPrint(&address_buf, "[::ffff:127.0.0.1]:{d}", .{ self.config.port });
 
-        try ch.packet.writeClientPacketHeader(w, .Query);
-        try ch.protocol.ClientInfo.write(w, "", "ClickHouse Zig", self.config.username, address);
-        try ch.protocol.writeString(w, ""); // Empty settings
+        try ch.packet.writeClientPacketHeader(self.writer.?, .Query);
+        try ch.protocol.ClientInfo.write(self.writer.?, "", "ClickHouse Zig", self.config.username, address);
+        try ch.protocol.writeString(self.writer.?, ""); // Empty settings
 
-        try ch.protocol.writeVarInt(w, 2); // stage: Complete
-        try ch.protocol.writeVarInt(w, self.config.settings.compression_method); // compression
+        try ch.protocol.writeVarInt(self.writer.?, 2); // stage: Complete
+        try ch.protocol.writeVarInt(self.writer.?, self.config.settings.compression_method); // compression
 
-        try ch.protocol.writeString(w, query_str);
-
+        try ch.protocol.writeString(self.writer.?, query_str);
 
         // Empty Data Block
-        try ch.packet.writeClientPacketHeader(w, .Data);
-        try ch.protocol.writeString(w, ""); // Block name
+        try ch.packet.writeClientPacketHeader(self.writer.?, .Data);
+        try ch.protocol.writeString(self.writer.?, ""); // Block name
         
-        try ch.protocol.writeVarInt(w, 1); // field: is_overflows
-        try w.writeInt(u8, 0, .little); // is_overflows
-        try ch.protocol.writeVarInt(w, 2); // field: bucket_num
-        try w.writeInt(i32, -1, .little); // bucket_num
-        try ch.protocol.writeVarInt(w, 0); // END
+        try ch.protocol.writeVarInt(self.writer.?, 1); // field: is_overflows
+        try self.writer.?.writeInt(u8, 0, .little); // is_overflows
+        try ch.protocol.writeVarInt(self.writer.?, 2); // field: bucket_num
+        try self.writer.?.writeInt(i32, -1, .little); // bucket_num
+        try ch.protocol.writeVarInt(self.writer.?, 0); // END
         
-        try ch.protocol.writeVarInt(w, 0); // columns = 0
-        try ch.protocol.writeVarInt(w, 0); // rows = 0
-        try w.flush();
-
-        var r = &self.stream_reader.?.interface;
+        try ch.protocol.writeVarInt(self.writer.?, 0); // columns = 0
+        try ch.protocol.writeVarInt(self.writer.?, 0); // rows = 0
+        try self.writer.?.flush();
 
         while (true) {
-            const packet_type = try ch.protocol.readVarInt(r); std.debug.print("startInsert packet: {d}\n", .{packet_type});
+            const packet_type = try ch.protocol.readVarInt(self.reader.?); std.debug.print("startInsert packet: {d}\n", .{packet_type});
             switch (@as(ch.packet.ServerPacket, @enumFromInt(packet_type))) {
                 .Data => {
                     try self.readBlock();
                     return; // Schema received, ready for bulk push
                 },
                 .TableColumns => {
-                    _ = try ch.protocol.readString(r);
-                    _ = try ch.protocol.readString(r);
-                    // self.allocator.free(table_name);
-                    // self.allocator.free(cols_desc);
+                    _ = try ch.protocol.readString(self.reader.?);
+                    _ = try ch.protocol.readString(self.reader.?);
                 },
                 .Exception => {
-                    const err_code = try r.takeInt(u32, .little);
-                    const name = try ch.protocol.readString(r);
+                    const err_code = try self.reader.?.takeInt(u32, .little);
+                    const name = try ch.protocol.readString(self.reader.?);
                     _ = name;
-                    const msg = try ch.protocol.readString(r);
-                    const stack = try ch.protocol.readString(r);
+                    const msg = try ch.protocol.readString(self.reader.?);
+                    const stack = try ch.protocol.readString(self.reader.?);
                     
-                    _ = try r.takeByte();
+                    _ = try self.reader.?.takeByte();
 
                     self.last_error = try ch.ch_error.Error.initWithStack(
                         self.allocator,
@@ -222,37 +251,37 @@ pub const ChClient = struct {
     }
 
     pub fn readBlock(self: *ChClient) !void {
+        try self.ensureStream();
+
         std.debug.print("entering readBlock\n", .{});
-        var r = &self.stream_reader.?.interface;
         
         const revision = if (self.server_info) |info| info.revision else 0;
         std.debug.print("revision: {d}\n", .{revision});
 
         if (revision >= 50264) {
-            _ = try ch.protocol.readString(r);
-            // self.allocator.free(table_name);
+            _ = try ch.protocol.readString(self.reader.?);
         }
 
         while (true) {
-            const field_num = try ch.protocol.readVarInt(r);
+            const field_num = try ch.protocol.readVarInt(self.reader.?);
             if (field_num == 0) break;
             if (field_num == 1) {
-                _ = try r.takeByte(); // is_overflows
+                _ = try self.reader.?.takeByte(); // is_overflows
             } else if (field_num == 2) {
-                _ = try r.takeInt(i32, .little); // bucket_num
+                _ = try self.reader.?.takeInt(i32, .little); // bucket_num
             }
         }
 
-        const num_columns = try ch.protocol.readVarInt(r);
-        const num_rows = try ch.protocol.readVarInt(r);
+        const num_columns = try ch.protocol.readVarInt(self.reader.?);
+        const num_rows = try ch.protocol.readVarInt(self.reader.?);
 
         if (self.current_block) |*b| {
             b.rows = num_rows;
         }
 
         for (0..num_columns) |_| {
-            const col_name = try ch.protocol.readString(r);
-            const col_type_str = try ch.protocol.readString(r);
+            const col_name = try ch.protocol.readString(self.reader.?);
+            const col_type_str = try ch.protocol.readString(self.reader.?);
 
             if (self.current_block) |*b| {
                 const ch_type = try ch.ClickHouseType.fromStr(col_type_str);
@@ -268,10 +297,10 @@ pub const ChClient = struct {
     }
 
     pub fn processQueryResponse(self: *ChClient) !void {
-        var r = &self.stream_reader.?.interface;
-        
+        try self.ensureStream();
+
         while (true) {
-            const packet_type = try ch.protocol.readVarInt(r); std.debug.print("startInsert packet: {d}\n", .{packet_type});
+            const packet_type = try ch.protocol.readVarInt(self.reader.?); std.debug.print("startInsert packet: {d}\n", .{packet_type});
             
             switch (@as(ch.packet.ServerPacket, @enumFromInt(packet_type))) {
                 .Data => {
@@ -285,14 +314,14 @@ pub const ChClient = struct {
                     }
                 },
                 .Progress => {
-                    const prog = try ch.progress.Progress.read(r);
+                    const prog = try ch.progress.Progress.read(self.reader.?);
                     if (self.query_info) |*info| {
                         info.updateProgress(prog);
                     }
                 },
                 .TableColumns => {
-                    const table_name = try ch.protocol.readString(r);
-                    const cols_desc = try ch.protocol.readString(r);
+                    const table_name = try ch.protocol.readString(self.reader.?);
+                    const cols_desc = try ch.protocol.readString(self.reader.?);
                     self.allocator.free(table_name);
                     self.allocator.free(cols_desc);
                 },
@@ -301,13 +330,13 @@ pub const ChClient = struct {
                     return;
                 },
                 .Exception => {
-                    const err_code = try r.takeInt(u32, .little);
-                    const name = try ch.protocol.readString(r);
+                    const err_code = try self.reader.?.takeInt(u32, .little);
+                    const name = try ch.protocol.readString(self.reader.?);
                     _ = name;
-                    const msg = try ch.protocol.readString(r);
-                    const stack = try ch.protocol.readString(r);
+                    const msg = try ch.protocol.readString(self.reader.?);
+                    const stack = try ch.protocol.readString(self.reader.?);
                     
-                    _ = try r.takeByte();
+                    _ = try self.reader.?.takeByte();
 
                     self.last_error = try ch.ch_error.Error.initWithStack(
                         self.allocator,
@@ -323,10 +352,9 @@ pub const ChClient = struct {
         }
     }
 
-    pub fn initBulk(self: *@This()) !ch.bulk_insert.BulkInsert {
-        var bulk = try ch.BulkInsert.init(self.allocator, "entries", &columns, 1000);
-
-        bulk.setCompression(.LZ4);
+    pub fn writeLog(self: *@This(), data: [][]types.AuditEntry) !void {
+        var bulk: ch.BulkInsert = try .init(self.allocator, "entries", &columns, 1000);
+        defer bulk.deinit();
 
         self.startInsert("INSERT INTO entries FORMAT Native") catch |err| {
             if (err == error.QueryFailed) {
@@ -334,12 +362,6 @@ pub const ChClient = struct {
             }
             return err;
         };
-        return bulk;
-    }
-
-    pub fn writeLog(self: *@This(), data: [][]types.AuditEntry) !void {
-        var bulk = try self.initBulk();
-        defer bulk.deinit();
 
         var buf = std.ArrayList(ch.bulk_insert.Value).empty;
         defer buf.deinit(self.allocator);
@@ -449,21 +471,19 @@ pub const ChClient = struct {
     }
 
     pub fn closeStream(self: *ChClient) !void {
-        var buf: [1024]u8 = undefined;
-        var writer = self.stream.?.writer(self.io, &buf);
-        var w = &writer.interface;
+        try self.ensureStream();
 
-        try ch.packet.writeClientPacketHeader(w, .Data);
-        try ch.protocol.writeString(w, ""); // block name
-        try ch.protocol.writeVarInt(w, 1); // is_overflows
-        try w.writeInt(u8, 0, .little);
-        try ch.protocol.writeVarInt(w, 2); // bucket_num
-        try w.writeInt(i32, -1, .little);
-        try ch.protocol.writeVarInt(w, 0); // end block info
+        try ch.packet.writeClientPacketHeader(self.writer.?, .Data);
+        try ch.protocol.writeString(self.writer.?, ""); // block name
+        try ch.protocol.writeVarInt(self.writer.?, 1); // is_overflows
+        try self.writer.?.writeInt(u8, 0, .little);
+        try ch.protocol.writeVarInt(self.writer.?, 2); // bucket_num
+        try self.writer.?.writeInt(i32, -1, .little);
+        try ch.protocol.writeVarInt(self.writer.?, 0); // end block info
 
-        try ch.protocol.writeVarInt(w, 0); // num_columns = 0
-        try ch.protocol.writeVarInt(w, 0); // num_rows = 0
-        try w.flush();
+        try ch.protocol.writeVarInt(self.writer.?, 0); // num_columns = 0
+        try ch.protocol.writeVarInt(self.writer.?, 0); // num_rows = 0
+        try self.writer.?.flush();
 
         try self.processQueryResponse(self.io);
     }
@@ -475,7 +495,7 @@ fn setupMockClient(allocator: std.mem.Allocator, io: std.Io) !ChClient {
         .io = io,
         .config = undefined,
         .stream = null,
-        .stream_reader = null,
+        .reader = null,
         .read_buf = undefined,
         .current_block = null,
         .current_result = null,
@@ -633,8 +653,34 @@ test "insertRow ensure correct insertion" {
     };
     defer allocator.free(values.row.table_name);
 
-    var bulk = try ch_client.initBulk();
+    var bulk: ch.BulkInsert = try .init(allocator, "entries", &columns, 1000);
     defer bulk.deinit();
 
+    ch_client.startInsert("INSERT INTO entries FORMAT Native") catch |err| {
+        if (err == error.QueryFailed) {
+            std.debug.print("Query failed: {s}\n", .{ch_client.last_error.?.message});
+        }
+        return err;
+    };
+
     try ch_client.insertRow(&bulk, values);
+}
+
+test "sendHello ensure correct format" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var client = try setupMockClient(allocator, io);
+    client.deinit();
+
+    client.stream = undefined;
+    client.writer = undefined;
+
+    const buffer = try allocator.alloc(u8, 1024);
+    defer allocator.free(buffer);
+
+    var writer = std.Io.Writer.fixed(buffer);
+    client.writer = &writer;
+
+    try client.sendHello();
 }

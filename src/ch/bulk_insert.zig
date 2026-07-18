@@ -45,7 +45,7 @@ pub const BulkInsert = struct {
             };
         }
 
-        return BulkInsert{
+        var bulk = BulkInsert{
             .allocator = allocator,
             .table = try allocator.dupe(u8, table),
             .columns = columns,
@@ -53,15 +53,28 @@ pub const BulkInsert = struct {
             .current_row = 0,
             .compression_method = .None,
         };
+
+        bulk.setCompression(.LZ4);
+
+        return bulk;
     }
 
     pub fn deinit(self: *BulkInsert) void {
         for (self.columns) |*column| {
             self.allocator.free(column.name);
+
             column.data.clearRetainingCapacity();
+            column.data.deinit(self.allocator);
+            
             column.lc_keys.clearRetainingCapacity();
+            column.lc_keys.deinit();
+
             column.map_keys.clearRetainingCapacity();
+            column.map_keys.deinit(self.allocator);
+
             column.array_offset.clearRetainingCapacity();
+            column.array_offset.deinit(self.allocator);
+
             column.key_count = 0;
             column.type_info.deinit(self.allocator);
         }
