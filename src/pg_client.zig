@@ -2,7 +2,8 @@ const std = @import("std");
 const assert = std.debug.assert;
 
 const pg = @import("pg");
-const types = @import("types");
+
+const types = @import("types.zig");
 
 pub const PgClientError = error{
 PostgresReplicationError,
@@ -30,7 +31,7 @@ pub const EOFReadResponse: ReadResponse = .{
 
 pub const ParseResponse = struct {
     entry: ?types.AuditEntry,
-    commit_lsn: ?u64,
+    last_lsn: ?u64,
     commit_timestamp: ?u64,
 
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
@@ -156,7 +157,6 @@ pub const PgClient = struct {
             return PgClientError.WalConnectionNotInitialized;
         }
 
-        std.debug.print("Sent START_REPLICATION. Waiting for stream...\n", .{});
         try self.startFlow();
     }
 
@@ -172,7 +172,7 @@ pub const PgClient = struct {
 
         switch (msg.type) {
             'W' => {
-                std.debug.print("Server entered COPY BOTH mode.\n", .{});
+                // Server entered COPY BOTH mode,
             },
             'd' => {
                 if (msg.data.len == 0) return response;
@@ -190,7 +190,7 @@ pub const PgClient = struct {
 
                     const parse_response = try self.parsePgOutput(payload);
 
-                    if (parse_response.commit_lsn) |lsn| {
+                    if (parse_response.last_lsn) |lsn| {
                         response.commit_timestamp = pgWalToClickHouseMs(parse_response.commit_timestamp.?);
                         if (lsn > self.last_lsn) {
                             self.last_lsn = lsn;
@@ -204,8 +204,6 @@ pub const PgClient = struct {
                     if (parse_response.entry) |entry| {
                         response.entry = entry;
                     }
-
-                    std.debug.print("Received WAL Data (start_lsn: {x}, last_lsn: {x})\n", .{start_lsn, self.last_lsn});
 
                     // Proactively acknowledge this processed WAL chunk
                     try self.wal_conn.?.sendStandbyStatusUpdate(self.last_lsn, self.last_timestamp);
@@ -222,8 +220,6 @@ pub const PgClient = struct {
                     if (server_timestamp > self.last_timestamp) {
                         self.last_timestamp = server_timestamp;
                     }
-
-                    std.debug.print("Received Keepalive (LSN: {x}, Reply: {d})\n", .{current_lsn, reply_requested});
 
                     if (reply_requested == 1) {
                         try self.wal_conn.?.sendStandbyStatusUpdate(self.last_lsn, self.last_timestamp);
@@ -244,7 +240,7 @@ pub const PgClient = struct {
 
     pub fn parsePgOutput(self: *PgClient, payload: []const u8) !ParseResponse {
         var response = ParseResponse{
-            .commit_lsn = null,
+            .last_lsn = null,
             .commit_timestamp = null,
             .entry = null,
         };
@@ -257,24 +253,21 @@ pub const PgClient = struct {
 
         switch (msg_type) {
             'B' => {
-                std.debug.print("\n--- COPY THIS HEX FROR BEGIN ---\n{x}\n---------------------\n", .{payload});
-                const final_lsn = try reader.takeInt(u64, .big);
+                // final lsn
+                _ = try reader.takeInt(u64, .big);
                 const commit_timestamp = try reader.takeInt(u64, .big);
                 const xid = try reader.takeInt(u32, .big);
                 self.context.xid = xid;
 
                 _ = commit_timestamp;
-                std.debug.print("BEGIN: xid={d}, lsn={x}\n", .{xid, final_lsn});
             },
             'C' => {
-                std.debug.print("\n--- COPY THIS HEX FROR COMMIT ---\n{x}\n---------------------\n", .{payload});
                 // flags
                 _ = try reader.takeByte();
-                const commit_lsn = try reader.takeInt(u64, .big);
-                response.commit_lsn = try reader.takeInt(u64, .big);
+                // lsn of commit
+                _ = try reader.takeInt(u64, .big);
+                response.last_lsn = try reader.takeInt(u64, .big);
                 response.commit_timestamp = try reader.takeInt(u64, .big);
-
-                std.debug.print("COMMIT: lsn={x}\n", .{commit_lsn});
 
                 self.resetContext();
 
@@ -295,7 +288,6 @@ pub const PgClient = struct {
                 const repl_ident = try reader.takeByte();
                 _ = repl_ident;
 
-                std.debug.print("\n--- COPY THIS HEX FROR RELATION ---\n{x}\n---------------------\n", .{payload});
                 const num_columns = try reader.takeInt(u16, .big);
                 const table_name = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{namespace, rel_name});
                 defer self.allocator.free(table_name);
@@ -331,9 +323,6 @@ pub const PgClient = struct {
                     .columns = columns,
                 });
 
-                std.debug.print("RELATION: {s}.{s} (ID: {d}\n", .{
-                    namespace, rel_name, rel_id
-                });
             },
             'I' => {
                 const rel_id = try reader.takeInt(u32, .big);
@@ -343,10 +332,8 @@ pub const PgClient = struct {
                     std.debug.print("Error: Received insert with invalid tuple type: {c}\n", .{tuple_type});
                 }
 
-                std.debug.print("\n--- COPY THIS HEX FROR INSERT ---\n{x}\n---------------------\n", .{payload});
 
                 if (self.table_reg.get(rel_id)) |table| {
-                    std.debug.print("INSERT INTO {s}.{s}:\n", .{table.namespace, table.name});
                     const new_values = try self.parseTupleData(&reader, table);
 
                     response.entry = types.AuditEntry{
@@ -371,19 +358,15 @@ pub const PgClient = struct {
                 var tuple_type = try reader.takeByte();
 
                 if (self.table_reg.get(rel_id)) |table| {
-                    std.debug.print("UPDATE {s}.{s}:\n", .{table.namespace, table.name});
                     var old_values: std.StringHashMapUnmanaged([]const u8) = .empty;
 
                     if (tuple_type == 'O' or tuple_type == 'K') {
-                        std.debug.print("   -> Has Old/Key Data ({c}):\n", .{tuple_type});
                         old_values = try self.parseTupleData(&reader, table);
 
                         tuple_type = try reader.takeByte();
                     }
-                    std.debug.print("\n--- COPY THIS HEX FROR UPDATE ---\n{x}\n---------------------\n", .{payload});
 
                     if (tuple_type == 'N') {
-                        std.debug.print("   -> Has new data (N):\n", .{});
                         const new_values = try self.parseTupleData(&reader, table);
                         response.entry = types.AuditEntry{
                             .event_time = undefined,
@@ -398,7 +381,7 @@ pub const PgClient = struct {
                             .primary_key = self.context.primary_key,
                         };
                     } else {
-                        std.debug.print("   -> Expected 'N', got '{c}'\n", .{tuple_type});
+                        std.debug.print("Error: Expected 'N', got '{c}'\n", .{tuple_type});
                     }
                 } else {
                     std.debug.print("Error: Received update for unknown relation ID {d}\n", .{rel_id});
@@ -412,9 +395,7 @@ pub const PgClient = struct {
                 const tuple_type = try reader.takeByte();
 
                 if (self.table_reg.get(rel_id)) |table| {
-                    std.debug.print("DELETE FROM {s}.{s}:\n", .{table.namespace, table.name});
                     if (tuple_type == 'O' or tuple_type == 'K') {
-                        std.debug.print("-> Deleted data ({c}):\n", .{tuple_type});
                         const old_values = try self.parseTupleData(&reader, table);
                         response.entry = types.AuditEntry{
                             .event_time = undefined,
@@ -429,7 +410,7 @@ pub const PgClient = struct {
                             .primary_key = self.context.primary_key,
                         };
                     } else {
-                        std.debug.print("   -> Expected 'O' or 'K', got '{c}'\n", .{tuple_type});
+                        std.debug.print("Error: Expected 'O' or 'K', got '{c}'\n", .{tuple_type});
                     }
                 } else {
                     std.debug.print("Error: Received delete for unknown relation ID {d}\n", .{rel_id});
@@ -445,14 +426,12 @@ pub const PgClient = struct {
                 _ = try reader.takeByte();
 
                 const content_len = try reader.takeInt(u32, .big);
-                std.debug.print("METADATA prefix received: {s}\n", .{prefix});
 
                 const content = try reader.take(content_len);
 
                 _ = flags;
                 _ = lsn;
                 if (std.mem.eql(u8, prefix, "ergo_meta")) {
-                    std.debug.print("\n--- COPY THIS HEX FROR META ---\n{x}\n---------------------\n", .{payload});
                     var it = std.mem.splitAny(u8, content, ",");
 
                     const user_id_str = it.next() orelse return error.InvalidMapType;
@@ -487,8 +466,6 @@ pub const PgClient = struct {
 
                     self.context.user_id = try self.allocator.dupe(u8, user_id_value);
                     self.context.ip_address = try self.allocator.dupe(u8, ip_address_value);
-
-                    std.debug.print("METADATA RECEIVED: {s}\n", .{content});
                 }
             },
             else => {
@@ -506,8 +483,6 @@ pub const PgClient = struct {
             return error.ColumnMismatch;
         }
 
-        std.debug.print("   Row data ({d} columns):\n", .{num_columns});
-
         var changes = std.StringHashMapUnmanaged([]const u8).empty;
 
         for (table.columns.items) |col| {
@@ -517,10 +492,10 @@ pub const PgClient = struct {
 
             switch (col_type) {
                 'n' => {
-                    std.debug.print("   {s}: NULL\n", .{col_name});
+                    // Null
                 },
                 'u' => {
-                    std.debug.print("   {s}: Unchanged TOAST value\n", .{col_name});
+                    // Unchanged TOAST
                 },
                 't' => {
                     const col_len = try reader.takeInt(u32, .big);
@@ -542,8 +517,6 @@ pub const PgClient = struct {
                     if (is_pk) {
                         self.context.primary_key = val_buf;
                     }
-
-                    std.debug.print("   {s}: {s}\n", .{col_name, val_buf});
                 },
                 else => return error.UnknownTupleFormat,
             }
@@ -696,7 +669,7 @@ test "parsePgOutput maps BEGIN correctly" {
     try std.testing.expectEqualStrings("", client.context.ip_address);
     try std.testing.expectEqualStrings("", client.context.user_id);
     try std.testing.expectEqual(null, result.entry);
-    try std.testing.expectEqual(null, result.commit_lsn);
+    try std.testing.expectEqual(null, result.last_lsn);
     try std.testing.expectEqual(null, result.commit_timestamp);
 }
 
@@ -725,7 +698,7 @@ test "parsePgOutput maps METADATA correctly" {
     try std.testing.expectEqualStrings("192.168.1.50", client.context.ip_address);
 
     try std.testing.expectEqual(null, result.entry);
-    try std.testing.expectEqual(null, result.commit_lsn);
+    try std.testing.expectEqual(null, result.last_lsn);
     try std.testing.expectEqual(null, result.commit_timestamp);
 }
 
@@ -830,7 +803,7 @@ test "parsePgOutput maps INSERT correctly" {
     try std.testing.expectEqual(0, client.context.xid);
     try std.testing.expectEqualStrings("", client.context.ip_address);
     try std.testing.expectEqualStrings("", client.context.user_id);
-    try std.testing.expectEqual(null, result.commit_lsn);
+    try std.testing.expectEqual(null, result.last_lsn);
     try std.testing.expectEqual(null, result.commit_timestamp);
 }
 
@@ -893,7 +866,7 @@ test "parsePgOutput maps UPDATE correctly" {
     try std.testing.expectEqual(0, client.context.xid);
     try std.testing.expectEqualStrings("", client.context.ip_address);
     try std.testing.expectEqualStrings("", client.context.user_id);
-    try std.testing.expectEqual(null, result.commit_lsn);
+    try std.testing.expectEqual(null, result.last_lsn);
     try std.testing.expectEqual(null, result.commit_timestamp);
 }
 
@@ -949,7 +922,7 @@ test "parsePgOutput maps DELETE correctly" {
     try std.testing.expectEqual(0, client.context.xid);
     try std.testing.expectEqualStrings("", client.context.ip_address);
     try std.testing.expectEqualStrings("", client.context.user_id);
-    try std.testing.expectEqual(null, result.commit_lsn);
+    try std.testing.expectEqual(null, result.last_lsn);
     try std.testing.expectEqual(null, result.commit_timestamp);
 }
 
@@ -961,7 +934,7 @@ test "parsePgOutput maps COMMIT correctly" {
     defer client.deinit();
 
     const insert_hex = "43000000000001c160880000000001c160b80002f9a2afe34ece";
-    const commit_lsn: u64 = 29450424;
+    const last_lsn: u64 = 29450424;
     const commit_timestamp: u64 = 837427084349134;
 
     const insert_bytes = try allocator.alloc(u8, insert_hex.len / 2);
@@ -975,7 +948,7 @@ test "parsePgOutput maps COMMIT correctly" {
     try std.testing.expectEqualStrings("", client.context.ip_address);
     try std.testing.expectEqualStrings("", client.context.user_id);
     try std.testing.expectEqual(null, result.entry);
-    try std.testing.expectEqual(commit_lsn, result.commit_lsn);
+    try std.testing.expectEqual(last_lsn, result.last_lsn);
     try std.testing.expectEqual(commit_timestamp, result.commit_timestamp);
 }
 

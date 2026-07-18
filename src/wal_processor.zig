@@ -1,8 +1,9 @@
 const std = @import("std");
-const types = @import("types");
 
 const pg = @import("pg");
-const pg_client = @import("pg_client");
+
+const types = @import("types.zig");
+const pg_client = @import("pg_client.zig");
 
 pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
     return struct {
@@ -38,7 +39,7 @@ pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
                 var response = try self.pg_client.readWAL();
 
                 if (response.eof) {
-                    try self.ch_client.writeLog(self.io, self.log_array.items());
+                    try self.ch_client.writeLog(self.log_array.items());
 
                     return;
                 }
@@ -61,7 +62,7 @@ pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
                 }
 
                 if (self.last_write_timestamp.addDuration(self.duration).toMilliseconds() < std.Io.Clock.real.now(self.io).toMilliseconds() and !self.uncommited_changes and self.log_array.items().len > 0) {
-                    try self.ch_client.writeLog(self.io, self.log_array.items());
+                    try self.ch_client.writeLog(self.log_array.items());
                     self.log_array.free(self.allocator);
 
                     self.last_write_timestamp = std.Io.Clock.real.now(self.io);
@@ -135,9 +136,7 @@ const MockChClient = struct {
         self.written_logs.deinit(self.allocator);
     }
 
-    pub fn writeLog(self: *@This(), io: std.Io, entries: [][]types.AuditEntry) !void {
-        _ = io;
-
+    pub fn writeLog(self: *@This(), entries: [][]types.AuditEntry) !void {
         for (entries) |slice| {
             var copy_slice = try self.allocator.alloc(types.AuditEntry, slice.len);
 

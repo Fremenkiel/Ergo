@@ -13,14 +13,6 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    // Types
-    const types = b.createModule(.{
-        .root_source_file = b.path("src/types.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    exe.root_module.addImport("types", types);
-
     const buffer_dep = b.dependency("buffer", .{
         .target = target,
         .optimize = optimize,
@@ -45,18 +37,6 @@ pub fn build(b: *std.Build) void {
     });
     ch_module.addIncludePath(b.path("deps/lz4/lib"));
     exe.root_module.addImport("ch", ch_module);
-
-    // CH Client
-    const ch_client_module = b.createModule(.{
-        .root_source_file = b.path("src/ch_client.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "ch", .module = ch_module },
-            .{ .name = "types", .module = types },
-        }
-    });
-    exe.root_module.addImport("ch_client", ch_client_module);
 
     // Pg Module
     const openssl_lib_name = b.option([]const u8, "openssl_lib_name", "");
@@ -108,31 +88,6 @@ pub fn build(b: *std.Build) void {
     }
     exe.root_module.addImport("pg", pg_module);
 
-    // PG Client
-    const pg_client_module = b.createModule(.{
-        .root_source_file = b.path("src/pg_client.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "pg", .module = pg_module },
-            .{ .name = "types", .module = types },
-        }
-    });
-    exe.root_module.addImport("pg_client", pg_client_module);
-
-    // Wal processor
-    const wal_processor_module = b.createModule(.{
-        .root_source_file = b.path("src/wal_processor.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "pg", .module = pg_module },
-            .{ .name = "types", .module = types },
-            .{ .name = "pg_client", .module = pg_client_module },
-        }
-    });
-    exe.root_module.addImport("wal_processor", wal_processor_module);
-
     b.installArtifact(exe);
 
     const run_step = b.step("run", "Run the app");
@@ -151,43 +106,17 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_exe_tests.step);
 
-    // PG Client test
-    const pg_client_tests = b.addTest(.{
-        .root_module = pg_client_module,
+    // CH test
+    const ch_tests = b.addTest(.{
+        .root_module = ch_module,
     });
-    const run_pg_client_tests = b.addRunArtifact(pg_client_tests);
-    test_step.dependOn(&run_pg_client_tests.step);
+    const run_ch_tests = b.addRunArtifact(ch_tests);
+    test_step.dependOn(&run_ch_tests.step);
 
-    // CH Client test
-    const ch_client_tests = b.addTest(.{
-        .root_module = ch_client_module,
-    });
-    const run_ch_client_tests = b.addRunArtifact(ch_client_tests);
-    test_step.dependOn(&run_ch_client_tests.step);
-
-    // Wal processor test
-    const wal_processor_tests = b.addTest(.{
-        .root_module = wal_processor_module,
-    });
-    const run_wal_processor_tests = b.addRunArtifact(wal_processor_tests);
-    test_step.dependOn(&run_wal_processor_tests.step);
-
-    const bench = b.addExecutable(.{
-        .name = "ergo_bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/clickhouse_integration.zig"),
-            .target = target,
-            .optimize = .ReleaseFast,
-            .imports = &.{
-                .{ .name = "ch", .module = ch_module },
-                .{ .name = "ch_module", .module = ch_client_module },
-            }
-        }),
-    });
-
-    const run_bench_tests = b.addRunArtifact(bench);
-
-    const bench_step = b.step("bench", "Run ClickHouse connection benchmarks");
-    bench_step.dependOn(&run_bench_tests.step);
-    run_cmd.step.dependOn(b.getInstallStep());
+    // PG test
+    // const pg_tests = b.addTest(.{
+    //     .root_module = pg_module,
+    // });
+    // const run_pg_tests = b.addRunArtifact(pg_tests);
+    // test_step.dependOn(&run_pg_tests.step);
 }

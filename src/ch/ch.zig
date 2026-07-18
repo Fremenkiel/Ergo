@@ -1,3 +1,5 @@
+const std = @import("std");
+
 pub const protocol = @import("protocol.zig");
 pub const packet = @import("packet.zig");
 pub const block = @import("block.zig");
@@ -36,3 +38,6 @@ pub const ClickHouseConfig = struct {
     settings: settings.Settings = .{},
 };
 
+test "run all ch module tests" {
+    std.testing.refAllDecls(@This());
+}
