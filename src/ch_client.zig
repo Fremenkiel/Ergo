@@ -46,9 +46,7 @@ pub const ChClient = struct {
     write_buf: [4096]u8 = undefined,
 
     current_block: ?ch.block.Block,
-    current_result: ?ch.results.QueryResult,
     server_info: ?ch.server_info.ServerInfo,
-    query_info: ?ch.query_info.QueryInfo,
     last_error: ?*ch.ch_error.Error,
 
     pub fn init(allocator: mem.Allocator, io: std.Io, config: ch.ClickHouseConfig, os_user: []const u8) ChClient {
@@ -58,18 +56,13 @@ pub const ChClient = struct {
             .config = config,
             .stream = null,
             .current_block = null,
-            .current_result = null,
             .server_info = null,
-            .query_info = null,
             .last_error = null,
             .os_user = os_user,
         };
     }
 
     pub fn deinit(self: *ChClient) void {
-        if (self.current_result) |*result| {
-            result.deinit();
-        }
         if (self.current_block) |*b| {
             b.deinit();
         }
@@ -208,7 +201,6 @@ pub const ChClient = struct {
                 const col_name = try ch.protocol.readString(self.reader.?);
                 const col_type_str = try ch.protocol.readString(self.reader.?);
 
-                _ = try ch.ClickHouseType.fromStr(col_type_str);
                 try b.addColumn(col_name, col_type_str);
             }
         }
@@ -216,18 +208,6 @@ pub const ChClient = struct {
 
     pub fn startInsert(self: *ChClient, query_str: []const u8) !void {
         try self.ensureStream();
-
-        if (self.current_result) |*result| {
-            result.deinit();
-            self.current_result = null;
-        }
-
-        if (self.query_info) |*info| {
-            _ = info;
-            self.query_info = null;
-        }
-
-        self.query_info = ch.query_info.QueryInfo.init();
 
         const address = try std.fmt.allocPrint(self.allocator, "[::ffff:127.0.0.1]:{d}", .{ self.config.port });
         defer self.allocator.free(address);
@@ -309,34 +289,29 @@ pub const ChClient = struct {
                         self.current_block = ch.block.Block.init(self.allocator);
                     }
                     try self.readBlock();
-                    
-                    if (self.current_block) |*b| {
-                        self.current_result = try ch.results.QueryResult.init(self.allocator, b);
-                    }
                 },
                 .Progress => {
-                    const prog = try ch.progress.Progress.read(self.reader.?);
-                    if (self.query_info) |*info| {
-                        info.updateProgress(prog);
-                    }
+                    _ = try self.reader.?.takeInt(u64, .little); // rows
+                    _ = try self.reader.?.takeInt(u64, .little); // bytes
+                    _ = try self.reader.?.takeInt(u64, .little); // total_rows
+                    _ = try self.reader.?.takeInt(u64, .little); // written_rows
+                    _ = try self.reader.?.takeInt(u64, .little); // written_bytes
+                    _ = try self.reader.?.takeInt(u64, .little); // elapsed_ns
                 },
                 .TableColumns => {
-                    const table_name = try ch.protocol.readString(self.reader.?);
-                    const cols_desc = try ch.protocol.readString(self.reader.?);
-                    self.allocator.free(table_name);
-                    self.allocator.free(cols_desc);
+                    _ = try ch.protocol.readString(self.reader.?);
+                    _ = try ch.protocol.readString(self.reader.?);
                 },
                 .EndOfStream => {
                     return;
                 },
                 .Exception => {
                     const err_code = try self.reader.?.takeInt(u32, .little);
-                    const name = try ch.protocol.readString(self.reader.?);
-                    _ = name;
+                    _ = try ch.protocol.readString(self.reader.?);
                     const msg = try ch.protocol.readString(self.reader.?);
                     const stack = try ch.protocol.readString(self.reader.?);
                     
-                    _ = try self.reader.?.takeByte();
+                    _ = try self.reader.?.takeByte(); // has_nested
 
                     self.last_error = try ch.ch_error.Error.initWithStack(
                         self.allocator,
@@ -485,6 +460,7 @@ pub const ChClient = struct {
     }
 };
 
+// Tests
 fn setupMockClient(allocator: std.mem.Allocator, io: std.Io) !ChClient {
     return .{
         .allocator = allocator,
@@ -502,12 +478,72 @@ fn setupMockClient(allocator: std.mem.Allocator, io: std.Io) !ChClient {
         .reader = null,
         .writer = null,
         .current_block = null,
-        .current_result = null,
         .server_info = null,
-        .query_info = null,
         .last_error = null,
         .os_user = "kswa",
     };
+}
+
+fn setupFixedReaderWriterMockClient(allocator: std.mem.Allocator, io: std.Io) !ChClient {
+    var client = try setupMockClient(allocator, io);
+
+    const buffer = try allocator.alloc(u8, 4096);
+
+    client.reader = try allocator.create(std.Io.Reader);
+    client.reader.?.* = std.Io.Reader.fixed(buffer);
+
+    client.writer = try allocator.create(std.Io.Writer);
+    client.writer.?.* = std.Io.Writer.fixed(buffer);
+
+    return client;
+}
+
+fn teardownFixedReaderWriterMockClient(allocator: std.mem.Allocator, client: *ChClient) void {
+    if (client.writer) |w| {
+        allocator.free(w.buffer);
+        allocator.destroy(w);
+    }
+    if (client.reader) |r| {
+        allocator.destroy(r);
+    }
+    client.deinit();
+}
+
+fn writeMockDataBlock(client: *ChClient) !void {
+    try ch.protocol.writeVarInt(client.writer.?, 1);
+    try client.writer.?.writeByte(0); // is_overflows
+
+    try ch.protocol.writeVarInt(client.writer.?, 2);
+    try client.writer.?.writeInt(i32, 0, .little); // bucket_num
+    
+    try ch.protocol.writeVarInt(client.writer.?, 0);
+
+    const num_columns = 10;
+    const num_rows = 26;
+
+    try ch.protocol.writeVarInt(client.writer.?, num_columns);
+    try ch.protocol.writeVarInt(client.writer.?, num_rows);
+
+    try ch.protocol.writeString(client.writer.?, columns[0].name);
+    try ch.protocol.writeString(client.writer.?, columns[0].type_str);
+    try ch.protocol.writeString(client.writer.?, columns[1].name);
+    try ch.protocol.writeString(client.writer.?, columns[1].type_str);
+    try ch.protocol.writeString(client.writer.?, columns[2].name);
+    try ch.protocol.writeString(client.writer.?, columns[2].type_str);
+    try ch.protocol.writeString(client.writer.?, columns[3].name);
+    try ch.protocol.writeString(client.writer.?, columns[3].type_str);
+    try ch.protocol.writeString(client.writer.?, columns[4].name);
+    try ch.protocol.writeString(client.writer.?, columns[4].type_str);
+    try ch.protocol.writeString(client.writer.?, columns[5].name);
+    try ch.protocol.writeString(client.writer.?, columns[5].type_str);
+    try ch.protocol.writeString(client.writer.?, columns[6].name);
+    try ch.protocol.writeString(client.writer.?, columns[6].type_str);
+    try ch.protocol.writeString(client.writer.?, columns[7].name);
+    try ch.protocol.writeString(client.writer.?, columns[7].type_str);
+    try ch.protocol.writeString(client.writer.?, columns[8].name);
+    try ch.protocol.writeString(client.writer.?, columns[8].type_str);
+    try ch.protocol.writeString(client.writer.?, columns[9].name);
+    try ch.protocol.writeString(client.writer.?, columns[9].type_str);
 }
 
 test "ensureStream recover lost connect" {
@@ -536,20 +572,8 @@ test "sendHello ensure correct encoding" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
 
-    var client = try setupMockClient(allocator, io);
-    defer client.deinit();
-
-    const read_buffer = try allocator.alloc(u8, 4096);
-    defer allocator.free(read_buffer);
-
-    const write_buffer = try allocator.alloc(u8, 4096);
-    defer allocator.free(write_buffer);
-
-    var reader = std.Io.Reader.fixed(write_buffer);
-    client.reader = &reader;
-
-    var writer = std.Io.Writer.fixed(write_buffer);
-    client.writer = &writer;
+    var client = try setupFixedReaderWriterMockClient(allocator, io);
+    defer teardownFixedReaderWriterMockClient(allocator, &client);
 
     try client.sendHello();
 
@@ -591,20 +615,8 @@ test "readServerHello ensure correct decoding" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
 
-    var client = try setupMockClient(allocator, io);
-    defer client.deinit();
-
-    const read_buffer = try allocator.alloc(u8, 4096);
-    defer allocator.free(read_buffer);
-
-    const write_buffer = try allocator.alloc(u8, 4096);
-    defer allocator.free(write_buffer);
-
-    var reader = std.Io.Reader.fixed(write_buffer);
-    client.reader = &reader;
-
-    var writer = std.Io.Writer.fixed(write_buffer);
-    client.writer = &writer;
+    var client = try setupFixedReaderWriterMockClient(allocator, io);
+    defer teardownFixedReaderWriterMockClient(allocator, &client);
 
     const server_name = "Test ch server";
     const major_version: u64 = 1;
@@ -627,6 +639,7 @@ test "readServerHello ensure correct decoding" {
     try client.readServerHello();
 
     try std.testing.expect(client.server_info != null);
+    try std.testing.expectEqual(client.writer.?.end, client.reader.?.seek);
     try std.testing.expectEqualStrings(server_name, client.server_info.?.name);
     try std.testing.expectEqual(major_version, client.server_info.?.major_version);
     try std.testing.expectEqual(minor_version, client.server_info.?.minor_version);
@@ -661,10 +674,180 @@ test "startInsert ensure correct query info" {
     try std.testing.expect(client.current_block == null);
 }
 
-test "readBlock" {
+test "readBlock ensure correct read | null current_block" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var client = try setupFixedReaderWriterMockClient(allocator, io);
+    defer teardownFixedReaderWriterMockClient(allocator, &client);
+
+    try ch.protocol.writeVarInt(client.writer.?, 1);
+    try client.writer.?.writeByte(0); // is_overflows
+
+    try ch.protocol.writeVarInt(client.writer.?, 2);
+    try client.writer.?.writeInt(i32, 0, .little); // bucket_num
+    
+    try ch.protocol.writeVarInt(client.writer.?, 0);
+
+    try writeMockDataBlock(&client);
+
+    try client.readBlock();
+
+    try std.testing.expect(client.current_block == null);
+    try std.testing.expectEqual(10, client.reader.?.seek);
 }
 
-test "processQueryResponse" {
+test "readBlock ensure correct read | non-null current_block" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var client = try setupFixedReaderWriterMockClient(allocator, io);
+    defer teardownFixedReaderWriterMockClient(allocator, &client);
+
+    try writeMockDataBlock(&client);
+
+    client.current_block = ch.block.Block.init(allocator);
+    try client.readBlock();
+
+    try std.testing.expect(client.current_block != null);
+    try std.testing.expectEqual(10, client.current_block.?.columns.len);
+    try std.testing.expectEqual(26, client.current_block.?.rows);
+    try std.testing.expectEqual(client.writer.?.end, client.reader.?.seek);
+
+    try std.testing.expectEqualStrings(columns[0].name, client.current_block.?.columns[0].name);
+    try std.testing.expectEqualStrings(columns[0].type_str, client.current_block.?.columns[0].type_name);
+    try std.testing.expectEqualStrings(columns[1].name, client.current_block.?.columns[1].name);
+    try std.testing.expectEqualStrings(columns[1].type_str, client.current_block.?.columns[1].type_name);
+    try std.testing.expectEqualStrings(columns[2].name, client.current_block.?.columns[2].name);
+    try std.testing.expectEqualStrings(columns[2].type_str, client.current_block.?.columns[2].type_name);
+    try std.testing.expectEqualStrings(columns[3].name, client.current_block.?.columns[3].name);
+    try std.testing.expectEqualStrings(columns[3].type_str, client.current_block.?.columns[3].type_name);
+    try std.testing.expectEqualStrings(columns[4].name, client.current_block.?.columns[4].name);
+    try std.testing.expectEqualStrings(columns[4].type_str, client.current_block.?.columns[4].type_name);
+    try std.testing.expectEqualStrings(columns[5].name, client.current_block.?.columns[5].name);
+    try std.testing.expectEqualStrings(columns[5].type_str, client.current_block.?.columns[5].type_name);
+    try std.testing.expectEqualStrings(columns[6].name, client.current_block.?.columns[6].name);
+    try std.testing.expectEqualStrings(columns[6].type_str, client.current_block.?.columns[6].type_name);
+    try std.testing.expectEqualStrings(columns[7].name, client.current_block.?.columns[7].name);
+    try std.testing.expectEqualStrings(columns[7].type_str, client.current_block.?.columns[7].type_name);
+    try std.testing.expectEqualStrings(columns[8].name, client.current_block.?.columns[8].name);
+    try std.testing.expectEqualStrings(columns[8].type_str, client.current_block.?.columns[8].type_name);
+    try std.testing.expectEqualStrings(columns[9].name, client.current_block.?.columns[9].name);
+    try std.testing.expectEqualStrings(columns[9].type_str, client.current_block.?.columns[9].type_name);
+}
+
+test "processQueryResponse ensure correct read | Data" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var client = try setupFixedReaderWriterMockClient(allocator, io);
+    defer teardownFixedReaderWriterMockClient(allocator, &client);
+
+    try ch.protocol.writeVarInt(client.writer.?, @intFromEnum(ch.packet.ServerPacket.Data));
+
+    try writeMockDataBlock(&client);
+
+    try ch.protocol.writeVarInt(client.writer.?, @intFromEnum(ch.packet.ServerPacket.EndOfStream));
+
+    try client.processQueryResponse();
+
+    try std.testing.expect(client.current_block != null);
+    try std.testing.expectEqual(10, client.current_block.?.columns.len);
+    try std.testing.expectEqual(26, client.current_block.?.rows);
+    try std.testing.expectEqual(client.writer.?.end, client.reader.?.seek);
+}
+
+test "processQueryResponse ensure correct read | Progress" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var client = try setupFixedReaderWriterMockClient(allocator, io);
+    defer teardownFixedReaderWriterMockClient(allocator, &client);
+
+    try ch.protocol.writeVarInt(client.writer.?, @intFromEnum(ch.packet.ServerPacket.Progress));
+    try client.writer.?.writeInt(u64, 32, .little);
+    try client.writer.?.writeInt(u64, 512, .little);
+    try client.writer.?.writeInt(u64, 128, .little);
+    try client.writer.?.writeInt(u64, 64, .little);
+    try client.writer.?.writeInt(u64, 256, .little);
+    try client.writer.?.writeInt(u64, 4096, .little);
+
+    try ch.protocol.writeVarInt(client.writer.?, @intFromEnum(ch.packet.ServerPacket.EndOfStream));
+
+    try client.processQueryResponse();
+
+    try std.testing.expect(client.current_block == null);
+    try std.testing.expectEqual(client.writer.?.end, client.reader.?.seek);
+}
+
+test "processQueryResponse ensure correct read | TableColumns" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var client = try setupFixedReaderWriterMockClient(allocator, io);
+    defer teardownFixedReaderWriterMockClient(allocator, &client);
+
+    try ch.protocol.writeVarInt(client.writer.?, @intFromEnum(ch.packet.ServerPacket.TableColumns));
+    try ch.protocol.writeString(client.writer.?, "Table name");
+    try ch.protocol.writeString(client.writer.?, "Table desc");
+
+    try ch.protocol.writeVarInt(client.writer.?, @intFromEnum(ch.packet.ServerPacket.EndOfStream));
+
+    try client.processQueryResponse();
+
+    try std.testing.expect(client.current_block == null);
+    try std.testing.expectEqual(client.writer.?.end, client.reader.?.seek);
+}
+
+test "processQueryResponse ensure correct read | EndOfStream" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var client = try setupFixedReaderWriterMockClient(allocator, io);
+    defer teardownFixedReaderWriterMockClient(allocator, &client);
+
+    try ch.protocol.writeVarInt(client.writer.?, @intFromEnum(ch.packet.ServerPacket.EndOfStream));
+
+    try client.processQueryResponse();
+
+    try std.testing.expect(client.current_block == null);
+    try std.testing.expectEqual(client.writer.?.end, client.reader.?.seek);
+}
+
+test "processQueryResponse ensure correct read | Exception" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var client = try setupFixedReaderWriterMockClient(allocator, io);
+    defer teardownFixedReaderWriterMockClient(allocator, &client);
+
+    try ch.protocol.writeVarInt(client.writer.?, @intFromEnum(ch.packet.ServerPacket.Exception));
+
+    const err_code = 7;
+    const err_name = "Test error name";
+    const err_msg = "This is testing error handling";
+    const err_stack = "PLACEHOLDER error stack";
+
+    try client.writer.?.writeInt(u32, err_code, .little);
+    try ch.protocol.writeString(client.writer.?, err_name);
+    try ch.protocol.writeString(client.writer.?, err_msg);
+    try ch.protocol.writeString(client.writer.?, err_stack);
+
+    try client.writer.?.writeByte(0); // has_nested
+
+    var return_error: ?anyerror = null;
+    client.processQueryResponse() catch |err| {
+        return_error = err;
+    };
+
+    try std.testing.expect(client.current_block == null);
+    try std.testing.expectEqual(client.writer.?.end, client.reader.?.seek);
+    try std.testing.expectEqual(@as(ch.ClickHouseError, ch.ClickHouseError.QueryFailed), return_error.?);
+
+    try std.testing.expect(client.last_error != null);
+    try std.testing.expectEqual(ch.ch_error.ErrorCode.ServerError, client.last_error.?.code);
+    try std.testing.expectEqualStrings(err_msg, client.last_error.?.message);
+    try std.testing.expectEqualStrings(err_stack, client.last_error.?.stack_trace.?);
 }
 
 test "writeLog" {
