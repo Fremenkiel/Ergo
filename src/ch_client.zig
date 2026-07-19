@@ -4,6 +4,8 @@ const Io = std.Io;
 const net = Io.net;
 const mem = std.mem;
 
+const assert = std.debug.assert;
+
 const ch = @import("ch");
 
 const types = @import("types.zig");
@@ -45,7 +47,7 @@ pub const ChClient = struct {
     read_buf: [8192]u8 = undefined,
     write_buf: [4096]u8 = undefined,
 
-    current_block: ?ch.block.Block,
+    current_block: ch.block.Block,
     server_info: ?ch.server_info.ServerInfo,
     last_error: ?*ch.ch_error.Error,
 
@@ -55,7 +57,7 @@ pub const ChClient = struct {
             .io = io,
             .config = config,
             .stream = null,
-            .current_block = null,
+            .current_block = .init(allocator),
             .server_info = null,
             .last_error = null,
             .os_user = os_user,
@@ -63,9 +65,7 @@ pub const ChClient = struct {
     }
 
     pub fn deinit(self: *ChClient) void {
-        if (self.current_block) |*b| {
-            b.deinit();
-        }
+        self.current_block.deinit();
         if (self.server_info) |*info| {
             info.deinit(self.allocator);
         }
@@ -179,6 +179,7 @@ pub const ChClient = struct {
         const revision = if (self.server_info) |info| info.revision else 0;
 
         if (revision >= 50264) {
+            // table_name
             _ = try ch.protocol.readString(self.reader.?);
         }
 
@@ -195,14 +196,12 @@ pub const ChClient = struct {
         const num_columns = try ch.protocol.readVarInt(self.reader.?);
         const num_rows = try ch.protocol.readVarInt(self.reader.?);
 
-        if (self.current_block) |*b| {
-            b.rows = num_rows;
-            for (0..num_columns) |_| {
-                const col_name = try ch.protocol.readString(self.reader.?);
-                const col_type_str = try ch.protocol.readString(self.reader.?);
+        self.current_block.rows = num_rows;
+        for (0..num_columns) |_| {
+            const col_name = try ch.protocol.readString(self.reader.?);
+            const col_type_str = try ch.protocol.readString(self.reader.?);
 
-                try b.addColumn(col_name, col_type_str);
-            }
+            try self.current_block.addColumn(col_name, col_type_str);
         }
     }
 
@@ -285,9 +284,6 @@ pub const ChClient = struct {
             
             switch (@as(ch.packet.ServerPacket, @enumFromInt(packet_type))) {
                 .Data => {
-                    if (self.current_block == null) {
-                        self.current_block = ch.block.Block.init(self.allocator);
-                    }
                     try self.readBlock();
                 },
                 .Progress => {
@@ -301,6 +297,36 @@ pub const ChClient = struct {
                 .TableColumns => {
                     _ = try ch.protocol.readString(self.reader.?);
                     _ = try ch.protocol.readString(self.reader.?);
+                },
+                .Log => {
+                    // table_name - always empty
+                    const table_name = try ch.protocol.readString(self.reader.?);
+                    assert(std.mem.eql(u8, "", table_name));
+
+                    const num_columns = try ch.protocol.readVarInt(self.reader.?);
+                    assert(num_columns == 8);
+
+                    const num_rows = try ch.protocol.readVarInt(self.reader.?);
+
+                    var i: u32 = 0;
+                    while (i < num_rows) : (i += 1) {
+                        // event_time
+                        _ = try self.reader.?.takeInt(u32, .little);
+                        // event_time_microseconds
+                        _ = try self.reader.?.takeInt(u32, .little);
+                        // host_name
+                        _ = try ch.protocol.readString(self.reader.?);
+                        // query_id
+                        _ = try ch.protocol.readString(self.reader.?);
+                        // thread_id
+                        _ = try self.reader.?.takeInt(u64, .little);
+                        // priority
+                        _ = try self.reader.?.takeInt(i8, .little);
+                        // source
+                        _ = try ch.protocol.readString(self.reader.?);
+                        // text
+                        _ = try ch.protocol.readString(self.reader.?);
+                    }
                 },
                 .EndOfStream => {
                     return;
@@ -327,7 +353,7 @@ pub const ChClient = struct {
         }
     }
 
-    pub fn writeLog(self: *@This(), data: [][]types.AuditEntry) !void {
+    pub fn writeLog(self: *@This(), data: []types.AuditEntry) !void {
         var bulk: ch.BulkInsert = try .init(self.allocator, "entries", &columns, 1000);
         defer bulk.deinit();
 
@@ -347,13 +373,10 @@ pub const ChClient = struct {
         var new_values = std.StringHashMap([]const u8).init(self.allocator);
         defer new_values.deinit();
 
-        var i: u32 = 0;
-        while (i < data.len) : (i += 1) {
-            for (data[i]) |row| {
-                const insert_values = try self.parseRow(row, &buf, &old_values, &new_values);
+        for (data) |row| {
+            const insert_values = try self.parseRow(row, &buf, &old_values, &new_values);
 
-                try self.insertRow(&bulk, insert_values);
-            }
+            try self.insertRow(&bulk, insert_values);
         }
 
         // Flush any remaining rows
@@ -477,7 +500,7 @@ fn setupMockClient(allocator: std.mem.Allocator, io: std.Io) !ChClient {
         .stream_writer = null,
         .reader = null,
         .writer = null,
-        .current_block = null,
+        .current_block = .init(allocator),
         .server_info = null,
         .last_error = null,
         .os_user = "kswa",
@@ -671,30 +694,7 @@ test "startInsert ensure correct query info" {
 
     try client.startInsert("INSERT INTO entries FORMAT Native");
 
-    try std.testing.expect(client.current_block == null);
-}
-
-test "readBlock ensure correct read | null current_block" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
-
-    var client = try setupFixedReaderWriterMockClient(allocator, io);
-    defer teardownFixedReaderWriterMockClient(allocator, &client);
-
-    try ch.protocol.writeVarInt(client.writer.?, 1);
-    try client.writer.?.writeByte(0); // is_overflows
-
-    try ch.protocol.writeVarInt(client.writer.?, 2);
-    try client.writer.?.writeInt(i32, 0, .little); // bucket_num
-    
-    try ch.protocol.writeVarInt(client.writer.?, 0);
-
-    try writeMockDataBlock(&client);
-
-    try client.readBlock();
-
-    try std.testing.expect(client.current_block == null);
-    try std.testing.expectEqual(10, client.reader.?.seek);
+    try std.testing.expectEqual(10, client.current_block.columns.len);
 }
 
 test "readBlock ensure correct read | non-null current_block" {
@@ -706,34 +706,32 @@ test "readBlock ensure correct read | non-null current_block" {
 
     try writeMockDataBlock(&client);
 
-    client.current_block = ch.block.Block.init(allocator);
     try client.readBlock();
 
-    try std.testing.expect(client.current_block != null);
-    try std.testing.expectEqual(10, client.current_block.?.columns.len);
-    try std.testing.expectEqual(26, client.current_block.?.rows);
+    try std.testing.expectEqual(10, client.current_block.columns.len);
+    try std.testing.expectEqual(26, client.current_block.rows);
     try std.testing.expectEqual(client.writer.?.end, client.reader.?.seek);
 
-    try std.testing.expectEqualStrings(columns[0].name, client.current_block.?.columns[0].name);
-    try std.testing.expectEqualStrings(columns[0].type_str, client.current_block.?.columns[0].type_name);
-    try std.testing.expectEqualStrings(columns[1].name, client.current_block.?.columns[1].name);
-    try std.testing.expectEqualStrings(columns[1].type_str, client.current_block.?.columns[1].type_name);
-    try std.testing.expectEqualStrings(columns[2].name, client.current_block.?.columns[2].name);
-    try std.testing.expectEqualStrings(columns[2].type_str, client.current_block.?.columns[2].type_name);
-    try std.testing.expectEqualStrings(columns[3].name, client.current_block.?.columns[3].name);
-    try std.testing.expectEqualStrings(columns[3].type_str, client.current_block.?.columns[3].type_name);
-    try std.testing.expectEqualStrings(columns[4].name, client.current_block.?.columns[4].name);
-    try std.testing.expectEqualStrings(columns[4].type_str, client.current_block.?.columns[4].type_name);
-    try std.testing.expectEqualStrings(columns[5].name, client.current_block.?.columns[5].name);
-    try std.testing.expectEqualStrings(columns[5].type_str, client.current_block.?.columns[5].type_name);
-    try std.testing.expectEqualStrings(columns[6].name, client.current_block.?.columns[6].name);
-    try std.testing.expectEqualStrings(columns[6].type_str, client.current_block.?.columns[6].type_name);
-    try std.testing.expectEqualStrings(columns[7].name, client.current_block.?.columns[7].name);
-    try std.testing.expectEqualStrings(columns[7].type_str, client.current_block.?.columns[7].type_name);
-    try std.testing.expectEqualStrings(columns[8].name, client.current_block.?.columns[8].name);
-    try std.testing.expectEqualStrings(columns[8].type_str, client.current_block.?.columns[8].type_name);
-    try std.testing.expectEqualStrings(columns[9].name, client.current_block.?.columns[9].name);
-    try std.testing.expectEqualStrings(columns[9].type_str, client.current_block.?.columns[9].type_name);
+    try std.testing.expectEqualStrings(columns[0].name, client.current_block.columns[0].name);
+    try std.testing.expectEqualStrings(columns[0].type_str, client.current_block.columns[0].type_name);
+    try std.testing.expectEqualStrings(columns[1].name, client.current_block.columns[1].name);
+    try std.testing.expectEqualStrings(columns[1].type_str, client.current_block.columns[1].type_name);
+    try std.testing.expectEqualStrings(columns[2].name, client.current_block.columns[2].name);
+    try std.testing.expectEqualStrings(columns[2].type_str, client.current_block.columns[2].type_name);
+    try std.testing.expectEqualStrings(columns[3].name, client.current_block.columns[3].name);
+    try std.testing.expectEqualStrings(columns[3].type_str, client.current_block.columns[3].type_name);
+    try std.testing.expectEqualStrings(columns[4].name, client.current_block.columns[4].name);
+    try std.testing.expectEqualStrings(columns[4].type_str, client.current_block.columns[4].type_name);
+    try std.testing.expectEqualStrings(columns[5].name, client.current_block.columns[5].name);
+    try std.testing.expectEqualStrings(columns[5].type_str, client.current_block.columns[5].type_name);
+    try std.testing.expectEqualStrings(columns[6].name, client.current_block.columns[6].name);
+    try std.testing.expectEqualStrings(columns[6].type_str, client.current_block.columns[6].type_name);
+    try std.testing.expectEqualStrings(columns[7].name, client.current_block.columns[7].name);
+    try std.testing.expectEqualStrings(columns[7].type_str, client.current_block.columns[7].type_name);
+    try std.testing.expectEqualStrings(columns[8].name, client.current_block.columns[8].name);
+    try std.testing.expectEqualStrings(columns[8].type_str, client.current_block.columns[8].type_name);
+    try std.testing.expectEqualStrings(columns[9].name, client.current_block.columns[9].name);
+    try std.testing.expectEqualStrings(columns[9].type_str, client.current_block.columns[9].type_name);
 }
 
 test "processQueryResponse ensure correct read | Data" {
@@ -751,9 +749,8 @@ test "processQueryResponse ensure correct read | Data" {
 
     try client.processQueryResponse();
 
-    try std.testing.expect(client.current_block != null);
-    try std.testing.expectEqual(10, client.current_block.?.columns.len);
-    try std.testing.expectEqual(26, client.current_block.?.rows);
+    try std.testing.expectEqual(10, client.current_block.columns.len);
+    try std.testing.expectEqual(26, client.current_block.rows);
     try std.testing.expectEqual(client.writer.?.end, client.reader.?.seek);
 }
 
@@ -776,7 +773,7 @@ test "processQueryResponse ensure correct read | Progress" {
 
     try client.processQueryResponse();
 
-    try std.testing.expect(client.current_block == null);
+    try std.testing.expectEqual(0, client.current_block.columns.len);
     try std.testing.expectEqual(client.writer.?.end, client.reader.?.seek);
 }
 
@@ -795,7 +792,7 @@ test "processQueryResponse ensure correct read | TableColumns" {
 
     try client.processQueryResponse();
 
-    try std.testing.expect(client.current_block == null);
+    try std.testing.expectEqual(0, client.current_block.columns.len);
     try std.testing.expectEqual(client.writer.?.end, client.reader.?.seek);
 }
 
@@ -810,7 +807,7 @@ test "processQueryResponse ensure correct read | EndOfStream" {
 
     try client.processQueryResponse();
 
-    try std.testing.expect(client.current_block == null);
+    try std.testing.expectEqual(0, client.current_block.columns.len);
     try std.testing.expectEqual(client.writer.?.end, client.reader.?.seek);
 }
 
@@ -840,7 +837,7 @@ test "processQueryResponse ensure correct read | Exception" {
         return_error = err;
     };
 
-    try std.testing.expect(client.current_block == null);
+    try std.testing.expectEqual(0, client.current_block.columns.len);
     try std.testing.expectEqual(client.writer.?.end, client.reader.?.seek);
     try std.testing.expectEqual(@as(ch.ClickHouseError, ch.ClickHouseError.QueryFailed), return_error.?);
 
@@ -851,6 +848,40 @@ test "processQueryResponse ensure correct read | Exception" {
 }
 
 test "writeLog" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const user_env_key = if (builtin.os.tag == .windows) "USERNAME" else "USER";
+    const os_user = try std.testing.environ.getAlloc(allocator, user_env_key);
+    defer allocator.free(os_user);
+
+    var client = ChClient.init(allocator, io, .{
+        .host = "localhost",
+        .port = 9000,
+        .username = "default",
+        .password = "clickhouse",
+        .database = "audit_log",
+    }, os_user);
+    defer client.deinit();
+
+    try client.connect();
+    defer client.disconnect();
+
+    var audit_log = std.ArrayList(types.AuditEntry).empty;
+    defer audit_log.deinit(allocator);
+    try audit_log.ensureUnusedCapacity(allocator, 4);
+
+    var changed_columns = std.StringHashMap(types.ChangedColumns).init(allocator);
+    defer changed_columns.deinit();
+
+    audit_log.appendSliceAssumeCapacity(&[_]types.AuditEntry{
+        .{ .event_time = 53634634, .transaction_id = 10, .primary_key = "1", .user_id = "42", .table_name = "addresses", .action = 1, .changed_columns = changed_columns, .new_values = .empty, .old_values = .empty, .ip_address = "192.168.1.50" },
+        .{ .event_time = 53634634, .transaction_id = 10, .primary_key = "2", .user_id = "42", .table_name = "addresses", .action = 2, .changed_columns = changed_columns, .new_values = .empty, .old_values = .empty, .ip_address = "192.168.1.50" },
+        .{ .event_time = 53634634, .transaction_id = 10, .primary_key = "3", .user_id = "42", .table_name = "addresses", .action = 3, .changed_columns = changed_columns, .new_values = .empty, .old_values = .empty, .ip_address = "192.168.1.50" },
+        .{ .event_time = 53634634, .transaction_id = 11, .primary_key = "4", .user_id = "42", .table_name = "addresses", .action = 1, .changed_columns = changed_columns, .new_values = .empty, .old_values = .empty, .ip_address = "192.168.1.50" }
+    });
+
+    try client.writeLog(audit_log.items);
 }
 
 test "parseRow ensure correct output" {
@@ -1016,5 +1047,21 @@ test "insertRow ensure correct insertion" {
     };
 
     try client.insertRow(&bulk, values);
+    bulk.flush(io, client.stream.?) catch |err| {
+        std.debug.print("Error: Flush failed, {}\n", .{err});
+        client.processQueryResponse() catch {};
+        if (client.last_error) |e| {
+            std.debug.print("SERVER EXCEPTION: {s}\n", .{e.message});
+        }
+        return err;
+    };
+
+    client.endOfStream() catch |err| {
+        std.debug.print("Error: Close failed, {}\n", .{err});
+        if (client.last_error) |e| {
+            std.debug.print("SERVER EXCEPTION: {s}\n", .{e.message});
+        }
+        return err;
+    };
 }
 

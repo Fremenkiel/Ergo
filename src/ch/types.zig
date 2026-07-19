@@ -13,10 +13,10 @@ pub const ClickHouseType = enum {
     pub fn fromStr(type_str: []const u8) !ClickHouseType {
         if (std.mem.eql(u8, type_str, "UInt64")) return .UInt64;
         if (std.mem.eql(u8, type_str, "String")) return .String;
-        if (std.mem.eql(u8, type_str, "DateTime64")) return .DateTime64;
         if (std.mem.eql(u8, type_str, "IPv4")) return .IPv4;
 
         if (std.mem.startsWith(u8, type_str, "Array")) return .Array;
+        if (std.mem.startsWith(u8, type_str, "DateTime64")) return .DateTime64;
         if (std.mem.startsWith(u8, type_str, "Enum8")) return .Enum8;
         if (std.mem.startsWith(u8, type_str, "Map")) return .Map;
         if (std.mem.startsWith(u8, type_str, "LowCardinality")) return .LowCardinality;

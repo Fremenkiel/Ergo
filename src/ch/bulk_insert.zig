@@ -212,12 +212,13 @@ pub const BulkInsert = struct {
         
         for (self.columns) |column| {
             var type_name: []const u8 = undefined;
+            defer self.allocator.free(type_name);
             switch (column.type_info.base_type) {
                 .LowCardinality => type_name = try std.fmt.allocPrint(self.allocator, "{s}({s})", .{@tagName(column.type_info.base_type), @tagName(column.type_info.key_type.?.base_type)}),
                 .Enum8 => type_name = try std.fmt.allocPrint(self.allocator, "{s}({s})", .{@tagName(column.type_info.base_type), column.type_info.enum_values.?}),
                 .Array => type_name = try std.fmt.allocPrint(self.allocator, "{s}({s})", .{@tagName(column.type_info.base_type), @tagName(column.type_info.key_type.?.base_type)}),
                 .Map => type_name = try std.fmt.allocPrint(self.allocator, "{s}({s}, {s})", .{@tagName(column.type_info.base_type), @tagName(column.type_info.key_type.?.base_type), @tagName(column.type_info.value_type.?.base_type)}),
-                else => type_name = @tagName(column.type_info.base_type),
+                else => type_name = try self.allocator.dupe(u8, @tagName(column.type_info.base_type)),
             }
             try result.addColumn(column.name, type_name);
 
