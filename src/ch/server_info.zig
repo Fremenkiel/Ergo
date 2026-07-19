@@ -14,18 +14,15 @@ pub const ServerInfo = struct {
     version_patch: u64,
 
     pub fn read(allocator: std.mem.Allocator, reader: *std.Io.Reader) !ServerInfo {
-        const name_len = try protocol.readVarInt(reader);
-        const name = try allocator.dupe(u8, try reader.take(name_len));
+        const name = try allocator.dupe(u8, try protocol.readString(reader));
 
         const major_version = try protocol.readVarInt(reader);
         const minor_version = try protocol.readVarInt(reader);
         const revision = try protocol.readVarInt(reader);
 
-        const tz_len = try protocol.readVarInt(reader);
-        const tz = try allocator.dupe(u8, try reader.take(tz_len));
+        const tz = try allocator.dupe(u8, try protocol.readString(reader));
 
-        const display_len = try protocol.readVarInt(reader);
-        const display = try allocator.dupe(u8, try reader.take(display_len));
+        const display = try allocator.dupe(u8, try protocol.readString(reader));
 
         const version_patch = try protocol.readVarInt(reader);
 

@@ -1,12 +1,16 @@
 const std = @import("std");
+const builtin = @import("builtin");
+
 const compression = @import("compression.zig");
 
-pub const ClientHello = struct {
-    pub const CLIENT_NAME = "ClickHouse Zig Client";
-    pub const CLIENT_VERSION_MAJOR: u64 = 1;
-    pub const CLIENT_VERSION_MINOR: u64 = 0;
-    pub const PROTOCOL_VERSION: u64 = 54429;
+pub const CLIENT_NAME = "ClickHouse Zig Client";
+pub const CLIENT_VERSION_MAJOR: u64 = 1;
+pub const CLIENT_VERSION_MINOR: u64 = 0;
+pub const CLIENT_VERSION_PATCH: u64 = 0;
 
+pub const PROTOCOL_VERSION: u64 = 54449;
+
+pub const ClientHello = struct {
     pub fn write(writer: *std.Io.Writer) !void {
         try writeString(writer, CLIENT_NAME);
         try writeVarInt(writer, CLIENT_VERSION_MAJOR);
@@ -16,16 +20,28 @@ pub const ClientHello = struct {
 };
 
 pub const ClientInfo = struct {
-    pub fn write(writer: *std.Io.Writer, query_id: []const u8, client_name: []const u8, initial_user: []const u8, initial_address: []const u8) !void {
-        _ = client_name;
-        _ = initial_user;
-        _ = initial_address;
-        
-        // Query ID
-        try writeString(writer, query_id);
+    pub fn write(writer: *std.Io.Writer, query_id: []const u8, initial_user: []const u8, initial_address: []const u8, initial_timestamp: i64, os_user: []const u8) !void {
+        var hostname_buf: [std.posix.HOST_NAME_MAX]u8 = undefined;
+        const hostname = try std.posix.gethostname(&hostname_buf);
 
-        // Client info block
-        try writeVarInt(writer, 0); // client_info marker = 0 (empty)
+        try writer.writeInt(u8, 1, .little); // client_info marker = 1 (init)
+        try writeString(writer, initial_user);
+        try writeString(writer, query_id);
+        try writeString(writer, initial_address);
+        try writer.writeInt(i64, initial_timestamp, .little);
+
+        try writer.writeInt(u8, 1, .little); // query_interface = 1 (TCP)
+
+        try writeString(writer, hostname);
+        try writeString(writer, os_user);
+        try writeString(writer, CLIENT_NAME);
+        try writeVarInt(writer, CLIENT_VERSION_MAJOR);
+        try writeVarInt(writer, CLIENT_VERSION_MINOR);
+        try writeVarInt(writer, PROTOCOL_VERSION);
+        try writeString(writer, ""); // quota_key
+        try writeVarInt(writer, 0); // distributed_depth
+        try writeVarInt(writer, CLIENT_VERSION_PATCH);
+        try writer.writeInt(u8, 0, .little); // open_telemetry = off
     }
 };
 

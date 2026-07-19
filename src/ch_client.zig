@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const net = Io.net;
 const mem = std.mem;
@@ -32,6 +33,7 @@ pub const ChClient = struct {
     io: std.Io,
 
     config: ch.ClickHouseConfig,
+    os_user: []const u8,
 
     stream: ?net.Stream,
     stream_reader: ?@TypeOf(@as(net.Stream, undefined).reader(@as(Io, undefined), @as(*[8192]u8, undefined))) = null,
@@ -49,7 +51,7 @@ pub const ChClient = struct {
     query_info: ?ch.query_info.QueryInfo,
     last_error: ?*ch.ch_error.Error,
 
-    pub fn init(allocator: mem.Allocator, io: std.Io, config: ch.ClickHouseConfig) ChClient {
+    pub fn init(allocator: mem.Allocator, io: std.Io, config: ch.ClickHouseConfig, os_user: []const u8) ChClient {
         return .{
             .allocator = allocator,
             .io = io,
@@ -60,6 +62,7 @@ pub const ChClient = struct {
             .server_info = null,
             .query_info = null,
             .last_error = null,
+            .os_user = os_user,
         };
     }
 
@@ -109,9 +112,9 @@ pub const ChClient = struct {
         try self.readServerHello();
     }
 
-    pub fn disconnect(self: *ChClient, io: std.Io) !void {
+    pub fn disconnect(self: *ChClient) void {
         if (self.stream) |stream| {
-            stream.close(io);
+            stream.close(self.io);
         }
         self.stream = null;
         self.reader = null;
@@ -170,12 +173,45 @@ pub const ChClient = struct {
 
         const server_packet = try ch.protocol.readVarInt(self.reader.?);
 
-        std.debug.print("Got {d}, expected {d}\n", .{server_packet, @intFromEnum(ch.packet.ServerPacket.Hello)});
         if (server_packet != @intFromEnum(ch.packet.ServerPacket.Hello)) {
             return ch.ClickHouseError.ProtocolError;
         }
 
         self.server_info = try ch.server_info.ServerInfo.read(self.allocator, self.reader.?);
+    }
+
+    pub fn readBlock(self: *ChClient) !void {
+        try self.ensureStream();
+
+        const revision = if (self.server_info) |info| info.revision else 0;
+
+        if (revision >= 50264) {
+            _ = try ch.protocol.readString(self.reader.?);
+        }
+
+        while (true) {
+            const field_num = try ch.protocol.readVarInt(self.reader.?);
+            if (field_num == 0) break;
+            if (field_num == 1) {
+                _ = try self.reader.?.takeByte(); // is_overflows
+            } else if (field_num == 2) {
+                _ = try self.reader.?.takeInt(i32, .little); // bucket_num
+            }
+        }
+
+        const num_columns = try ch.protocol.readVarInt(self.reader.?);
+        const num_rows = try ch.protocol.readVarInt(self.reader.?);
+
+        if (self.current_block) |*b| {
+            b.rows = num_rows;
+            for (0..num_columns) |_| {
+                const col_name = try ch.protocol.readString(self.reader.?);
+                const col_type_str = try ch.protocol.readString(self.reader.?);
+
+                _ = try ch.ClickHouseType.fromStr(col_type_str);
+                try b.addColumn(col_name, col_type_str);
+            }
+        }
     }
 
     pub fn startInsert(self: *ChClient, query_str: []const u8) !void {
@@ -193,15 +229,22 @@ pub const ChClient = struct {
 
         self.query_info = ch.query_info.QueryInfo.init();
 
-        var address_buf: [256]u8 = undefined;
-        const address = try std.fmt.bufPrint(&address_buf, "[::ffff:127.0.0.1]:{d}", .{ self.config.port });
+        const address = try std.fmt.allocPrint(self.allocator, "[::ffff:127.0.0.1]:{d}", .{ self.config.port });
+        defer self.allocator.free(address);
+
+        const timestamp = std.Io.Clock.real.now(self.io).toMicroseconds();
+        const query_id = try std.fmt.allocPrint(self.allocator, "ergo_bulk_{d}", .{timestamp});
+        self.allocator.free(query_id);
 
         try ch.packet.writeClientPacketHeader(self.writer.?, .Query);
-        try ch.protocol.ClientInfo.write(self.writer.?, "", "ClickHouse Zig", self.config.username, address);
+        try ch.protocol.writeString(self.writer.?, query_id);
+
+        try ch.protocol.ClientInfo.write(self.writer.?, query_id, self.config.username, address, timestamp, self.os_user);
         try ch.protocol.writeString(self.writer.?, ""); // Empty settings
+        try ch.protocol.writeString(self.writer.?, ""); // auth_hash
 
         try ch.protocol.writeVarInt(self.writer.?, 2); // stage: Complete
-        try ch.protocol.writeVarInt(self.writer.?, self.config.settings.compression_method); // compression
+        try ch.protocol.writeVarInt(self.writer.?, self.config.settings.compression_method); // compression enabled
 
         try ch.protocol.writeString(self.writer.?, query_str);
 
@@ -220,7 +263,7 @@ pub const ChClient = struct {
         try self.writer.?.flush();
 
         while (true) {
-            const packet_type = try ch.protocol.readVarInt(self.reader.?); std.debug.print("startInsert packet: {d}\n", .{packet_type});
+            const packet_type = try ch.protocol.readVarInt(self.reader.?);
             switch (@as(ch.packet.ServerPacket, @enumFromInt(packet_type))) {
                 .Data => {
                     try self.readBlock();
@@ -254,57 +297,11 @@ pub const ChClient = struct {
         }
     }
 
-    pub fn readBlock(self: *ChClient) !void {
-        try self.ensureStream();
-
-        std.debug.print("entering readBlock\n", .{});
-        
-        const revision = if (self.server_info) |info| info.revision else 0;
-        std.debug.print("revision: {d}\n", .{revision});
-
-        if (revision >= 50264) {
-            _ = try ch.protocol.readString(self.reader.?);
-        }
-
-        while (true) {
-            const field_num = try ch.protocol.readVarInt(self.reader.?);
-            if (field_num == 0) break;
-            if (field_num == 1) {
-                _ = try self.reader.?.takeByte(); // is_overflows
-            } else if (field_num == 2) {
-                _ = try self.reader.?.takeInt(i32, .little); // bucket_num
-            }
-        }
-
-        const num_columns = try ch.protocol.readVarInt(self.reader.?);
-        const num_rows = try ch.protocol.readVarInt(self.reader.?);
-
-        if (self.current_block) |*b| {
-            b.rows = num_rows;
-        }
-
-        for (0..num_columns) |_| {
-            const col_name = try ch.protocol.readString(self.reader.?);
-            const col_type_str = try ch.protocol.readString(self.reader.?);
-
-            if (self.current_block) |*b| {
-                const ch_type = try ch.ClickHouseType.fromStr(col_type_str);
-                try b.addColumn(col_name, col_type_str);
-                
-                const col_idx = b.columns.len - 1;
-                
-                if (num_rows > 0) {
-                    _ = ch_type; _ = col_idx;
-                }
-            }
-        }
-    }
-
     pub fn processQueryResponse(self: *ChClient) !void {
         try self.ensureStream();
 
         while (true) {
-            const packet_type = try ch.protocol.readVarInt(self.reader.?); std.debug.print("startInsert packet: {d}\n", .{packet_type});
+            const packet_type = try ch.protocol.readVarInt(self.reader.?);
             
             switch (@as(ch.packet.ServerPacket, @enumFromInt(packet_type))) {
                 .Data => {
@@ -330,7 +327,6 @@ pub const ChClient = struct {
                     self.allocator.free(cols_desc);
                 },
                 .EndOfStream => {
-                    std.debug.print("returning from processQueryResponse!\n", .{});
                     return;
                 },
                 .Exception => {
@@ -362,7 +358,7 @@ pub const ChClient = struct {
 
         self.startInsert("INSERT INTO entries FORMAT Native") catch |err| {
             if (err == error.QueryFailed) {
-                std.debug.print("Query failed: {s}\n", .{self.last_error.?.message});
+                std.debug.print("Error: Query failed, {s}\n", .{self.last_error.?.message});
             }
             return err;
         };
@@ -387,7 +383,7 @@ pub const ChClient = struct {
 
         // Flush any remaining rows
         bulk.flush(self.io, self.stream.?) catch |err| {
-            std.debug.print("flush failed: {}\n", .{err});
+            std.debug.print("Error: Flush failed, {}\n", .{err});
             self.processQueryResponse() catch {};
             if (self.last_error) |e| {
                 std.debug.print("SERVER EXCEPTION: {s}\n", .{e.message});
@@ -395,20 +391,16 @@ pub const ChClient = struct {
             return err;
         };
 
-        std.debug.print("Executed insert\n", .{});
-
-        self.closeStream() catch |err| {
-            std.debug.print("close failed: {}\n", .{err});
+        self.endOfStream() catch |err| {
+            std.debug.print("Error: Close failed, {}\n", .{err});
             if (self.last_error) |e| {
                 std.debug.print("SERVER EXCEPTION: {s}\n", .{e.message});
             }
             return err;
         };
 
-        std.debug.print("Closed stream\n", .{});
-
         if (self.last_error) |err| {
-            std.debug.print("Insert failed: {s}\n", .{err.message});
+            std.debug.print("Error: Insert failed, {s}\n", .{err.message});
         }
     }
 
@@ -464,7 +456,7 @@ pub const ChClient = struct {
 
         if (try bulk.addRow(&values)) {
             bulk.flush(self.io, self.stream.?) catch |err| {
-                std.debug.print("flush failed: {}\n", .{err});
+                std.debug.print("Error: Flush failed, {}\n", .{err});
                 self.processQueryResponse() catch {};
                 if (self.last_error) |e| {
                     std.debug.print("SERVER EXCEPTION: {s}\n", .{e.message});
@@ -474,7 +466,7 @@ pub const ChClient = struct {
         }
     }
 
-    pub fn closeStream(self: *ChClient) !void {
+    pub fn endOfStream(self: *ChClient) !void {
         try self.ensureStream();
 
         try ch.packet.writeClientPacketHeader(self.writer.?, .Data);
@@ -514,171 +506,33 @@ fn setupMockClient(allocator: std.mem.Allocator, io: std.Io) !ChClient {
         .server_info = null,
         .query_info = null,
         .last_error = null,
+        .os_user = "kswa",
     };
 }
-//
-// test "parseRow ensure correct output" {
-//     const allocator = std.testing.allocator;
-//     const io = std.testing.io;
-//
-//     var client = try setupMockClient(allocator, io);
-//     defer client.deinit();
-//
-//     var changed_columns = std.StringHashMap(types.ChangedColumns).init(allocator);
-//     defer changed_columns.deinit();
-//     try changed_columns.ensureUnusedCapacity(1);
-//
-//     try changed_columns.put("id", .{ .has_changes = false, .value = "1" });
-//     try changed_columns.put("address_line_1", .{ .has_changes = true, .value = "Googleplex" });
-//     try changed_columns.put("address_line_2", .{ .has_changes = false, .value = "" });
-//     try changed_columns.put("postal_code", .{ .has_changes = true, .value = "94043" });
-//     try changed_columns.put("city", .{ .has_changes = true, .value = "Mountain View" });
-//     try changed_columns.put("country", .{ .has_changes = false, .value = "US" });
-//
-//     var new_values = std.StringHashMapUnmanaged([]const u8).empty;
-//     defer new_values.deinit(allocator);
-//     try new_values.ensureUnusedCapacity(allocator, 6);
-//
-//     try new_values.put(allocator, "id", "1");
-//     try new_values.put(allocator, "address_line_1", "1 Apple Park Way");
-//     try new_values.put(allocator, "address_line_2", "");
-//     try new_values.put(allocator, "postal_code", "95014");
-//     try new_values.put(allocator, "city", "Cupertino");
-//     try new_values.put(allocator, "country", "US");
-//
-//     var old_values = std.StringHashMapUnmanaged([]const u8).empty;
-//     defer old_values.deinit(allocator);
-//     try old_values.ensureUnusedCapacity(allocator, 6);
-//
-//     try old_values.put(allocator, "id", "1");
-//     try old_values.put(allocator, "address_line_1", "Googleplex");
-//     try old_values.put(allocator, "address_line_2", "");
-//     try old_values.put(allocator, "postal_code", "94043");
-//     try old_values.put(allocator, "city", "Mountain View");
-//     try old_values.put(allocator, "country", "US");
-//
-//     const row: types.AuditEntry = .{
-//         .event_time = 10,
-//         .table_name = try allocator.dupe(u8, "addresses"),
-//         .new_values = new_values,
-//         .old_values = old_values,
-//         .action = 2,
-//         .changed_columns = changed_columns,
-//         .transaction_id = 793,
-//         .user_id = "42",
-//         .ip_address = "192.168.1.50",
-//         .primary_key = "1",
-//     };
-//     defer allocator.free(row.table_name);
-//
-//     var row_changed_columns = std.ArrayList(ch.bulk_insert.Value).empty;
-//     defer row_changed_columns.deinit(allocator);
-//
-//     var row_old_values = std.StringHashMap([]const u8).init(allocator);
-//     defer row_old_values.deinit();
-//
-//     var row_new_values = std.StringHashMap([]const u8).init(allocator);
-//     defer row_new_values.deinit();
-//
-//     const insert_values = try client.parseRow(row, &row_changed_columns, &row_old_values, &row_new_values);
-//
-//     try std.testing.expectEqual(3, insert_values.changed_columns.items.len);
-//     try std.testing.expectEqual(3, insert_values.new_values.count());
-//     try std.testing.expectEqual(3, insert_values.old_values.count());
-//
-//     try std.testing.expectEqualStrings("address_line_1", insert_values.changed_columns.items[0].String);
-//     try std.testing.expectEqualStrings("postal_code", insert_values.changed_columns.items[1].String);
-//     try std.testing.expectEqualStrings("city", insert_values.changed_columns.items[2].String);
-//
-//     try std.testing.expectEqualStrings("1 Apple Park Way", insert_values.new_values.get("address_line_1").?);
-//     try std.testing.expectEqualStrings("95014", insert_values.new_values.get("postal_code").?);
-//     try std.testing.expectEqualStrings("Cupertino", insert_values.new_values.get("city").?);
-//
-//     try std.testing.expectEqualStrings("Googleplex", insert_values.old_values.get("address_line_1").?);
-//     try std.testing.expectEqualStrings("94043", insert_values.old_values.get("postal_code").?);
-//     try std.testing.expectEqualStrings("Mountain View", insert_values.old_values.get("city").?);
-//
-//     try std.testing.expectEqualStrings("42", insert_values.row.user_id);
-//     try std.testing.expectEqualStrings("192.168.1.50", insert_values.row.ip_address);
-//     try std.testing.expectEqualStrings("1", insert_values.row.primary_key);
-//     try std.testing.expectEqualStrings("addresses", insert_values.row.table_name);
-//     try std.testing.expectEqual(2, insert_values.row.action);
-//     try std.testing.expectEqual(793, insert_values.row.transaction_id);
-//     try std.testing.expectEqual(10, insert_values.row.event_time);
-// }
-//
-// test "insertRow ensure correct insertion" {
-//     const allocator = std.testing.allocator;
-//     const io = std.testing.io;
-//
-//     var ch_client = ChClient.init(allocator, io, .{
-//         .host = "localhost",
-//         .port = 9000,
-//         .username = "default",
-//         .password = "clickhouse",
-//         .database = "audit_log",
-//     });
-//     defer ch_client.deinit();
-//
-//     try ch_client.connect();
-//
-//     var changed_columns = std.ArrayList(ch.bulk_insert.Value).empty;
-//     defer changed_columns.deinit(allocator);
-//     try changed_columns.ensureUnusedCapacity(allocator, 3);
-//
-//     changed_columns.appendAssumeCapacity(.{ .String = "address_line_1" });
-//     changed_columns.appendAssumeCapacity(.{ .String = "postal_code" });
-//     changed_columns.appendAssumeCapacity(.{ .String = "city" });
-//
-//     var new_values = std.StringHashMap([]const u8).init(allocator);
-//     defer new_values.deinit();
-//     try new_values.ensureUnusedCapacity(3);
-//
-//     new_values.putAssumeCapacity("address_line_1", "1 Apple Park Way");
-//     new_values.putAssumeCapacity("postal_code", "94043");
-//     new_values.putAssumeCapacity("city", "Cupertino");
-//
-//     var old_values = std.StringHashMap([]const u8).init(allocator);
-//     defer old_values.deinit();
-//     try old_values.ensureUnusedCapacity(3);
-//
-//     old_values.putAssumeCapacity("address_line_1", "Googleplex");
-//     old_values.putAssumeCapacity("postal_code", "95014");
-//     old_values.putAssumeCapacity("city", "Mountain View");
-//
-//     const values = InsertValues{
-//         .changed_columns = &changed_columns,
-//         .new_values = &new_values,
-//         .old_values = &old_values,
-//         .row = .{
-//             .event_time = 10,
-//             .table_name = try allocator.dupe(u8, "addresses"),
-//             .new_values = undefined,
-//             .old_values = undefined,
-//             .action = 2,
-//             .changed_columns = undefined,
-//             .transaction_id = 793,
-//             .user_id = "42",
-//             .ip_address = "192.168.1.50",
-//             .primary_key = "1",
-//         },
-//     };
-//     defer allocator.free(values.row.table_name);
-//
-//     var bulk: ch.BulkInsert = try .init(allocator, "entries", &columns, 1000);
-//     defer bulk.deinit();
-//
-//     ch_client.startInsert("INSERT INTO entries FORMAT Native") catch |err| {
-//         if (err == error.QueryFailed) {
-//             std.debug.print("Query failed: {s}\n", .{ch_client.last_error.?.message});
-//         }
-//         return err;
-//     };
-//
-//     try ch_client.insertRow(&bulk, values);
-// }
 
-test "sendHello ensure correct format" {
+test "ensureStream recover lost connect" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var client = try setupMockClient(allocator, io);
+    defer client.deinit();
+
+    try std.testing.expect(client.stream == null);
+    try std.testing.expect(client.stream_reader == null);
+    try std.testing.expect(client.stream_writer == null);
+    try std.testing.expect(client.reader == null);
+    try std.testing.expect(client.writer == null);
+
+    try client.ensureStream();
+
+    try std.testing.expect(client.stream != null);
+    try std.testing.expect(client.stream_reader != null);
+    try std.testing.expect(client.stream_writer != null);
+    try std.testing.expect(client.reader != null);
+    try std.testing.expect(client.writer != null);
+}
+
+test "sendHello ensure correct encoding" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
 
@@ -691,7 +545,6 @@ test "sendHello ensure correct format" {
     const write_buffer = try allocator.alloc(u8, 4096);
     defer allocator.free(write_buffer);
 
-    // Done to prevent reconnect for stream
     var reader = std.Io.Reader.fixed(write_buffer);
     client.reader = &reader;
 
@@ -704,16 +557,16 @@ test "sendHello ensure correct format" {
     try std.testing.expectEqual(@intFromEnum(ch.packet.ClientPacket.Hello), packet_type);
 
     const name = try ch.protocol.readString(client.reader.?);
-    try std.testing.expectEqualStrings(ch.protocol.ClientHello.CLIENT_NAME, name);
+    try std.testing.expectEqualStrings(ch.protocol.CLIENT_NAME, name);
 
     const major_version = try ch.protocol.readVarInt(client.reader.?);
-    try std.testing.expectEqual(ch.protocol.ClientHello.CLIENT_VERSION_MAJOR, major_version);
+    try std.testing.expectEqual(ch.protocol.CLIENT_VERSION_MAJOR, major_version);
 
     const minor_version = try ch.protocol.readVarInt(client.reader.?);
-    try std.testing.expectEqual(ch.protocol.ClientHello.CLIENT_VERSION_MINOR, minor_version);
+    try std.testing.expectEqual(ch.protocol.CLIENT_VERSION_MINOR, minor_version);
 
     const protocol = try ch.protocol.readVarInt(client.reader.?);
-    try std.testing.expectEqual(ch.protocol.ClientHello.PROTOCOL_VERSION, protocol);
+    try std.testing.expectEqual(ch.protocol.PROTOCOL_VERSION, protocol);
 
     const config_db_len = try client.reader.?.takeInt(u8, .little);
     try std.testing.expectEqual(client.config.database.len, config_db_len);
@@ -733,3 +586,252 @@ test "sendHello ensure correct format" {
     const config_pass = try client.reader.?.take(config_pass_len);
     try std.testing.expectEqualStrings(client.config.password, config_pass);
 }
+
+test "readServerHello ensure correct decoding" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var client = try setupMockClient(allocator, io);
+    defer client.deinit();
+
+    const read_buffer = try allocator.alloc(u8, 4096);
+    defer allocator.free(read_buffer);
+
+    const write_buffer = try allocator.alloc(u8, 4096);
+    defer allocator.free(write_buffer);
+
+    var reader = std.Io.Reader.fixed(write_buffer);
+    client.reader = &reader;
+
+    var writer = std.Io.Writer.fixed(write_buffer);
+    client.writer = &writer;
+
+    const server_name = "Test ch server";
+    const major_version: u64 = 1;
+    const minor_version: u64 = 6;
+    const revision: u64 = 6;
+
+    const tz = "utc";
+    const display = "Main";
+    const version_patch = 453;
+
+    try ch.protocol.writeVarInt(client.writer.?, @intFromEnum(ch.packet.ServerPacket.Hello));
+    try ch.protocol.writeString(client.writer.?, server_name);
+    try ch.protocol.writeVarInt(client.writer.?, major_version);
+    try ch.protocol.writeVarInt(client.writer.?, minor_version);
+    try ch.protocol.writeVarInt(client.writer.?, revision);
+    try ch.protocol.writeString(client.writer.?, tz);
+    try ch.protocol.writeString(client.writer.?, display);
+    try ch.protocol.writeVarInt(client.writer.?, version_patch);
+
+    try client.readServerHello();
+
+    try std.testing.expect(client.server_info != null);
+    try std.testing.expectEqualStrings(server_name, client.server_info.?.name);
+    try std.testing.expectEqual(major_version, client.server_info.?.major_version);
+    try std.testing.expectEqual(minor_version, client.server_info.?.minor_version);
+    try std.testing.expectEqual(revision, client.server_info.?.revision);
+    try std.testing.expectEqualStrings(tz, client.server_info.?.timezone);
+    try std.testing.expectEqualStrings(display, client.server_info.?.display_name);
+    try std.testing.expectEqual(version_patch, client.server_info.?.version_patch);
+}
+
+test "startInsert ensure correct query info" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const user_env_key = if (builtin.os.tag == .windows) "USERNAME" else "USER";
+    const os_user = try std.testing.environ.getAlloc(allocator, user_env_key);
+    defer allocator.free(os_user);
+
+    var client = ChClient.init(allocator, io, .{
+        .host = "localhost",
+        .port = 9000,
+        .username = "default",
+        .password = "clickhouse",
+        .database = "audit_log",
+    }, os_user);
+    defer client.deinit();
+
+    try client.connect();
+    defer client.disconnect();
+
+    try client.startInsert("INSERT INTO entries FORMAT Native");
+
+    try std.testing.expect(client.current_block == null);
+}
+
+test "readBlock" {
+}
+
+test "processQueryResponse" {
+}
+
+test "writeLog" {
+}
+
+test "parseRow ensure correct output" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var client = try setupMockClient(allocator, io);
+    defer client.deinit();
+
+    var changed_columns = std.StringHashMap(types.ChangedColumns).init(allocator);
+    defer changed_columns.deinit();
+    try changed_columns.ensureUnusedCapacity(1);
+
+    try changed_columns.put("id", .{ .has_changes = false, .value = "1" });
+    try changed_columns.put("address_line_1", .{ .has_changes = true, .value = "Googleplex" });
+    try changed_columns.put("address_line_2", .{ .has_changes = false, .value = "" });
+    try changed_columns.put("postal_code", .{ .has_changes = true, .value = "94043" });
+    try changed_columns.put("city", .{ .has_changes = true, .value = "Mountain View" });
+    try changed_columns.put("country", .{ .has_changes = false, .value = "US" });
+
+    var new_values = std.StringHashMapUnmanaged([]const u8).empty;
+    defer new_values.deinit(allocator);
+    try new_values.ensureUnusedCapacity(allocator, 6);
+
+    try new_values.put(allocator, "id", "1");
+    try new_values.put(allocator, "address_line_1", "1 Apple Park Way");
+    try new_values.put(allocator, "address_line_2", "");
+    try new_values.put(allocator, "postal_code", "95014");
+    try new_values.put(allocator, "city", "Cupertino");
+    try new_values.put(allocator, "country", "US");
+
+    var old_values = std.StringHashMapUnmanaged([]const u8).empty;
+    defer old_values.deinit(allocator);
+    try old_values.ensureUnusedCapacity(allocator, 6);
+
+    try old_values.put(allocator, "id", "1");
+    try old_values.put(allocator, "address_line_1", "Googleplex");
+    try old_values.put(allocator, "address_line_2", "");
+    try old_values.put(allocator, "postal_code", "94043");
+    try old_values.put(allocator, "city", "Mountain View");
+    try old_values.put(allocator, "country", "US");
+
+    const row: types.AuditEntry = .{
+        .event_time = 10,
+        .table_name = try allocator.dupe(u8, "addresses"),
+        .new_values = new_values,
+        .old_values = old_values,
+        .action = 2,
+        .changed_columns = changed_columns,
+        .transaction_id = 793,
+        .user_id = "42",
+        .ip_address = "192.168.1.50",
+        .primary_key = "1",
+    };
+    defer allocator.free(row.table_name);
+
+    var row_changed_columns = std.ArrayList(ch.bulk_insert.Value).empty;
+    defer row_changed_columns.deinit(allocator);
+
+    var row_old_values = std.StringHashMap([]const u8).init(allocator);
+    defer row_old_values.deinit();
+
+    var row_new_values = std.StringHashMap([]const u8).init(allocator);
+    defer row_new_values.deinit();
+
+    const insert_values = try client.parseRow(row, &row_changed_columns, &row_old_values, &row_new_values);
+
+    try std.testing.expectEqual(3, insert_values.changed_columns.items.len);
+    try std.testing.expectEqual(3, insert_values.new_values.count());
+    try std.testing.expectEqual(3, insert_values.old_values.count());
+
+    try std.testing.expectEqualStrings("address_line_1", insert_values.changed_columns.items[0].String);
+    try std.testing.expectEqualStrings("postal_code", insert_values.changed_columns.items[1].String);
+    try std.testing.expectEqualStrings("city", insert_values.changed_columns.items[2].String);
+
+    try std.testing.expectEqualStrings("1 Apple Park Way", insert_values.new_values.get("address_line_1").?);
+    try std.testing.expectEqualStrings("95014", insert_values.new_values.get("postal_code").?);
+    try std.testing.expectEqualStrings("Cupertino", insert_values.new_values.get("city").?);
+
+    try std.testing.expectEqualStrings("Googleplex", insert_values.old_values.get("address_line_1").?);
+    try std.testing.expectEqualStrings("94043", insert_values.old_values.get("postal_code").?);
+    try std.testing.expectEqualStrings("Mountain View", insert_values.old_values.get("city").?);
+
+    try std.testing.expectEqualStrings("42", insert_values.row.user_id);
+    try std.testing.expectEqualStrings("192.168.1.50", insert_values.row.ip_address);
+    try std.testing.expectEqualStrings("1", insert_values.row.primary_key);
+    try std.testing.expectEqualStrings("addresses", insert_values.row.table_name);
+    try std.testing.expectEqual(2, insert_values.row.action);
+    try std.testing.expectEqual(793, insert_values.row.transaction_id);
+    try std.testing.expectEqual(10, insert_values.row.event_time);
+}
+
+test "insertRow ensure correct insertion" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const user_env_key = if (builtin.os.tag == .windows) "USERNAME" else "USER";
+    const os_user = try std.testing.environ.getAlloc(allocator, user_env_key);
+    defer allocator.free(os_user);
+
+    var client = ChClient.init(allocator, io, .{
+        .host = "localhost",
+        .port = 9000,
+        .username = "default",
+        .password = "clickhouse",
+        .database = "audit_log",
+    }, os_user);
+    defer client.deinit();
+
+    try client.connect();
+
+    var changed_columns = std.ArrayList(ch.bulk_insert.Value).empty;
+    defer changed_columns.deinit(allocator);
+    try changed_columns.ensureUnusedCapacity(allocator, 3);
+
+    changed_columns.appendAssumeCapacity(.{ .String = "address_line_1" });
+    changed_columns.appendAssumeCapacity(.{ .String = "postal_code" });
+    changed_columns.appendAssumeCapacity(.{ .String = "city" });
+
+    var new_values = std.StringHashMap([]const u8).init(allocator);
+    defer new_values.deinit();
+    try new_values.ensureUnusedCapacity(3);
+
+    new_values.putAssumeCapacity("address_line_1", "1 Apple Park Way");
+    new_values.putAssumeCapacity("postal_code", "94043");
+    new_values.putAssumeCapacity("city", "Cupertino");
+
+    var old_values = std.StringHashMap([]const u8).init(allocator);
+    defer old_values.deinit();
+    try old_values.ensureUnusedCapacity(3);
+
+    old_values.putAssumeCapacity("address_line_1", "Googleplex");
+    old_values.putAssumeCapacity("postal_code", "95014");
+    old_values.putAssumeCapacity("city", "Mountain View");
+
+    const values = InsertValues{
+        .changed_columns = &changed_columns,
+        .new_values = &new_values,
+        .old_values = &old_values,
+        .row = .{
+            .event_time = 10,
+            .table_name = try allocator.dupe(u8, "addresses"),
+            .new_values = undefined,
+            .old_values = undefined,
+            .action = 2,
+            .changed_columns = undefined,
+            .transaction_id = 793,
+            .user_id = "42",
+            .ip_address = "192.168.1.50",
+            .primary_key = "1",
+        },
+    };
+    defer allocator.free(values.row.table_name);
+
+    var bulk: ch.BulkInsert = try .init(allocator, "entries", &columns, 1000);
+    defer bulk.deinit();
+
+    client.startInsert("INSERT INTO entries FORMAT Native") catch |err| {
+        if (err == error.QueryFailed) {
+            std.debug.print("Error: Query failed, {s}\n", .{client.last_error.?.message});
+        }
+        return err;
+    };
+
+    try client.insertRow(&bulk, values);
+}
+

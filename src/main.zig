@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 
 const pg = @import("pg");
@@ -14,6 +15,10 @@ pub fn main(init: std.process.Init) !void {
 
     const allocator: std.mem.Allocator = init.arena.allocator();
     const io = init.io;
+
+    const user_env_key = if (builtin.os.tag == .windows) "USERNAME" else "USER";
+    const os_user = init.environ_map.get(user_env_key);
+    defer allocator.free(os_user.?);
 
     var pg_client = try PgClient.init(io, allocator, .{
         .connect = .{  
@@ -35,10 +40,11 @@ pub fn main(init: std.process.Init) !void {
         .username = "default",
         .password = "clickhouse",
         .database = "audit_log",
-    });
+    }, os_user.?);
     defer ch_client.deinit();
 
     try ch_client.connect();
+    errdefer ch_client.disconnect();
 
     std.debug.print("calling BulkInsert.init\n", .{});
 
