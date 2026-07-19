@@ -1,4 +1,8 @@
 const std = @import("std");
+const Io = std.Io;
+const mem = std.mem;
+const testing = std.testing;
+
 const assert = std.debug.assert;
 
 const pg = @import("pg");
@@ -16,7 +20,7 @@ pub const ReadResponse = struct {
     commit_timestamp: ?i64,
     eof: bool = false,
 
-    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *@This(), allocator: mem.Allocator) void {
         if (self.entry) |*entry| {
             entry.deinit(allocator);
         }
@@ -34,7 +38,7 @@ pub const ParseResponse = struct {
     last_lsn: ?u64,
     commit_timestamp: ?u64,
 
-    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *@This(), allocator: mem.Allocator) void {
         if (self.entry) |*entry| {
             entry.deinit(allocator);
         }
@@ -67,8 +71,8 @@ pub const Opts = struct {
 };
 
 pub const PgClient = struct {
-    allocator: std.mem.Allocator,
-    io: std.Io,
+    allocator: mem.Allocator,
+    io: Io,
 
     conn_opts: Opts,
 
@@ -81,7 +85,7 @@ pub const PgClient = struct {
     pool: ?*pg.Pool,
     wal_conn: ?*pg.Conn,
 
-    pub fn init(io: std.Io, allocator: std.mem.Allocator, opts: Opts) !PgClient{
+    pub fn init(io: Io, allocator: mem.Allocator, opts: Opts) !PgClient{
         var pool = try createConnPool(allocator, io, opts);
         errdefer pool.deinit();
 
@@ -146,7 +150,7 @@ pub const PgClient = struct {
 
         const msg_len: u32 = @as(u32, @intCast(query.len)) + 4 + 1;
         var len_buf: [4]u8 = undefined;
-        std.mem.writeInt(u32, &len_buf, msg_len, .big);
+        mem.writeInt(u32, &len_buf, msg_len, .big);
 
         if (self.wal_conn) |wal_conn| {
             try wal_conn.write("Q");
@@ -181,8 +185,8 @@ pub const PgClient = struct {
                 if (data_type == 'w') {
                     if (msg.data.len < 25) return response;
 
-                    const start_lsn = std.mem.readInt(u64, msg.data[1..9][0..8], .big);
-                    const server_timestamp = std.mem.readInt(i64, msg.data[17..25][0..8], .big);
+                    const start_lsn = mem.readInt(u64, msg.data[1..9][0..8], .big);
+                    const server_timestamp = mem.readInt(i64, msg.data[17..25][0..8], .big);
 
                     self.last_timestamp = server_timestamp;
 
@@ -210,8 +214,8 @@ pub const PgClient = struct {
                 } else if (data_type == 'k') {
                     if (msg.data.len < 18) return response;
 
-                    const current_lsn = std.mem.readInt(u64, msg.data[1..9][0..8], .big);
-                    const server_timestamp = std.mem.readInt(i64, msg.data[9..17][0..8], .big);
+                    const current_lsn = mem.readInt(u64, msg.data[1..9][0..8], .big);
+                    const server_timestamp = mem.readInt(i64, msg.data[9..17][0..8], .big);
                     const reply_requested = msg.data[17];
 
                     if (current_lsn > self.last_lsn) {
@@ -247,7 +251,7 @@ pub const PgClient = struct {
 
         if (payload.len == 0) return response;
 
-        var reader = std.Io.Reader.fixed(payload);
+        var reader = Io.Reader.fixed(payload);
 
         const msg_type = try reader.takeByte();
 
@@ -431,38 +435,38 @@ pub const PgClient = struct {
 
                 _ = flags;
                 _ = lsn;
-                if (std.mem.eql(u8, prefix, "ergo_meta")) {
-                    var it = std.mem.splitAny(u8, content, ",");
+                if (mem.eql(u8, prefix, "ergo_meta")) {
+                    var it = mem.splitAny(u8, content, ",");
 
                     const user_id_str = it.next() orelse return error.InvalidMapType;
                     const ip_address_str = it.next() orelse return error.InvalidMapType;
 
-                    var user_id_it = std.mem.splitAny(u8, user_id_str, ":");
-                    var ip_address_it = std.mem.splitAny(u8, ip_address_str, ":");
+                    var user_id_it = mem.splitAny(u8, user_id_str, ":");
+                    var ip_address_it = mem.splitAny(u8, ip_address_str, ":");
 
                     const user_id_key_str = user_id_it.next() orelse return error.InvalidMapType;
                     const ip_address_key_str = ip_address_it.next() orelse return error.InvalidMapType;
 
-                    const user_id_key = std.mem.trim(u8, user_id_key_str, " ");
-                    const ip_address_key = std.mem.trim(u8, ip_address_key_str, " ");
+                    const user_id_key = mem.trim(u8, user_id_key_str, " ");
+                    const ip_address_key = mem.trim(u8, ip_address_key_str, " ");
 
-                    if (!std.mem.eql(u8, user_id_key, "\"user_id\"")) {
+                    if (!mem.eql(u8, user_id_key, "\"user_id\"")) {
                         return error.InvalidMapType;
                     }
 
-                    if (!std.mem.eql(u8, ip_address_key, "\"ip\"")) {
+                    if (!mem.eql(u8, ip_address_key, "\"ip\"")) {
                         return error.InvalidMapType;
                     }
 
                     const user_id_value_str = user_id_it.next() orelse return error.InvalidMapType;
                     const ip_address_value_str = ip_address_it.next() orelse return error.InvalidMapType;
 
-                    const user_id_value = std.mem.trim(u8, std.mem.trim(u8, user_id_value_str, " "), "\"");
-                    const ip_address_value = std.mem.trim(u8, std.mem.trim(u8, ip_address_value_str, " "), "\"");
+                    const user_id_value = mem.trim(u8, mem.trim(u8, user_id_value_str, " "), "\"");
+                    const ip_address_value = mem.trim(u8, mem.trim(u8, ip_address_value_str, " "), "\"");
 
                     const check_str = try std.fmt.allocPrint(self.allocator, "{s}: \"{s}\", {s}: \"{s}\"", .{user_id_key, user_id_value, ip_address_key, ip_address_value});
                     defer self.allocator.free(check_str);
-                    assert(std.mem.eql(u8, check_str, content));
+                    assert(mem.eql(u8, check_str, content));
 
                     self.context.user_id = try self.allocator.dupe(u8, user_id_value);
                     self.context.ip_address = try self.allocator.dupe(u8, ip_address_value);
@@ -476,7 +480,7 @@ pub const PgClient = struct {
         return response;
     }
 
-    fn parseTupleData(self: *PgClient, reader: *std.Io.Reader, table: TableDef) !std.StringHashMapUnmanaged([]const u8) {
+    fn parseTupleData(self: *PgClient, reader: *Io.Reader, table: TableDef) !std.StringHashMapUnmanaged([]const u8) {
         const num_columns = try reader.takeInt(u16, .big);
 
         if (num_columns > table.columns.items.len) {
@@ -510,7 +514,7 @@ pub const PgClient = struct {
                             .value = val_buf,
                             .has_changes = true,
                         };
-                    } else if (std.mem.eql(u8, changed_column.value_ptr.*.value, val_buf)) {
+                    } else if (mem.eql(u8, changed_column.value_ptr.*.value, val_buf)) {
                         changed_column.value_ptr.*.has_changes = false;
                     }
 
@@ -547,7 +551,7 @@ pub const PgClient = struct {
         while (try result.next()) |row| {
             const column_name = try row.get([]const u8, column_name_index);
             const constraint_types = try row.get([]const u8, constraint_types_index);
-            try columns.append(self.allocator, .{ .name = column_name, .is_key = std.mem.containsAtLeast(u8, constraint_types, 1, "p") });
+            try columns.append(self.allocator, .{ .name = column_name, .is_key = mem.containsAtLeast(u8, constraint_types, 1, "p") });
         }
         return columns;
     }
@@ -575,7 +579,7 @@ pub const PgClient = struct {
         try self.wal_conn.?._reader.endFlow();
     }
 
-    pub fn createWalConn(allocator: std.mem.Allocator, io:  std.Io, opts: Opts) !*pg.Conn {
+    pub fn createWalConn(allocator: mem.Allocator, io:  Io, opts: Opts) !*pg.Conn {
         var conn = try allocator.create(pg.Conn);
         conn.* = pg.Conn.open(io, allocator, opts.connect) catch |err| {
             std.debug.print("Failed to connect: {}\n", .{err});
@@ -601,7 +605,7 @@ pub const PgClient = struct {
         return conn;
     }
 
-    pub fn createConnPool(allocator: std.mem.Allocator, io: std.Io, opts: Opts) !*pg.Pool {
+    pub fn createConnPool(allocator: mem.Allocator, io: Io, opts: Opts) !*pg.Pool {
         return pg.Pool.init(io, allocator, .{ .size = 1, .connect = opts.connect, .auth = opts.auth}) catch |err| {
             std.debug.print("Failed to connect: {}\n", .{err});
             std.process.exit(1);
@@ -609,7 +613,7 @@ pub const PgClient = struct {
     }
 };
 
-fn setupMockClient(allocator: std.mem.Allocator, io: std.Io) !PgClient {
+fn setupMockClient(allocator: mem.Allocator, io: Io) !PgClient {
     var cols = std.ArrayList(ColumnDef).empty;
     try cols.ensureUnusedCapacity(allocator, 6);
     try cols.append(allocator, .{ .name = "id", .is_key = true });
@@ -649,8 +653,8 @@ fn setupMockClient(allocator: std.mem.Allocator, io: std.Io) !PgClient {
 }
 
 test "parsePgOutput maps BEGIN correctly" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
+    const allocator = testing.allocator;
+    const io = testing.io;
 
     var client = try setupMockClient(allocator, io);
     defer client.deinit();
@@ -665,17 +669,17 @@ test "parsePgOutput maps BEGIN correctly" {
     var result = try client.parsePgOutput(commit_bytes);
     defer result.deinit(allocator);
 
-    try std.testing.expectEqual(xid, client.context.xid);
-    try std.testing.expectEqualStrings("", client.context.ip_address);
-    try std.testing.expectEqualStrings("", client.context.user_id);
-    try std.testing.expectEqual(null, result.entry);
-    try std.testing.expectEqual(null, result.last_lsn);
-    try std.testing.expectEqual(null, result.commit_timestamp);
+    try testing.expectEqual(xid, client.context.xid);
+    try testing.expectEqualStrings("", client.context.ip_address);
+    try testing.expectEqualStrings("", client.context.user_id);
+    try testing.expectEqual(null, result.entry);
+    try testing.expectEqual(null, result.last_lsn);
+    try testing.expectEqual(null, result.commit_timestamp);
 }
 
 test "parsePgOutput maps METADATA correctly" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
+    const allocator = testing.allocator;
+    const io = testing.io;
 
     var client = try setupMockClient(allocator, io);
     defer client.deinit();
@@ -694,17 +698,17 @@ test "parsePgOutput maps METADATA correctly" {
     var result = try client.parsePgOutput(metadata_bytes);
     defer result.deinit(allocator);
 
-    try std.testing.expectEqualStrings("42", client.context.user_id);
-    try std.testing.expectEqualStrings("192.168.1.50", client.context.ip_address);
+    try testing.expectEqualStrings("42", client.context.user_id);
+    try testing.expectEqualStrings("192.168.1.50", client.context.ip_address);
 
-    try std.testing.expectEqual(null, result.entry);
-    try std.testing.expectEqual(null, result.last_lsn);
-    try std.testing.expectEqual(null, result.commit_timestamp);
+    try testing.expectEqual(null, result.entry);
+    try testing.expectEqual(null, result.last_lsn);
+    try testing.expectEqual(null, result.commit_timestamp);
 }
 
 test "parsePgOutput maps RELATION correctly" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
+    const allocator = testing.allocator;
+    const io = testing.io;
 
     var client = PgClient{
         .allocator = allocator,
@@ -747,12 +751,12 @@ test "parsePgOutput maps RELATION correctly" {
     var result = try client.parsePgOutput(insert_bytes);
     defer result.deinit(allocator);
 
-    try std.testing.expectEqual(1, client.table_reg.count());
+    try testing.expectEqual(1, client.table_reg.count());
 }
 
 test "parsePgOutput maps INSERT correctly" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
+    const allocator = testing.allocator;
+    const io = testing.io;
 
     var client = try setupMockClient(allocator, io);
     defer client.deinit();
@@ -768,48 +772,48 @@ test "parsePgOutput maps INSERT correctly" {
     var result = try client.parsePgOutput(insert_bytes);
     defer result.deinit(allocator);
 
-    try std.testing.expectEqual(1, result.entry.?.action);
-    try std.testing.expectEqualStrings("public.addresses", result.entry.?.table_name);
+    try testing.expectEqual(1, result.entry.?.action);
+    try testing.expectEqualStrings("public.addresses", result.entry.?.table_name);
 
     // Changed columns
-    try std.testing.expectEqual(true, result.entry.?.changed_columns.get("id").?.has_changes);
-    try std.testing.expectEqualStrings("1", result.entry.?.changed_columns.get("id").?.value);
+    try testing.expectEqual(true, result.entry.?.changed_columns.get("id").?.has_changes);
+    try testing.expectEqualStrings("1", result.entry.?.changed_columns.get("id").?.value);
 
-    try std.testing.expectEqual(true, result.entry.?.changed_columns.get("address_line_1").?.has_changes);
-    try std.testing.expectEqualStrings("1 Apple Park Way", result.entry.?.changed_columns.get("address_line_1").?.value);
+    try testing.expectEqual(true, result.entry.?.changed_columns.get("address_line_1").?.has_changes);
+    try testing.expectEqualStrings("1 Apple Park Way", result.entry.?.changed_columns.get("address_line_1").?.value);
 
-    try std.testing.expectEqual(null, result.entry.?.changed_columns.get("address_line_2"));
+    try testing.expectEqual(null, result.entry.?.changed_columns.get("address_line_2"));
 
-    try std.testing.expectEqual(true, result.entry.?.changed_columns.get("postal_code").?.has_changes);
-    try std.testing.expectEqualStrings("95014", result.entry.?.changed_columns.get("postal_code").?.value);
+    try testing.expectEqual(true, result.entry.?.changed_columns.get("postal_code").?.has_changes);
+    try testing.expectEqualStrings("95014", result.entry.?.changed_columns.get("postal_code").?.value);
 
-    try std.testing.expectEqual(true, result.entry.?.changed_columns.get("city").?.has_changes);
-    try std.testing.expectEqualStrings("Cupertino", result.entry.?.changed_columns.get("city").?.value);
+    try testing.expectEqual(true, result.entry.?.changed_columns.get("city").?.has_changes);
+    try testing.expectEqualStrings("Cupertino", result.entry.?.changed_columns.get("city").?.value);
 
-    try std.testing.expectEqual(true, result.entry.?.changed_columns.get("country").?.has_changes);
-    try std.testing.expectEqualStrings("US", result.entry.?.changed_columns.get("country").?.value);
+    try testing.expectEqual(true, result.entry.?.changed_columns.get("country").?.has_changes);
+    try testing.expectEqualStrings("US", result.entry.?.changed_columns.get("country").?.value);
 
     // Old values
-    try std.testing.expectEqual(0, result.entry.?.old_values.capacity());
+    try testing.expectEqual(0, result.entry.?.old_values.capacity());
 
     // New values
-    try std.testing.expectEqualStrings("1", result.entry.?.new_values.get("id").?);
-    try std.testing.expectEqualStrings("1 Apple Park Way", result.entry.?.new_values.get("address_line_1").?);
-    try std.testing.expectEqual(null, result.entry.?.new_values.get("address_line_2"));
-    try std.testing.expectEqualStrings("95014", result.entry.?.new_values.get("postal_code").?);
-    try std.testing.expectEqualStrings("Cupertino", result.entry.?.new_values.get("city").?);
-    try std.testing.expectEqualStrings("US", result.entry.?.new_values.get("country").?);
+    try testing.expectEqualStrings("1", result.entry.?.new_values.get("id").?);
+    try testing.expectEqualStrings("1 Apple Park Way", result.entry.?.new_values.get("address_line_1").?);
+    try testing.expectEqual(null, result.entry.?.new_values.get("address_line_2"));
+    try testing.expectEqualStrings("95014", result.entry.?.new_values.get("postal_code").?);
+    try testing.expectEqualStrings("Cupertino", result.entry.?.new_values.get("city").?);
+    try testing.expectEqualStrings("US", result.entry.?.new_values.get("country").?);
 
-    try std.testing.expectEqual(0, client.context.xid);
-    try std.testing.expectEqualStrings("", client.context.ip_address);
-    try std.testing.expectEqualStrings("", client.context.user_id);
-    try std.testing.expectEqual(null, result.last_lsn);
-    try std.testing.expectEqual(null, result.commit_timestamp);
+    try testing.expectEqual(0, client.context.xid);
+    try testing.expectEqualStrings("", client.context.ip_address);
+    try testing.expectEqualStrings("", client.context.user_id);
+    try testing.expectEqual(null, result.last_lsn);
+    try testing.expectEqual(null, result.commit_timestamp);
 }
 
 test "parsePgOutput maps UPDATE correctly" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
+    const allocator = testing.allocator;
+    const io = testing.io;
 
     var client = try setupMockClient(allocator, io);
     defer client.deinit();
@@ -828,51 +832,51 @@ test "parsePgOutput maps UPDATE correctly" {
     var result = try client.parsePgOutput(update_bytes);
     defer result.deinit(allocator);
 
-    try std.testing.expectEqual(2, result.entry.?.action);
-    try std.testing.expectEqualStrings("public.addresses", result.entry.?.table_name);
+    try testing.expectEqual(2, result.entry.?.action);
+    try testing.expectEqualStrings("public.addresses", result.entry.?.table_name);
 
     // Changed columns
-    try std.testing.expectEqual(false, result.entry.?.changed_columns.get("id").?.has_changes);
-    try std.testing.expectEqualStrings("1", result.entry.?.changed_columns.get("id").?.value);
+    try testing.expectEqual(false, result.entry.?.changed_columns.get("id").?.has_changes);
+    try testing.expectEqualStrings("1", result.entry.?.changed_columns.get("id").?.value);
 
-    try std.testing.expectEqual(true, result.entry.?.changed_columns.get("address_line_1").?.has_changes);
-    try std.testing.expectEqualStrings("1 Apple Park Way", result.entry.?.changed_columns.get("address_line_1").?.value);
+    try testing.expectEqual(true, result.entry.?.changed_columns.get("address_line_1").?.has_changes);
+    try testing.expectEqualStrings("1 Apple Park Way", result.entry.?.changed_columns.get("address_line_1").?.value);
 
-    try std.testing.expectEqual(null, result.entry.?.changed_columns.get("address_line_2"));
+    try testing.expectEqual(null, result.entry.?.changed_columns.get("address_line_2"));
 
-    try std.testing.expectEqual(true, result.entry.?.changed_columns.get("postal_code").?.has_changes);
-    try std.testing.expectEqualStrings("95014", result.entry.?.changed_columns.get("postal_code").?.value);
+    try testing.expectEqual(true, result.entry.?.changed_columns.get("postal_code").?.has_changes);
+    try testing.expectEqualStrings("95014", result.entry.?.changed_columns.get("postal_code").?.value);
 
-    try std.testing.expectEqual(true, result.entry.?.changed_columns.get("city").?.has_changes);
-    try std.testing.expectEqualStrings("Cupertino", result.entry.?.changed_columns.get("city").?.value);
+    try testing.expectEqual(true, result.entry.?.changed_columns.get("city").?.has_changes);
+    try testing.expectEqualStrings("Cupertino", result.entry.?.changed_columns.get("city").?.value);
 
-    try std.testing.expectEqual(false, result.entry.?.changed_columns.get("country").?.has_changes);
-    try std.testing.expectEqualStrings("US", result.entry.?.changed_columns.get("country").?.value);
+    try testing.expectEqual(false, result.entry.?.changed_columns.get("country").?.has_changes);
+    try testing.expectEqualStrings("US", result.entry.?.changed_columns.get("country").?.value);
 
     // Old values
-    try std.testing.expectEqualStrings("1 Apple Park Way", result.entry.?.old_values.get("address_line_1").?);
-    try std.testing.expectEqual(null, result.entry.?.old_values.get("address_line_2"));
-    try std.testing.expectEqualStrings("95014", result.entry.?.old_values.get("postal_code").?);
-    try std.testing.expectEqualStrings("Cupertino", result.entry.?.old_values.get("city").?);
-    try std.testing.expectEqualStrings("US", result.entry.?.old_values.get("country").?);
+    try testing.expectEqualStrings("1 Apple Park Way", result.entry.?.old_values.get("address_line_1").?);
+    try testing.expectEqual(null, result.entry.?.old_values.get("address_line_2"));
+    try testing.expectEqualStrings("95014", result.entry.?.old_values.get("postal_code").?);
+    try testing.expectEqualStrings("Cupertino", result.entry.?.old_values.get("city").?);
+    try testing.expectEqualStrings("US", result.entry.?.old_values.get("country").?);
 
     // New values
-    try std.testing.expectEqualStrings("Googleplex", result.entry.?.new_values.get("address_line_1").?);
-    try std.testing.expectEqual(null, result.entry.?.new_values.get("address_line_2"));
-    try std.testing.expectEqualStrings("94043", result.entry.?.new_values.get("postal_code").?);
-    try std.testing.expectEqualStrings("Mountain View", result.entry.?.new_values.get("city").?);
-    try std.testing.expectEqualStrings("US", result.entry.?.new_values.get("country").?);
+    try testing.expectEqualStrings("Googleplex", result.entry.?.new_values.get("address_line_1").?);
+    try testing.expectEqual(null, result.entry.?.new_values.get("address_line_2"));
+    try testing.expectEqualStrings("94043", result.entry.?.new_values.get("postal_code").?);
+    try testing.expectEqualStrings("Mountain View", result.entry.?.new_values.get("city").?);
+    try testing.expectEqualStrings("US", result.entry.?.new_values.get("country").?);
 
-    try std.testing.expectEqual(0, client.context.xid);
-    try std.testing.expectEqualStrings("", client.context.ip_address);
-    try std.testing.expectEqualStrings("", client.context.user_id);
-    try std.testing.expectEqual(null, result.last_lsn);
-    try std.testing.expectEqual(null, result.commit_timestamp);
+    try testing.expectEqual(0, client.context.xid);
+    try testing.expectEqualStrings("", client.context.ip_address);
+    try testing.expectEqualStrings("", client.context.user_id);
+    try testing.expectEqual(null, result.last_lsn);
+    try testing.expectEqual(null, result.commit_timestamp);
 }
 
 test "parsePgOutput maps DELETE correctly" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
+    const allocator = testing.allocator;
+    const io = testing.io;
 
     var client = try setupMockClient(allocator, io);
     defer client.deinit();
@@ -887,48 +891,48 @@ test "parsePgOutput maps DELETE correctly" {
     var result = try client.parsePgOutput(delete_bytes);
     defer result.deinit(allocator);
 
-    try std.testing.expectEqual(3, result.entry.?.action);
-    try std.testing.expectEqualStrings("public.addresses", result.entry.?.table_name);
+    try testing.expectEqual(3, result.entry.?.action);
+    try testing.expectEqualStrings("public.addresses", result.entry.?.table_name);
 
     // Changed columns
-    try std.testing.expectEqual(true, result.entry.?.changed_columns.get("id").?.has_changes);
-    try std.testing.expectEqualStrings("1", result.entry.?.changed_columns.get("id").?.value);
+    try testing.expectEqual(true, result.entry.?.changed_columns.get("id").?.has_changes);
+    try testing.expectEqualStrings("1", result.entry.?.changed_columns.get("id").?.value);
 
-    try std.testing.expectEqual(true, result.entry.?.changed_columns.get("address_line_1").?.has_changes);
-    try std.testing.expectEqualStrings("Googleplex", result.entry.?.changed_columns.get("address_line_1").?.value);
+    try testing.expectEqual(true, result.entry.?.changed_columns.get("address_line_1").?.has_changes);
+    try testing.expectEqualStrings("Googleplex", result.entry.?.changed_columns.get("address_line_1").?.value);
 
-    try std.testing.expectEqual(null, result.entry.?.changed_columns.get("address_line_2"));
+    try testing.expectEqual(null, result.entry.?.changed_columns.get("address_line_2"));
 
-    try std.testing.expectEqual(true, result.entry.?.changed_columns.get("postal_code").?.has_changes);
-    try std.testing.expectEqualStrings("94043", result.entry.?.changed_columns.get("postal_code").?.value);
+    try testing.expectEqual(true, result.entry.?.changed_columns.get("postal_code").?.has_changes);
+    try testing.expectEqualStrings("94043", result.entry.?.changed_columns.get("postal_code").?.value);
 
-    try std.testing.expectEqual(true, result.entry.?.changed_columns.get("city").?.has_changes);
-    try std.testing.expectEqualStrings("Mountain View", result.entry.?.changed_columns.get("city").?.value);
+    try testing.expectEqual(true, result.entry.?.changed_columns.get("city").?.has_changes);
+    try testing.expectEqualStrings("Mountain View", result.entry.?.changed_columns.get("city").?.value);
 
-    try std.testing.expectEqual(true, result.entry.?.changed_columns.get("country").?.has_changes);
-    try std.testing.expectEqualStrings("US", result.entry.?.changed_columns.get("country").?.value);
+    try testing.expectEqual(true, result.entry.?.changed_columns.get("country").?.has_changes);
+    try testing.expectEqualStrings("US", result.entry.?.changed_columns.get("country").?.value);
 
     // Old values
-    try std.testing.expectEqualStrings("1", result.entry.?.old_values.get("id").?);
-    try std.testing.expectEqualStrings("Googleplex", result.entry.?.old_values.get("address_line_1").?);
-    try std.testing.expectEqual(null, result.entry.?.old_values.get("address_line_2"));
-    try std.testing.expectEqualStrings("94043", result.entry.?.old_values.get("postal_code").?);
-    try std.testing.expectEqualStrings("Mountain View", result.entry.?.old_values.get("city").?);
-    try std.testing.expectEqualStrings("US", result.entry.?.old_values.get("country").?);
+    try testing.expectEqualStrings("1", result.entry.?.old_values.get("id").?);
+    try testing.expectEqualStrings("Googleplex", result.entry.?.old_values.get("address_line_1").?);
+    try testing.expectEqual(null, result.entry.?.old_values.get("address_line_2"));
+    try testing.expectEqualStrings("94043", result.entry.?.old_values.get("postal_code").?);
+    try testing.expectEqualStrings("Mountain View", result.entry.?.old_values.get("city").?);
+    try testing.expectEqualStrings("US", result.entry.?.old_values.get("country").?);
 
     // New values
-    try std.testing.expectEqual(0, result.entry.?.new_values.capacity());
+    try testing.expectEqual(0, result.entry.?.new_values.capacity());
 
-    try std.testing.expectEqual(0, client.context.xid);
-    try std.testing.expectEqualStrings("", client.context.ip_address);
-    try std.testing.expectEqualStrings("", client.context.user_id);
-    try std.testing.expectEqual(null, result.last_lsn);
-    try std.testing.expectEqual(null, result.commit_timestamp);
+    try testing.expectEqual(0, client.context.xid);
+    try testing.expectEqualStrings("", client.context.ip_address);
+    try testing.expectEqualStrings("", client.context.user_id);
+    try testing.expectEqual(null, result.last_lsn);
+    try testing.expectEqual(null, result.commit_timestamp);
 }
 
 test "parsePgOutput maps COMMIT correctly" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
+    const allocator = testing.allocator;
+    const io = testing.io;
 
     var client = try setupMockClient(allocator, io);
     defer client.deinit();
@@ -944,17 +948,17 @@ test "parsePgOutput maps COMMIT correctly" {
     var result = try client.parsePgOutput(insert_bytes);
     defer result.deinit(allocator);
 
-    try std.testing.expectEqual(0, client.context.xid);
-    try std.testing.expectEqualStrings("", client.context.ip_address);
-    try std.testing.expectEqualStrings("", client.context.user_id);
-    try std.testing.expectEqual(null, result.entry);
-    try std.testing.expectEqual(last_lsn, result.last_lsn);
-    try std.testing.expectEqual(commit_timestamp, result.commit_timestamp);
+    try testing.expectEqual(0, client.context.xid);
+    try testing.expectEqualStrings("", client.context.ip_address);
+    try testing.expectEqualStrings("", client.context.user_id);
+    try testing.expectEqual(null, result.entry);
+    try testing.expectEqual(last_lsn, result.last_lsn);
+    try testing.expectEqual(commit_timestamp, result.commit_timestamp);
 }
 
 test "resetContext clears context correctly" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
+    const allocator = testing.allocator;
+    const io = testing.io;
 
     var client = try setupMockClient(allocator, io);
     defer client.deinit();
@@ -972,16 +976,16 @@ test "resetContext clears context correctly" {
     var result = try client.parsePgOutput(commit_bytes);
     result.deinit(allocator);
 
-    try std.testing.expectEqual(null, result.entry);
+    try testing.expectEqual(null, result.entry);
 
-    try std.testing.expectEqual(0, client.context.xid);
-    try std.testing.expectEqualStrings("", client.context.ip_address);
-    try std.testing.expectEqualStrings("", client.context.user_id);
+    try testing.expectEqual(0, client.context.xid);
+    try testing.expectEqualStrings("", client.context.ip_address);
+    try testing.expectEqualStrings("", client.context.user_id);
 }
 
 test "parseTupleData" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
+    const allocator = testing.allocator;
+    const io = testing.io;
 
     var client = try setupMockClient(allocator, io);
     defer client.deinit();
@@ -992,26 +996,26 @@ test "parseTupleData" {
     defer allocator.free(commit_bytes);
     _ = try std.fmt.hexToBytes(commit_bytes, commit_hex);
 
-    var reader = std.Io.Reader.fixed(commit_bytes);
+    var reader = Io.Reader.fixed(commit_bytes);
 
     var result = try client.parseTupleData(&reader, client.table_reg.get(16390).?);
     defer result.deinit(allocator);
 
-    try std.testing.expectEqualStrings("1", result.get("id").?);
-    try std.testing.expectEqualStrings("1 Apple Park Way", result.get("address_line_1").?);
-    try std.testing.expectEqual(null, result.get("address_line_2"));
-    try std.testing.expectEqualStrings("95014", result.get("postal_code").?);
-    try std.testing.expectEqualStrings("Cupertino", result.get("city").?);
-    try std.testing.expectEqualStrings("US", result.get("country").?);
+    try testing.expectEqualStrings("1", result.get("id").?);
+    try testing.expectEqualStrings("1 Apple Park Way", result.get("address_line_1").?);
+    try testing.expectEqual(null, result.get("address_line_2"));
+    try testing.expectEqualStrings("95014", result.get("postal_code").?);
+    try testing.expectEqualStrings("Cupertino", result.get("city").?);
+    try testing.expectEqualStrings("US", result.get("country").?);
 
-    try std.testing.expectEqual(0, client.context.xid);
-    try std.testing.expectEqualStrings("", client.context.ip_address);
-    try std.testing.expectEqualStrings("", client.context.user_id);
+    try testing.expectEqual(0, client.context.xid);
+    try testing.expectEqualStrings("", client.context.ip_address);
+    try testing.expectEqualStrings("", client.context.user_id);
 }
 
 test "readSchemaKeys" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
+    const allocator = testing.allocator;
+    const io = testing.io;
 
     var client = PgClient{
         .allocator = allocator,
@@ -1040,14 +1044,14 @@ test "readSchemaKeys" {
     var columns = try client.readSchemaKeys("users");
     defer columns.deinit(allocator);
 
-    try std.testing.expectEqual(6, columns.items.len);
+    try testing.expectEqual(6, columns.items.len);
 
     for (columns.items) |item|  {
-        if (std.mem.eql(u8, "id", item.name)) { try std.testing.expectEqual(true, item.is_key); }
-        else if (std.mem.eql(u8, "address_id", item.name)) { try std.testing.expectEqual(false, item.is_key); }
-        else if (std.mem.eql(u8, "age", item.name)) { try std.testing.expectEqual(false, item.is_key); }
-        else if (std.mem.eql(u8, "email_address", item.name)) { try std.testing.expectEqual(false, item.is_key); }
-        else if (std.mem.eql(u8, "gender", item.name)) { try std.testing.expectEqual(false, item.is_key); }
-        else if (std.mem.eql(u8, "name", item.name)) { try std.testing.expectEqual(false, item.is_key); }
+        if (mem.eql(u8, "id", item.name)) { try testing.expectEqual(true, item.is_key); }
+        else if (mem.eql(u8, "address_id", item.name)) { try testing.expectEqual(false, item.is_key); }
+        else if (mem.eql(u8, "age", item.name)) { try testing.expectEqual(false, item.is_key); }
+        else if (mem.eql(u8, "email_address", item.name)) { try testing.expectEqual(false, item.is_key); }
+        else if (mem.eql(u8, "gender", item.name)) { try testing.expectEqual(false, item.is_key); }
+        else if (mem.eql(u8, "name", item.name)) { try testing.expectEqual(false, item.is_key); }
     }
 }

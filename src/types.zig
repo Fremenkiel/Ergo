@@ -1,4 +1,5 @@
 const std = @import("std");
+const mem = std.mem;
 
 pub const ChangedColumns = struct {
     value: []const u8,
@@ -17,7 +18,7 @@ pub const AuditEntry = struct {
     new_values: std.StringHashMapUnmanaged([]const u8) = .empty,
     ip_address: []const u8,
 
-    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *@This(), allocator: mem.Allocator) void {
         defer allocator.free(self.table_name);
         defer self.changed_columns.deinit();
         defer self.old_values.deinit(allocator);

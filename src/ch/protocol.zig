@@ -24,7 +24,7 @@ pub const ClientInfo = struct {
         var hostname_buf: [std.posix.HOST_NAME_MAX]u8 = undefined;
         const hostname = try std.posix.gethostname(&hostname_buf);
 
-        try writer.writeInt(u8, 1, .little); // client_info marker = 1 (init)
+        try writer.writeInt(u8, 1, .little); // query_kind marker = 1 (init)
         try writeString(writer, initial_user);
         try writeString(writer, query_id);
         try writeString(writer, initial_address);
@@ -32,8 +32,8 @@ pub const ClientInfo = struct {
 
         try writer.writeInt(u8, 1, .little); // query_interface = 1 (TCP)
 
-        try writeString(writer, hostname);
         try writeString(writer, os_user);
+        try writeString(writer, hostname);
         try writeString(writer, CLIENT_NAME);
         try writeVarInt(writer, CLIENT_VERSION_MAJOR);
         try writeVarInt(writer, CLIENT_VERSION_MINOR);

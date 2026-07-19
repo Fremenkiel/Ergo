@@ -1,4 +1,9 @@
 const std = @import("std");
+const Io = std.Io;
+const mem = std.mem;
+const testing = std.testing;
+
+const assert = std.debug.assert;
 
 const pg = @import("pg");
 
@@ -7,12 +12,12 @@ const pg_client = @import("pg_client.zig");
 
 pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
     return struct {
-        duration: std.Io.Duration = std.Io.Duration.fromSeconds(1),
-        last_write_timestamp: std.Io.Timestamp,
+        duration: Io.Duration = Io.Duration.fromSeconds(1),
+        last_write_timestamp: Io.Timestamp,
         log_array: std.ArrayList(types.AuditEntry) = .empty,
 
-        allocator: std.mem.Allocator,
-        io: std.Io,
+        allocator: mem.Allocator,
+        io: Io,
 
         pg_client: *PgClient,
         ch_client: *ChClient,
@@ -22,7 +27,7 @@ pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
             self.log_array.deinit(self.allocator);
         }
 
-        pub fn startStreaming(self: *@This()) !void {
+        pub fn startStreaming(self: *@This(), flag: *std.atomic.Value(bool)) !void {
             self.pg_client.startWALReader() catch |err| switch (err) {
                 pg_client.PgClientError.WalConnectionNotInitialized => {
                     self.pg_client.*.wal_conn = try PgClient.createWalConn(self.allocator, self.io, self.pg_client.*.conn_opts);
@@ -59,27 +64,36 @@ pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
                     transaction_array.clearAndFree(self.allocator);
                 }
 
-                if (self.last_write_timestamp.addDuration(self.duration).toMilliseconds() < std.Io.Clock.real.now(self.io).toMilliseconds() and self.log_array.items.len > 0) {
+                if (self.last_write_timestamp.addDuration(self.duration).toMilliseconds() < Io.Clock.real.now(self.io).toMilliseconds() and self.log_array.items.len > 0) {
                     try self.ch_client.writeLog(self.log_array.items);
                     for (self.log_array.items) |*entry| entry.deinit(self.allocator);
                     self.log_array.clearRetainingCapacity();
 
-                    self.last_write_timestamp = std.Io.Clock.real.now(self.io);
+                    self.last_write_timestamp = Io.Clock.real.now(self.io);
+
+                    if (flag.load(.seq_cst)) {
+                        for (transaction_array.items) |*entry| entry.deinit(self.allocator);
+                        transaction_array.deinit(self.allocator);
+
+                        return;
+                    }
                 }
             }
         }
     };
 }
 
+var mock_is_shutting_down = std.atomic.Value(bool).init(false);
+
 const MockPgClient = struct {
-    allocator: std.mem.Allocator,
+    allocator: mem.Allocator,
     responses: []pg_client.ReadResponse,
     read_response_index: ?u8,
 
     conn_opts: void,
     wal_conn: *bool,
 
-    pub fn init(allocator: std.mem.Allocator, responses: []pg_client.ReadResponse) !MockPgClient {
+    pub fn init(allocator: mem.Allocator, responses: []pg_client.ReadResponse) !MockPgClient {
         const conn = try allocator.create(bool);
         conn.* = true;
         return .{
@@ -113,7 +127,7 @@ const MockPgClient = struct {
         return self.responses[self.read_response_index.?];
     }
 
-    pub fn createWalConn(allocator: std.mem.Allocator, io: std.Io, opts: anytype) !*bool {
+    pub fn createWalConn(allocator: mem.Allocator, io: Io, opts: anytype) !*bool {
         _ = io;
         _ = opts;
 
@@ -124,11 +138,11 @@ const MockPgClient = struct {
 };
 
 const MockChClient = struct {
-    allocator: std.mem.Allocator,
+    allocator: mem.Allocator,
     written_logs: std.ArrayList(types.AuditEntry) = .empty,
     log_array: std.ArrayList(types.AuditEntry) = .empty,
 
-    pub fn init(allocator: std.mem.Allocator) MockChClient {
+    pub fn init(allocator: mem.Allocator) MockChClient {
         return .{.allocator = allocator};
     }
 
@@ -157,8 +171,8 @@ const MockChClient = struct {
 };
 
 test "startStreaming read and parse correctly" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
+    const allocator = testing.allocator;
+    const io = testing.io;
 
     var changed_columns = std.StringHashMap(types.ChangedColumns).init(allocator);
     try changed_columns.ensureUnusedCapacity(1);
@@ -217,71 +231,71 @@ test "startStreaming read and parse correctly" {
     var processor = WalProcessor(MockPgClient, MockChClient){ 
         .pg_client = &mock_pg_client, 
         .ch_client = &mock_ch_client,
-        .last_write_timestamp = std.Io.Clock.real.now(io).subDuration(
-        std.Io.Duration.fromSeconds(2)
+        .last_write_timestamp = Io.Clock.real.now(io).subDuration(
+        Io.Duration.fromSeconds(2)
     ),
         .allocator = allocator,
         .io = io,
     };
     defer processor.deinit();
 
-    try processor.startStreaming();
+    try processor.startStreaming(&mock_is_shutting_down);
 
-    try std.testing.expectEqual(1, mock_ch_client.written_logs.items.len);
-    try std.testing.expectEqual(1, mock_ch_client.written_logs.items[0].action);
-    try std.testing.expectEqualStrings("addresses", mock_ch_client.written_logs.items[0].table_name);
-    try std.testing.expectEqualStrings("42", mock_ch_client.written_logs.items[0].user_id);
-    try std.testing.expectEqualStrings("192.168.1.50", mock_ch_client.written_logs.items[0].ip_address);
-    try std.testing.expectEqualStrings("1", mock_ch_client.written_logs.items[0].primary_key);
-    try std.testing.expectEqual(10, mock_ch_client.written_logs.items[0].event_time);
-    try std.testing.expectEqual(793, mock_ch_client.written_logs.items[0].transaction_id);
+    try testing.expectEqual(1, mock_ch_client.written_logs.items.len);
+    try testing.expectEqual(1, mock_ch_client.written_logs.items[0].action);
+    try testing.expectEqualStrings("addresses", mock_ch_client.written_logs.items[0].table_name);
+    try testing.expectEqualStrings("42", mock_ch_client.written_logs.items[0].user_id);
+    try testing.expectEqualStrings("192.168.1.50", mock_ch_client.written_logs.items[0].ip_address);
+    try testing.expectEqualStrings("1", mock_ch_client.written_logs.items[0].primary_key);
+    try testing.expectEqual(10, mock_ch_client.written_logs.items[0].event_time);
+    try testing.expectEqual(793, mock_ch_client.written_logs.items[0].transaction_id);
 
-    try std.testing.expectEqual(6, mock_ch_client.written_logs.items[0].changed_columns.count());
-    try std.testing.expectEqual(6, mock_ch_client.written_logs.items[0].new_values.count());
-    try std.testing.expectEqual(6, mock_ch_client.written_logs.items[0].old_values.count());
+    try testing.expectEqual(6, mock_ch_client.written_logs.items[0].changed_columns.count());
+    try testing.expectEqual(6, mock_ch_client.written_logs.items[0].new_values.count());
+    try testing.expectEqual(6, mock_ch_client.written_logs.items[0].old_values.count());
 
     const id_changed_column = mock_ch_client.written_logs.items[0].changed_columns.get("id").?;
-    try std.testing.expectEqualStrings("1", id_changed_column.value);
-    try std.testing.expectEqual(false, id_changed_column.has_changes);
+    try testing.expectEqualStrings("1", id_changed_column.value);
+    try testing.expectEqual(false, id_changed_column.has_changes);
     const address_line_1_changed_column = mock_ch_client.written_logs.items[0].changed_columns.get("address_line_1").?;
-    try std.testing.expectEqualStrings("Googleplex", address_line_1_changed_column.value);
-    try std.testing.expectEqual(true, address_line_1_changed_column.has_changes);
+    try testing.expectEqualStrings("Googleplex", address_line_1_changed_column.value);
+    try testing.expectEqual(true, address_line_1_changed_column.has_changes);
     const address_line_2_changed_column = mock_ch_client.written_logs.items[0].changed_columns.get("address_line_2").?;
-    try std.testing.expectEqualStrings("", address_line_2_changed_column.value);
-    try std.testing.expectEqual(false, address_line_2_changed_column.has_changes);
+    try testing.expectEqualStrings("", address_line_2_changed_column.value);
+    try testing.expectEqual(false, address_line_2_changed_column.has_changes);
     const postal_code_changed_column = mock_ch_client.written_logs.items[0].changed_columns.get("postal_code").?;
-    try std.testing.expectEqualStrings("94043", postal_code_changed_column.value);
-    try std.testing.expectEqual(true, postal_code_changed_column.has_changes);
+    try testing.expectEqualStrings("94043", postal_code_changed_column.value);
+    try testing.expectEqual(true, postal_code_changed_column.has_changes);
     const city_changed_column = mock_ch_client.written_logs.items[0].changed_columns.get("city").?;
-    try std.testing.expectEqualStrings("Mountain View", city_changed_column.value);
-    try std.testing.expectEqual(true, city_changed_column.has_changes);
+    try testing.expectEqualStrings("Mountain View", city_changed_column.value);
+    try testing.expectEqual(true, city_changed_column.has_changes);
     const country_changed_column = mock_ch_client.written_logs.items[0].changed_columns.get("country").?;
-    try std.testing.expectEqualStrings("US", country_changed_column.value);
-    try std.testing.expectEqual(false, country_changed_column.has_changes);
+    try testing.expectEqualStrings("US", country_changed_column.value);
+    try testing.expectEqual(false, country_changed_column.has_changes);
 
     const id_new_values = mock_ch_client.written_logs.items[0].new_values.get("id").?;
-    try std.testing.expectEqualStrings("1", id_new_values);
+    try testing.expectEqualStrings("1", id_new_values);
     const address_line_1_new_values = mock_ch_client.written_logs.items[0].new_values.get("address_line_1").?;
-    try std.testing.expectEqualStrings("1 Apple Park Way", address_line_1_new_values);
+    try testing.expectEqualStrings("1 Apple Park Way", address_line_1_new_values);
     const address_line_2_new_values = mock_ch_client.written_logs.items[0].new_values.get("address_line_2").?;
-    try std.testing.expectEqualStrings("", address_line_2_new_values);
+    try testing.expectEqualStrings("", address_line_2_new_values);
     const postal_code_new_values = mock_ch_client.written_logs.items[0].new_values.get("postal_code").?;
-    try std.testing.expectEqualStrings("95014", postal_code_new_values);
+    try testing.expectEqualStrings("95014", postal_code_new_values);
     const city_new_values = mock_ch_client.written_logs.items[0].new_values.get("city").?;
-    try std.testing.expectEqualStrings("Cupertino", city_new_values);
+    try testing.expectEqualStrings("Cupertino", city_new_values);
     const country_new_values = mock_ch_client.written_logs.items[0].new_values.get("country").?;
-    try std.testing.expectEqualStrings("US", country_new_values);
+    try testing.expectEqualStrings("US", country_new_values);
 
     const id_old_values = mock_ch_client.written_logs.items[0].old_values.get("id").?;
-    try std.testing.expectEqualStrings("1", id_old_values);
+    try testing.expectEqualStrings("1", id_old_values);
     const address_line_1_old_values = mock_ch_client.written_logs.items[0].old_values.get("address_line_1").?;
-    try std.testing.expectEqualStrings("Googleplex", address_line_1_old_values);
+    try testing.expectEqualStrings("Googleplex", address_line_1_old_values);
     const address_line_2_old_values = mock_ch_client.written_logs.items[0].old_values.get("address_line_2").?;
-    try std.testing.expectEqualStrings("", address_line_2_old_values);
+    try testing.expectEqualStrings("", address_line_2_old_values);
     const postal_code_old_values = mock_ch_client.written_logs.items[0].old_values.get("postal_code").?;
-    try std.testing.expectEqualStrings("94043", postal_code_old_values);
+    try testing.expectEqualStrings("94043", postal_code_old_values);
     const city_old_values = mock_ch_client.written_logs.items[0].old_values.get("city").?;
-    try std.testing.expectEqualStrings("Mountain View", city_old_values);
+    try testing.expectEqualStrings("Mountain View", city_old_values);
     const country_old_values = mock_ch_client.written_logs.items[0].old_values.get("country").?;
-    try std.testing.expectEqualStrings("US", country_old_values);
+    try testing.expectEqualStrings("US", country_old_values);
 }

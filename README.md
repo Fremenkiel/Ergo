@@ -23,3 +23,8 @@ https://github.com/0xrinegade/clickhouse-zig
 
 ## Setup
 Flag sql setup, roles, table setup.
+
+## OBS
+Do not supprt PG 14+ with explicit streaming = 'on' flag.
+This results in the rows being streamed as they come in and not when the transaction is commited. 
+Having this flag on could result in data loss and rolled back rows being logged.
