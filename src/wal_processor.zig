@@ -15,6 +15,8 @@ pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
         duration: Io.Duration = Io.Duration.fromSeconds(1),
         last_write_timestamp: Io.Timestamp,
         log_array: std.ArrayList(types.AuditEntry) = .empty,
+        transaction_array: std.ArrayList(types.AuditEntry) = .empty,
+        is_sync_test: bool,
 
         allocator: mem.Allocator,
         io: Io,
@@ -25,6 +27,9 @@ pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
         pub fn deinit(self: *@This()) void {
             for (self.log_array.items) |*entry| entry.deinit(self.allocator);
             self.log_array.deinit(self.allocator);
+
+            for (self.transaction_array.items) |*entry| entry.deinit(self.allocator);
+            self.transaction_array.deinit(self.allocator);
         }
 
         pub fn startStreaming(self: *@This(), flag: *std.atomic.Value(bool)) !void {
@@ -36,32 +41,43 @@ pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
                 else => return err,
             };
 
-            var transaction_array: std.ArrayList(types.AuditEntry) = .empty;
-            errdefer transaction_array.deinit(self.allocator);
 
-            while (true) {
+            // TODO: check lengts, time elapsed, transaction_array to make sure nothing is missing.
+            while (!(flag.load(.seq_cst) and self.log_array.items.len == 0)) {
                 var response = try self.pg_client.readWAL();
 
                 if (response.eof) {
                     try self.ch_client.writeLog(self.log_array.items);
-                    for (transaction_array.items) |*entry| entry.deinit(self.allocator);
-                    transaction_array.deinit(self.allocator);
 
                     return;
                 }
 
                 if (response.entry) |entry| {
-                    try transaction_array.append(self.allocator, entry);
+                    try self.transaction_array.append(self.allocator, entry);
                     // remove linking
                     response.entry = null;
                 }
 
                 if (response.commit_timestamp != null) {
-                    for (transaction_array.items) |*row| {
+                    for (self.transaction_array.items) |*row| {
                         row.event_time = response.commit_timestamp.?;
                     }
-                    try self.log_array.appendSlice(self.allocator, transaction_array.items);
-                    transaction_array.clearAndFree(self.allocator);
+                    try self.log_array.appendSlice(self.allocator, self.transaction_array.items);
+                    self.transaction_array.clearRetainingCapacity();
+
+                    // Test hook
+                    if (self.log_array.items.len > 0) {
+                        if (std.mem.eql(u8, "test_sync_marker", self.log_array.items[self.log_array.items.len - 1].table_name)) {
+                            _ = self.log_array.swapRemove(self.log_array.items.len - 1);
+                            if (self.is_sync_test) {
+                                try std.Io.File.stdout().writeStreamingAll(self.io, "SYNC_MARKER_REACHED\n");
+
+                                while (!flag.load(.seq_cst)) {
+                                    try Io.sleep(self.io, Io.Duration{ .nanoseconds = 10 * std.time.ns_per_ms }, .real);
+                                }
+                            }
+                        }
+                    }
                 }
 
                 if (self.last_write_timestamp.addDuration(self.duration).toMilliseconds() < Io.Clock.real.now(self.io).toMilliseconds() and self.log_array.items.len > 0) {
@@ -70,13 +86,6 @@ pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
                     self.log_array.clearRetainingCapacity();
 
                     self.last_write_timestamp = Io.Clock.real.now(self.io);
-
-                    if (flag.load(.seq_cst)) {
-                        for (transaction_array.items) |*entry| entry.deinit(self.allocator);
-                        transaction_array.deinit(self.allocator);
-
-                        return;
-                    }
                 }
             }
         }
@@ -236,6 +245,7 @@ test "startStreaming read and parse correctly" {
     ),
         .allocator = allocator,
         .io = io,
+        .is_sync_test = false,
     };
     defer processor.deinit();
 

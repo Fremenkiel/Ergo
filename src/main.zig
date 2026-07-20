@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
 const mem = std.mem;
+const testing = std.testing;
 
 const assert = std.debug.assert;
 
@@ -37,6 +38,11 @@ pub fn main(init: std.process.Init) !void {
     const os_user = init.environ_map.get(user_env_key);
     defer allocator.free(os_user.?);
 
+    const is_sync_test = init.environ_map.get("ERGO_TEST_SYNC");
+    defer allocator.free(is_sync_test.?);
+
+    try Io.File.stdout().writeStreamingAll(io, "READY\n");
+
     var pg_client = try PgClient.init(io, allocator, .{
         .connect = .{  
             .port = 5432,
@@ -49,7 +55,7 @@ pub fn main(init: std.process.Init) !void {
             .timeout = 10_000,
         } 
     });
-    errdefer pg_client.deinit();
+    defer pg_client.deinit();
 
     var ch_client = ChClient.init(allocator, io, .{
         .host = "localhost",
@@ -61,7 +67,7 @@ pub fn main(init: std.process.Init) !void {
     defer ch_client.deinit();
 
     try ch_client.connect();
-    errdefer ch_client.disconnect();
+    defer ch_client.disconnect();
 
     var processor = WalProcessor(PgClient, ChClient){ 
         .pg_client = &pg_client, 
@@ -69,18 +75,62 @@ pub fn main(init: std.process.Init) !void {
         .last_write_timestamp = std.Io.Clock.real.now(io),
         .allocator = allocator,
         .io = io,
+        .is_sync_test = is_sync_test != null
     };
+    defer processor.deinit();
 
     try processor.startStreaming(&is_shutting_down);
 
     std.log.info("Shutdown signal caught. Exiting cleanly.\n", .{});
+
+    std.process.exit(0);
+}
+
+fn setupChildProcess(io: Io) !std.process.Child {
+    const argv = &[_][]const u8{"./zig-out/bin/ergo"};
+    var child = try std.process.spawn(io, .{
+        .argv = argv,
+        .stdout = .pipe,
+    });
+
+    var buffer: [1024]u8 = undefined;
+    var reader = child.stdout.?.reader(io, &buffer);
+    var r = &reader.interface;
+
+    while (true) {
+        if (try r.takeDelimiter('\n')) |line| {
+            if (std.mem.indexOf(u8, line, "READY") != null) {
+                break;
+            }
+        } else {
+            return error.AppCrashedBeforeReady;
+        }
+    }
+
+    return child;
+}
+
+fn terminateChildProcess(io: Io, child: *std.process.Child) !std.process.Child.Term {
+    if (child.id) |pid| {
+        try std.posix.kill(pid, std.posix.SIG.TERM);
+    } else {
+        return error.ChildNotStarted;
+    }
+
+    return try child.wait(io);
 }
 
 test "test:main:beforeAll" {
     std.testing.refAllDecls(@This());
 }
 
-test "making sure full commits are logged with interupt" {
+test "main ensure full transaction sync on interupt" {
+    const io = testing.io;
+
+    var child = try setupChildProcess(io);
+    const term = try terminateChildProcess(io, &child);
+
+    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, term);
 }
 
 test "making sure full commits are logged without interupt" {

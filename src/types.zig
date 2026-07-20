@@ -26,3 +26,29 @@ pub const AuditEntry = struct {
     }
 };
 
+test "AuditEntry ensure correct deinit" {
+    const allocator = std.testing.allocator;
+
+    var changed_columns = std.StringHashMap(ChangedColumns).init(allocator);
+    try changed_columns.ensureUnusedCapacity(3);
+
+    var old_values = std.StringHashMapUnmanaged([]const u8).empty;
+    try old_values.ensureUnusedCapacity(allocator, 3);
+
+    var new_values = std.StringHashMapUnmanaged([]const u8).empty;
+    try new_values.ensureUnusedCapacity(allocator, 3);
+
+    var entry = AuditEntry{
+        .event_time = 1244,
+        .transaction_id = 10,
+        .primary_key = "24",
+        .user_id = "43",
+        .table_name = try allocator.dupe(u8, "test"),
+        .action = 1,
+        .changed_columns = changed_columns,
+        .old_values = old_values,
+        .new_values = new_values,
+        .ip_address = "192.168.1.50",
+    };
+    defer entry.deinit(allocator);
+}
