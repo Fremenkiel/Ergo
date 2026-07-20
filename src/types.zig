@@ -20,6 +20,8 @@ pub const AuditEntry = struct {
 
     pub fn deinit(self: *@This(), allocator: mem.Allocator) void {
         defer allocator.free(self.table_name);
+        defer if (self.user_id.len > 0) allocator.free(self.user_id);
+        defer if (self.ip_address.len > 0) allocator.free(self.ip_address);
         defer self.changed_columns.deinit();
         defer self.old_values.deinit(allocator);
         defer self.new_values.deinit(allocator);
@@ -42,13 +44,13 @@ test "AuditEntry ensure correct deinit" {
         .event_time = 1244,
         .transaction_id = 10,
         .primary_key = "24",
-        .user_id = "43",
+        .user_id = try allocator.dupe(u8, "43"),
         .table_name = try allocator.dupe(u8, "test"),
         .action = 1,
         .changed_columns = changed_columns,
         .old_values = old_values,
         .new_values = new_values,
-        .ip_address = "192.168.1.50",
+        .ip_address = try allocator.dupe(u8, "192.168.1.50"),
     };
     defer entry.deinit(allocator);
 }

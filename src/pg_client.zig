@@ -128,18 +128,25 @@ pub const PgClient = struct {
 
         var it = self.table_reg.valueIterator();
         while (it.next()) |table| {
+            for (table.columns.items) |col| {
+                self.allocator.free(col.name);
+            }
             table.columns.deinit(self.allocator);
+            self.allocator.free(table.namespace);
+            self.allocator.free(table.name);
         }
 
         self.table_reg.deinit();
         self.context.changed_columns.deinit();
-        self.allocator.free(self.context.user_id);
-        self.allocator.free(self.context.ip_address);
+        if (self.context.user_id.len > 0) self.allocator.free(self.context.user_id);
+        if (self.context.ip_address.len > 0) self.allocator.free(self.context.ip_address);
     }
 
     fn resetContext(self: *PgClient) void {
         self.context.xid = 0;
+        if (self.context.user_id.len > 0) self.allocator.free(self.context.user_id);
         self.context.user_id = "";
+        if (self.context.ip_address.len > 0) self.allocator.free(self.context.ip_address);
         self.context.ip_address = "";
         self.context.primary_key = "";
         self.context.changed_columns.clearRetainingCapacity();
@@ -338,18 +345,18 @@ pub const PgClient = struct {
                 if (self.table_reg.get(rel_id)) |table| {
                     const new_values = try self.parseTupleData(&reader, table);
 
-                    response.entry = types.AuditEntry{
-                        .event_time = undefined,
-                        .table_name = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{table.namespace, table.name}),
-                        .new_values = new_values,
-                        .old_values = .empty,
-                        .action = 1,
-                        .changed_columns = try self.context.changed_columns.clone(),
-                        .transaction_id = self.context.xid,
-                        .user_id = self.context.user_id,
-                        .ip_address = self.context.ip_address,
-                        .primary_key = self.context.primary_key,
-                    };
+                        response.entry = types.AuditEntry{
+                            .event_time = undefined,
+                            .table_name = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{table.namespace, table.name}),
+                            .new_values = new_values,
+                            .old_values = .empty,
+                            .action = 1,
+                            .changed_columns = try self.context.changed_columns.clone(),
+                            .transaction_id = self.context.xid,
+                            .user_id = if (self.context.user_id.len > 0) try self.allocator.dupe(u8, self.context.user_id) else "",
+                            .ip_address = if (self.context.ip_address.len > 0) try self.allocator.dupe(u8, self.context.ip_address) else "",
+                            .primary_key = self.context.primary_key,
+                        };
                 } else {
                     std.debug.print("Error: Received insert for unknown relation ID {d}\n", .{rel_id});
                 }
@@ -378,8 +385,8 @@ pub const PgClient = struct {
                             .action = 2,
                             .changed_columns = try self.context.changed_columns.clone(),
                             .transaction_id = self.context.xid,
-                            .user_id = self.context.user_id,
-                            .ip_address = self.context.ip_address,
+                            .user_id = if (self.context.user_id.len > 0) try self.allocator.dupe(u8, self.context.user_id) else "",
+                            .ip_address = if (self.context.ip_address.len > 0) try self.allocator.dupe(u8, self.context.ip_address) else "",
                             .primary_key = self.context.primary_key,
                         };
                     } else {
@@ -407,8 +414,8 @@ pub const PgClient = struct {
                             .action = 3,
                             .changed_columns = try self.context.changed_columns.clone(),
                             .transaction_id = self.context.xid,
-                            .user_id = self.context.user_id,
-                            .ip_address = self.context.ip_address,
+                            .user_id = if (self.context.user_id.len > 0) try self.allocator.dupe(u8, self.context.user_id) else "",
+                            .ip_address = if (self.context.ip_address.len > 0) try self.allocator.dupe(u8, self.context.ip_address) else "",
                             .primary_key = self.context.primary_key,
                         };
                     } else {
@@ -614,17 +621,17 @@ pub const PgClient = struct {
 fn setupMockClient(allocator: mem.Allocator, io: Io) !PgClient {
     var cols = std.ArrayList(ColumnDef).empty;
     try cols.ensureUnusedCapacity(allocator, 6);
-    try cols.append(allocator, .{ .name = "id", .is_key = true });
-    try cols.append(allocator, .{ .name = "address_line_1", .is_key = true });
-    try cols.append(allocator, .{ .name = "address_line_2", .is_key = true });
-    try cols.append(allocator, .{ .name = "postal_code", .is_key = true });
-    try cols.append(allocator, .{ .name = "city", .is_key = true });
-    try cols.append(allocator, .{ .name = "country", .is_key = true });
+    try cols.append(allocator, .{ .name = try allocator.dupe(u8, "id"), .is_key = true });
+    try cols.append(allocator, .{ .name = try allocator.dupe(u8, "address_line_1"), .is_key = true });
+    try cols.append(allocator, .{ .name = try allocator.dupe(u8, "address_line_2"), .is_key = true });
+    try cols.append(allocator, .{ .name = try allocator.dupe(u8, "postal_code"), .is_key = true });
+    try cols.append(allocator, .{ .name = try allocator.dupe(u8, "city"), .is_key = true });
+    try cols.append(allocator, .{ .name = try allocator.dupe(u8, "country"), .is_key = true });
 
     var table_reg = std.AutoHashMap(u32, TableDef).init(allocator);
     try table_reg.put(16390, .{
-        .namespace = "public",
-        .name = "addresses",
+        .namespace = try allocator.dupe(u8, "public"),
+        .name = try allocator.dupe(u8, "addresses"),
         .columns = cols,
     });
 
@@ -961,8 +968,8 @@ test "resetContext clears context correctly" {
     var client = try setupMockClient(allocator, io);
     defer client.deinit();
 
-    client.context.ip_address = "192.168.1.50";
-    client.context.user_id = "42";
+    client.context.ip_address = try allocator.dupe(u8, "192.168.1.50");
+    client.context.user_id = try allocator.dupe(u8, "42");
     client.context.xid = 791;
 
     const commit_hex = "43000000000001c160880000000001c160b80002f9a2afe34ece";
@@ -1040,7 +1047,12 @@ test "readSchemaKeys" {
     defer client.deinit();
 
     var columns = try client.readSchemaKeys("users");
-    defer columns.deinit(allocator);
+    defer {
+        for (columns.items) |col| {
+            allocator.free(col.name);
+        }
+        columns.deinit(allocator);
+    }
 
     try testing.expectEqual(6, columns.items.len);
 

@@ -877,13 +877,14 @@ test "writeLog" {
     defer changed_columns.deinit();
 
     audit_log.appendSliceAssumeCapacity(&[_]types.AuditEntry{
-        .{ .event_time = 53634634, .transaction_id = 10, .primary_key = "1", .user_id = "42", .table_name = "addresses", .action = 1, .changed_columns = changed_columns, .new_values = .empty, .old_values = .empty, .ip_address = "192.168.1.50" },
-        .{ .event_time = 53634634, .transaction_id = 10, .primary_key = "2", .user_id = "42", .table_name = "addresses", .action = 2, .changed_columns = changed_columns, .new_values = .empty, .old_values = .empty, .ip_address = "192.168.1.50" },
-        .{ .event_time = 53634634, .transaction_id = 10, .primary_key = "3", .user_id = "42", .table_name = "addresses", .action = 3, .changed_columns = changed_columns, .new_values = .empty, .old_values = .empty, .ip_address = "192.168.1.50" },
-        .{ .event_time = 53634634, .transaction_id = 11, .primary_key = "4", .user_id = "42", .table_name = "addresses", .action = 1, .changed_columns = changed_columns, .new_values = .empty, .old_values = .empty, .ip_address = "192.168.1.50" }
+        .{ .event_time = 53634634, .transaction_id = 10, .primary_key = "1", .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "addresses"), .action = 1, .changed_columns = changed_columns, .new_values = .empty, .old_values = .empty, .ip_address = try allocator.dupe(u8, "192.168.1.50") },
+        .{ .event_time = 53634634, .transaction_id = 10, .primary_key = "2", .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "addresses"), .action = 2, .changed_columns = changed_columns, .new_values = .empty, .old_values = .empty, .ip_address = try allocator.dupe(u8, "192.168.1.50") },
+        .{ .event_time = 53634634, .transaction_id = 10, .primary_key = "3", .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "addresses"), .action = 3, .changed_columns = changed_columns, .new_values = .empty, .old_values = .empty, .ip_address = try allocator.dupe(u8, "192.168.1.50") },
+        .{ .event_time = 53634634, .transaction_id = 11, .primary_key = "4", .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "addresses"), .action = 1, .changed_columns = changed_columns, .new_values = .empty, .old_values = .empty, .ip_address = try allocator.dupe(u8, "192.168.1.50") }
     });
 
     try client.writeLog(audit_log.items);
+    for (audit_log.items) |*item| item.deinit(allocator);
 }
 
 test "parseRow ensure correct output" {
@@ -894,7 +895,6 @@ test "parseRow ensure correct output" {
     defer client.deinit();
 
     var changed_columns = std.StringHashMap(types.ChangedColumns).init(allocator);
-    defer changed_columns.deinit();
     try changed_columns.ensureUnusedCapacity(1);
 
     try changed_columns.put("id", .{ .has_changes = false, .value = "1" });
@@ -905,7 +905,6 @@ test "parseRow ensure correct output" {
     try changed_columns.put("country", .{ .has_changes = false, .value = "US" });
 
     var new_values = std.StringHashMapUnmanaged([]const u8).empty;
-    defer new_values.deinit(allocator);
     try new_values.ensureUnusedCapacity(allocator, 6);
 
     try new_values.put(allocator, "id", "1");
@@ -916,7 +915,6 @@ test "parseRow ensure correct output" {
     try new_values.put(allocator, "country", "US");
 
     var old_values = std.StringHashMapUnmanaged([]const u8).empty;
-    defer old_values.deinit(allocator);
     try old_values.ensureUnusedCapacity(allocator, 6);
 
     try old_values.put(allocator, "id", "1");
@@ -926,7 +924,7 @@ test "parseRow ensure correct output" {
     try old_values.put(allocator, "city", "Mountain View");
     try old_values.put(allocator, "country", "US");
 
-    const row: types.AuditEntry = .{
+    var row: types.AuditEntry = .{
         .event_time = 10,
         .table_name = try allocator.dupe(u8, "addresses"),
         .new_values = new_values,
@@ -934,11 +932,11 @@ test "parseRow ensure correct output" {
         .action = 2,
         .changed_columns = changed_columns,
         .transaction_id = 793,
-        .user_id = "42",
-        .ip_address = "192.168.1.50",
+        .user_id = try allocator.dupe(u8, "42"),
+        .ip_address = try allocator.dupe(u8, "192.168.1.50"),
         .primary_key = "1",
     };
-    defer allocator.free(row.table_name);
+    defer row.deinit(allocator);
 
     var row_changed_columns = std.ArrayList(ch.bulk_insert.Value).empty;
     defer row_changed_columns.deinit(allocator);
@@ -1031,12 +1029,16 @@ test "insertRow ensure correct insertion" {
             .action = 2,
             .changed_columns = undefined,
             .transaction_id = 793,
-            .user_id = "42",
-            .ip_address = "192.168.1.50",
+            .user_id = try allocator.dupe(u8, "42"),
+            .ip_address = try allocator.dupe(u8, "192.168.1.50"),
             .primary_key = "1",
         },
     };
-    defer allocator.free(values.row.table_name);
+    defer {
+        allocator.free(values.row.table_name);
+        allocator.free(values.row.user_id);
+        allocator.free(values.row.ip_address);
+    }
 
     var bulk: ch.BulkInsert = try .init(allocator, "entries", &columns, 1000);
     defer bulk.deinit();

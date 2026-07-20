@@ -66,18 +66,6 @@ pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
                     self.transaction_array.clearRetainingCapacity();
 
                     // Test hook
-                    // if (self.log_array.items.len > 0) {
-                    //     if (std.mem.eql(u8, "public.test_sync_marker", self.log_array.items[self.log_array.items.len - 1].table_name)) {
-                    //         _ = self.log_array.swapRemove(self.log_array.items.len - 1);
-                    //         if (self.is_sync_test) {
-                    //             try std.Io.File.stdout().writeStreamingAll(self.io, "SYNC_MARKER_REACHED\n");
-                    //
-                    //             while (!flag.load(.seq_cst)) {
-                    //                 try Io.sleep(self.io, Io.Duration{ .nanoseconds = 10 * std.time.ns_per_ms }, .real);
-                    //             }
-                    //         }
-                    //     }
-                    // }
                     if (self.log_array.items.len > 0 and self.is_sync_test) {
                         var marker_idx: ?usize = null;
                         for (self.log_array.items, 0..) |*item, i| {
@@ -191,6 +179,8 @@ const MockChClient = struct {
             copy_slice[i] = entry;
 
             copy_slice[i].table_name = try self.allocator.dupe(u8, entry.table_name);
+            copy_slice[i].user_id = try self.allocator.dupe(u8, entry.user_id);
+            copy_slice[i].ip_address = try self.allocator.dupe(u8, entry.ip_address);
 
             copy_slice[i].changed_columns = try entry.changed_columns.clone();
             copy_slice[i].new_values = try entry.new_values.clone(self.allocator);
@@ -246,8 +236,8 @@ test "startStreaming read and parse correctly" {
                 .action = 1,
                 .changed_columns = changed_columns,
                 .transaction_id = 793,
-                .user_id = "42",
-                .ip_address = "192.168.1.50",
+                .user_id = try allocator.dupe(u8, "42"),
+                .ip_address = try allocator.dupe(u8, "192.168.1.50"),
                 .primary_key = "1",
             },
             .commit_timestamp = 10

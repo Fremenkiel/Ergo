@@ -124,7 +124,7 @@ fn terminateChildProcess(io: Io, child: *std.process.Child) !std.process.Child.T
 }
 
 test "test:main:beforeAll" {
-    // std.testing.refAllDecls(@This());
+    std.testing.refAllDecls(@This());
 }
 
 test "main ensure full transaction sync on interupt" {
