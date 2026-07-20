@@ -66,9 +66,29 @@ pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
                     self.transaction_array.clearRetainingCapacity();
 
                     // Test hook
-                    if (self.log_array.items.len > 0) {
-                        if (std.mem.eql(u8, "test_sync_marker", self.log_array.items[self.log_array.items.len - 1].table_name)) {
-                            _ = self.log_array.swapRemove(self.log_array.items.len - 1);
+                    // if (self.log_array.items.len > 0) {
+                    //     if (std.mem.eql(u8, "public.test_sync_marker", self.log_array.items[self.log_array.items.len - 1].table_name)) {
+                    //         _ = self.log_array.swapRemove(self.log_array.items.len - 1);
+                    //         if (self.is_sync_test) {
+                    //             try std.Io.File.stdout().writeStreamingAll(self.io, "SYNC_MARKER_REACHED\n");
+                    //
+                    //             while (!flag.load(.seq_cst)) {
+                    //                 try Io.sleep(self.io, Io.Duration{ .nanoseconds = 10 * std.time.ns_per_ms }, .real);
+                    //             }
+                    //         }
+                    //     }
+                    // }
+                    if (self.log_array.items.len > 0 and self.is_sync_test) {
+                        var marker_idx: ?usize = null;
+                        for (self.log_array.items, 0..) |*item, i| {
+                            if (std.mem.eql(u8, "public.test_sync_marker", item.table_name)) {
+                                marker_idx = i;
+                                break;
+                            }
+                        }
+
+                        if (marker_idx) |idx| {
+                            _ = self.log_array.orderedRemove(idx);
                             if (self.is_sync_test) {
                                 try std.Io.File.stdout().writeStreamingAll(self.io, "SYNC_MARKER_REACHED\n");
 
@@ -80,7 +100,10 @@ pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
                     }
                 }
 
-                if (self.last_write_timestamp.addDuration(self.duration).toMilliseconds() < Io.Clock.real.now(self.io).toMilliseconds() and self.log_array.items.len > 0) {
+                const is_shutting_down = flag.load(.seq_cst);
+                const duration_passed = self.last_write_timestamp.addDuration(self.duration).toMilliseconds() < Io.Clock.real.now(self.io).toMilliseconds();
+
+                if ((is_shutting_down or duration_passed) and self.log_array.items.len > 0) {
                     try self.ch_client.writeLog(self.log_array.items);
                     for (self.log_array.items) |*entry| entry.deinit(self.allocator);
                     self.log_array.clearRetainingCapacity();

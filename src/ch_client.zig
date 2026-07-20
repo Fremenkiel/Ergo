@@ -418,13 +418,15 @@ pub const ChClient = struct {
             changed_columns.appendAssumeCapacity(.{ .String = col.key_ptr.* });
 
             if (row.old_values.capacity() > 0) {
-                const val = row.old_values.get(col.key_ptr.*);
-                try old_values.put(col.key_ptr.*, val.?);
+                if (row.old_values.get(col.key_ptr.*)) |val| {
+                    try old_values.put(col.key_ptr.*, val);
+                }
             }
 
             if (row.new_values.capacity() > 0) {
-                const val = row.new_values.get(col.key_ptr.*);
-                try new_values.put(col.key_ptr.*, val.?);
+                if (row.new_values.get(col.key_ptr.*)) |val| {
+                    try new_values.put(col.key_ptr.*, val);
+                }
             }
         }
 

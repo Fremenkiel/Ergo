@@ -282,11 +282,9 @@ pub const PgClient = struct {
                 const rel_id = try reader.takeInt(u32, .big);
 
                 const namespace = try self.allocator.dupe(u8, try reader.takeDelimiterExclusive(0));
-                defer self.allocator.free(namespace);
                 _ = try reader.takeByte();
 
                 const rel_name = try self.allocator.dupe(u8, try reader.takeDelimiterExclusive(0));
-                defer self.allocator.free(rel_name);
                 _ = try reader.takeByte();
 
                 const repl_ident = try reader.takeByte();
@@ -535,13 +533,11 @@ pub const PgClient = struct {
         defer conn.release();
         var result = try conn.queryOpts(
         \\ SELECT
-\\   a.attname AS column_name,
-\\   array_agg(c.contype) AS constraint_types
-\\ FROM pg_constraint c
-\\ JOIN pg_attribute a ON a.attnum = ANY(c.conkey)
-\\   AND a.attrelid = c.conrelid
-\\ WHERE c.conrelid = $1::regclass
-\\ GROUP BY column_name;
+        \\   a.attname AS column_name,
+        \\   COALESCE((SELECT string_agg(c.contype::text, '') FROM pg_constraint c WHERE a.attnum = ANY(c.conkey) AND c.conrelid = a.attrelid), '') AS constraint_types
+        \\ FROM pg_attribute a
+        \\ WHERE a.attrelid = $1::regclass AND a.attnum > 0 AND NOT a.attisdropped
+        \\ ORDER BY a.attnum;
         , .{table_name}, .{ .column_names = true });
         defer result.deinit();
 
@@ -549,7 +545,9 @@ pub const PgClient = struct {
         const column_name_index = result.columnIndex("column_name").?;
         const constraint_types_index = result.columnIndex("constraint_types").?;
         while (try result.next()) |row| {
-            const column_name = try row.get([]const u8, column_name_index);
+            const column_name_raw = try row.get([]const u8, column_name_index);
+            const column_name = try self.allocator.dupe(u8, column_name_raw);
+
             const constraint_types = try row.get([]const u8, constraint_types_index);
             try columns.append(self.allocator, .{ .name = column_name, .is_key = mem.containsAtLeast(u8, constraint_types, 1, "p") });
         }

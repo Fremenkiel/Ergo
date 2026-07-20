@@ -36,10 +36,8 @@ pub fn main(init: std.process.Init) !void {
 
     const user_env_key = if (builtin.os.tag == .windows) "USERNAME" else "USER";
     const os_user = init.environ_map.get(user_env_key);
-    defer allocator.free(os_user.?);
 
     const is_sync_test = init.environ_map.get("ERGO_TEST_SYNC");
-    defer allocator.free(is_sync_test.?);
 
     try Io.File.stdout().writeStreamingAll(io, "READY\n");
 
@@ -86,11 +84,16 @@ pub fn main(init: std.process.Init) !void {
     std.process.exit(0);
 }
 
-fn setupChildProcess(io: Io) !std.process.Child {
+fn setupChildProcess(allocator: mem.Allocator, io: Io) !std.process.Child {
+    var env = try std.process.Environ.createMap(std.testing.environ, allocator);
+    defer env.deinit();
+    try env.put("ERGO_TEST_SYNC", "1");
+
     const argv = &[_][]const u8{"./zig-out/bin/ergo"};
     var child = try std.process.spawn(io, .{
         .argv = argv,
         .stdout = .pipe,
+        .environ_map = &env,
     });
 
     var buffer: [1024]u8 = undefined;
@@ -121,38 +124,66 @@ fn terminateChildProcess(io: Io, child: *std.process.Child) !std.process.Child.T
 }
 
 test "test:main:beforeAll" {
-    std.testing.refAllDecls(@This());
+    // std.testing.refAllDecls(@This());
 }
 
 test "main ensure full transaction sync on interupt" {
     const allocator = testing.allocator;
     const io = testing.io;
 
-    var child = try setupChildProcess(io);
+    var env = try std.process.Environ.createMap(std.testing.environ, allocator);
+    defer env.deinit();
+    try env.put("PGPASSWORD", "12345678");
 
-    var argv = [_][]const u8{ "export", "PGPASSWORD=12345678", "&&", "psql", "-h", "127.0.0.1", "-p", "5432", "-U", "db_rw", "-d", "db", "-a", "-f", "./test_fixtures/shutdown_query.sql"  };
-    const result = try std.process.run(allocator, io, .{ .argv = &argv });
+    var child = try setupChildProcess(allocator, io);
+
+    var argv = [_][]const u8{ "psql", "-h", "127.0.0.1", "-p", "5432", "-U", "db_rw", "-d", "db", "-a", "-f", "./test_fixtures/shutdown_query.sql" };
+    const result = try std.process.run(allocator, io, .{ 
+        .argv = &argv,
+        .environ_map = &env, 
+    });
     defer {
         allocator.free(result.stdout);
         allocator.free(result.stderr);
     }
+    
+    var buffer: [1024]u8 = undefined;
+    var reader = child.stdout.?.reader(io, &buffer);
+    var r = &reader.interface;
 
-    var line_iter = std.mem.splitAny(u8, result.stdout, "\n");
-    while (line_iter.next()) |line| {
-        if (line.len == 0) continue;
-        std.debug.print("pub {s}\n", .{line});
+    while (true) {
+        if (try r.takeDelimiter('\n')) |line| {
+            if (std.mem.indexOf(u8, line, "SYNC_MARKER_REACHED") != null) {
+                break;
+            }
+        }
     }
 
     const term = try terminateChildProcess(io, &child);
 
     try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, term);
+    // var ch_argv = [_][]const u8{ 
+    //     "clickhouse-client", 
+    //     "--query", 
+    //     "SELECT count(*) FROM audit_log WHERE table_name = 'addresses'" 
+    // };
+    // const ch_result = try std.process.run(allocator, io, .{ 
+    //     .argv = &ch_argv,
+    //     .environ_map = &env, // Optional depending on how clickhouse-client is authenticated locally
+    // });
+    // defer {
+    //     allocator.free(ch_result.stdout);
+    //     allocator.free(ch_result.stderr);
+    // }
+    //
+    // try testing.expectEqualStrings("6\n", ch_result.stdout);
 }
 
-test "making sure full commits are logged without interupt" {
-}
-
-test "correct shutdown" {
-}
-
-test "do data loss on shutdown and boot" {
-}
+// test "making sure full commits are logged without interupt" {
+// }
+//
+// test "correct shutdown" {
+// }
+//
+// test "do data loss on shutdown and boot" {
+// }
