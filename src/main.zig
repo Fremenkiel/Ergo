@@ -125,9 +125,24 @@ test "test:main:beforeAll" {
 }
 
 test "main ensure full transaction sync on interupt" {
+    const allocator = testing.allocator;
     const io = testing.io;
 
     var child = try setupChildProcess(io);
+
+    var argv = [_][]const u8{ "export", "PGPASSWORD=12345678", "&&", "psql", "-h", "127.0.0.1", "-p", "5432", "-U", "db_rw", "-d", "db", "-a", "-f", "./test_fixtures/shutdown_query.sql"  };
+    const result = try std.process.run(allocator, io, .{ .argv = &argv });
+    defer {
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
+
+    var line_iter = std.mem.splitAny(u8, result.stdout, "\n");
+    while (line_iter.next()) |line| {
+        if (line.len == 0) continue;
+        std.debug.print("pub {s}\n", .{line});
+    }
+
     const term = try terminateChildProcess(io, &child);
 
     try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, term);
