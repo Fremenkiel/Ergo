@@ -877,10 +877,10 @@ test "writeLog" {
     defer changed_columns.deinit();
 
     audit_log.appendSliceAssumeCapacity(&[_]types.AuditEntry{
-        .{ .event_time = 53634634, .transaction_id = 10, .primary_key = "1", .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "addresses"), .action = 1, .changed_columns = changed_columns, .new_values = .empty, .old_values = .empty, .ip_address = try allocator.dupe(u8, "192.168.1.50") },
-        .{ .event_time = 53634634, .transaction_id = 10, .primary_key = "2", .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "addresses"), .action = 2, .changed_columns = changed_columns, .new_values = .empty, .old_values = .empty, .ip_address = try allocator.dupe(u8, "192.168.1.50") },
-        .{ .event_time = 53634634, .transaction_id = 10, .primary_key = "3", .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "addresses"), .action = 3, .changed_columns = changed_columns, .new_values = .empty, .old_values = .empty, .ip_address = try allocator.dupe(u8, "192.168.1.50") },
-        .{ .event_time = 53634634, .transaction_id = 11, .primary_key = "4", .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "addresses"), .action = 1, .changed_columns = changed_columns, .new_values = .empty, .old_values = .empty, .ip_address = try allocator.dupe(u8, "192.168.1.50") }
+        .{ .event_time = 53634634, .transaction_id = 10, .primary_key = "1", .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "test.addresses"), .action = 1, .changed_columns = changed_columns, .new_values = .empty, .old_values = .empty, .ip_address = try allocator.dupe(u8, "192.168.1.50") },
+        .{ .event_time = 53634634, .transaction_id = 10, .primary_key = "2", .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "test.addresses"), .action = 2, .changed_columns = changed_columns, .new_values = .empty, .old_values = .empty, .ip_address = try allocator.dupe(u8, "192.168.1.50") },
+        .{ .event_time = 53634634, .transaction_id = 10, .primary_key = "3", .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "test.addresses"), .action = 3, .changed_columns = changed_columns, .new_values = .empty, .old_values = .empty, .ip_address = try allocator.dupe(u8, "192.168.1.50") },
+        .{ .event_time = 53634634, .transaction_id = 11, .primary_key = "4", .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "test.addresses"), .action = 1, .changed_columns = changed_columns, .new_values = .empty, .old_values = .empty, .ip_address = try allocator.dupe(u8, "192.168.1.50") }
     });
 
     try client.writeLog(audit_log.items);
@@ -926,7 +926,7 @@ test "parseRow ensure correct output" {
 
     var row: types.AuditEntry = .{
         .event_time = 10,
-        .table_name = try allocator.dupe(u8, "addresses"),
+        .table_name = try allocator.dupe(u8, "test.addresses"),
         .new_values = new_values,
         .old_values = old_values,
         .action = 2,
@@ -968,7 +968,7 @@ test "parseRow ensure correct output" {
     try std.testing.expectEqualStrings("42", insert_values.row.user_id);
     try std.testing.expectEqualStrings("192.168.1.50", insert_values.row.ip_address);
     try std.testing.expectEqualStrings("1", insert_values.row.primary_key);
-    try std.testing.expectEqualStrings("addresses", insert_values.row.table_name);
+    try std.testing.expectEqualStrings("test.addresses", insert_values.row.table_name);
     try std.testing.expectEqual(2, insert_values.row.action);
     try std.testing.expectEqual(793, insert_values.row.transaction_id);
     try std.testing.expectEqual(10, insert_values.row.event_time);
@@ -1023,7 +1023,7 @@ test "insertRow ensure correct insertion" {
         .old_values = &old_values,
         .row = .{
             .event_time = 10,
-            .table_name = try allocator.dupe(u8, "addresses"),
+            .table_name = try allocator.dupe(u8, "test.addresses"),
             .new_values = undefined,
             .old_values = undefined,
             .action = 2,

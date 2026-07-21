@@ -31,3 +31,4 @@ Having this flag on could result in data loss and rolled back rows being logged.
 
 ## Needed for test
 psql
+clickhouse-client

@@ -230,7 +230,7 @@ test "startStreaming read and parse correctly" {
         .{ 
             .entry = .{
                 .event_time = undefined,
-                .table_name = try allocator.dupe(u8, "addresses"),
+                .table_name = try allocator.dupe(u8, "test.addresses"),
                 .new_values = new_values,
                 .old_values = old_values,
                 .action = 1,
@@ -266,7 +266,7 @@ test "startStreaming read and parse correctly" {
 
     try testing.expectEqual(1, mock_ch_client.written_logs.items.len);
     try testing.expectEqual(1, mock_ch_client.written_logs.items[0].action);
-    try testing.expectEqualStrings("addresses", mock_ch_client.written_logs.items[0].table_name);
+    try testing.expectEqualStrings("test.addresses", mock_ch_client.written_logs.items[0].table_name);
     try testing.expectEqualStrings("42", mock_ch_client.written_logs.items[0].user_id);
     try testing.expectEqualStrings("192.168.1.50", mock_ch_client.written_logs.items[0].ip_address);
     try testing.expectEqualStrings("1", mock_ch_client.written_logs.items[0].primary_key);
