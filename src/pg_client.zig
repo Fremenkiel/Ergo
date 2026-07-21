@@ -114,7 +114,11 @@ pub const PgClient = struct {
         };
     }
 
-    pub fn deinit(self: *PgClient) void {
+    pub fn cancel(self: *@This()) void {
+        if (self.wal_conn) |conn| conn.cancel();
+    }
+
+    pub fn deinit(self: *@This()) void {
         if (self.wal_conn) |wal_conn| {
             self.endFlow() catch {};
             wal_conn.deinit();
@@ -142,7 +146,7 @@ pub const PgClient = struct {
         if (self.context.ip_address.len > 0) self.allocator.free(self.context.ip_address);
     }
 
-    fn resetContext(self: *PgClient) void {
+    fn resetContext(self: *@This()) void {
         self.context.xid = 0;
         if (self.context.user_id.len > 0) self.allocator.free(self.context.user_id);
         self.context.user_id = "";
@@ -152,7 +156,7 @@ pub const PgClient = struct {
         self.context.changed_columns.clearRetainingCapacity();
     }
 
-    pub fn startWALReader(self: *PgClient) !void {
+    pub fn startWALReader(self: *@This()) !void {
         const query = "START_REPLICATION SLOT wal_slot LOGICAL 0/0 (proto_version '1', publication_names 'db_pub', messages 'true')";
 
         const msg_len: u32 = @as(u32, @intCast(query.len)) + 4 + 1;
@@ -171,7 +175,7 @@ pub const PgClient = struct {
         try self.startFlow();
     }
 
-    pub fn readWAL(self: *PgClient) !ReadResponse {
+    pub fn readWAL(self: *@This()) !ReadResponse {
         if (self.wal_conn == null) return PgClientError.WalConnectionNotInitialized;
 
         const msg = try self.wal_conn.?._reader.next();
@@ -249,7 +253,7 @@ pub const PgClient = struct {
         return response;
     }
 
-    pub fn parsePgOutput(self: *PgClient, payload: []const u8) !ParseResponse {
+    pub fn parsePgOutput(self: *@This(), payload: []const u8) !ParseResponse {
         var response = ParseResponse{
             .last_lsn = null,
             .commit_timestamp = null,
@@ -485,7 +489,7 @@ pub const PgClient = struct {
         return response;
     }
 
-    fn parseTupleData(self: *PgClient, reader: *Io.Reader, table: TableDef) !std.StringHashMapUnmanaged([]const u8) {
+    fn parseTupleData(self: *@This(), reader: *Io.Reader, table: TableDef) !std.StringHashMapUnmanaged([]const u8) {
         const num_columns = try reader.takeInt(u16, .big);
 
         if (num_columns > table.columns.items.len) {
@@ -533,7 +537,7 @@ pub const PgClient = struct {
         return changes;
     }
 
-    fn readSchemaKeys(self: *PgClient, table_name: []const u8) !std.ArrayList(ColumnDef) {
+    fn readSchemaKeys(self: *@This(), table_name: []const u8) !std.ArrayList(ColumnDef) {
         if (self.pool == null) return PgClientError.ConnectionPoolNotInitialized;
 
         var conn = try self.pool.?.acquire();
@@ -572,13 +576,13 @@ pub const PgClient = struct {
         return @intCast(unix_ms);
     }
 
-    pub fn startFlow(self: *PgClient) !void {
+    pub fn startFlow(self: *@This()) !void {
         if (self.wal_conn == null) return PgClientError.WalConnectionNotInitialized;
 
         try self.wal_conn.?._reader.startFlow(null, null);
     }
 
-    pub fn endFlow(self: *PgClient) !void {
+    pub fn endFlow(self: *@This()) !void {
         if (self.wal_conn == null) return PgClientError.WalConnectionNotInitialized;
 
         try self.wal_conn.?._reader.endFlow();
@@ -588,8 +592,9 @@ pub const PgClient = struct {
         var conn = try allocator.create(pg.Conn);
         conn.* = pg.Conn.open(io, allocator, opts.connect) catch |err| {
             std.debug.print("Failed to connect: {}\n", .{err});
-            std.process.exit(1);
+            return err;
         };
+        errdefer allocator.destroy(conn);
 
         var authOpts = opts.auth;
 
@@ -604,17 +609,14 @@ pub const PgClient = struct {
             } else {
                 std.debug.print("Failed to auth: {}\n", .{err});
             }
-            std.process.exit(1);
+            return err;
         };
 
         return conn;
     }
 
     pub fn createConnPool(allocator: mem.Allocator, io: Io, opts: Opts) !*pg.Pool {
-        return pg.Pool.init(io, allocator, .{ .size = 1, .connect = opts.connect, .auth = opts.auth}) catch |err| {
-            std.debug.print("Failed to connect: {}\n", .{err});
-            std.process.exit(1);
-        };
+        return try pg.Pool.init(io, allocator, .{ .size = 1, .connect = opts.connect, .auth = opts.auth});
     }
 };
 

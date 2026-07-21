@@ -8,3 +8,4 @@ asserts
 tests
 
 Clean up wal on eof
+wal processor currently block and hold a connection after term is sent.

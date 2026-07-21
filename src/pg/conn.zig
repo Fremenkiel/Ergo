@@ -188,6 +188,10 @@ pub const Conn = struct {
         };
     }
 
+    pub fn cancel(self: *Conn) void {
+        self._stream.shutdown(.recv) catch {};
+    }
+
     pub fn deinit(self: *Conn) void {
         const allocator = self._allocator;
         if (self._err_data) |err_data| {

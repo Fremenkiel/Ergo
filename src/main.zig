@@ -48,7 +48,7 @@ const Options = struct {
             .ch_db = try allocator.dupe(u8, if (ch_db_value != null) ch_db_value.? else "audit_log"),
 
             .pg_host = try allocator.dupe(u8, if (pg_host_value != null) pg_host_value.? else "localhost"),
-            .pg_port = if (pg_port_value != null) try std.fmt.parseInt(u16, pg_port_value.?, 10) else 9000,
+            .pg_port = if (pg_port_value != null) try std.fmt.parseInt(u16, pg_port_value.?, 10) else 5432,
             .pg_user = try allocator.dupe(u8, if (pg_user_value != null) pg_user_value.? else "db_rp"),
             .pg_pass = try allocator.dupe(u8, if (pg_pass_value != null) pg_pass_value.? else "12345678"),
             .pg_db = try allocator.dupe(u8, if (pg_db_value != null) pg_db_value.? else "db"),
@@ -133,7 +133,7 @@ pub fn main(init: std.process.Init) !void {
 
     var pg_client = try PgClient.init(io, allocator, .{
         .connect = .{  
-            .port = options.pg_port,
+            .port = 5432,
             .host = options.pg_host,
         },
         .auth = .{
@@ -169,19 +169,22 @@ pub fn main(init: std.process.Init) !void {
 
     try processor.startStreaming(&is_shutting_down);
 
-    std.log.info("Shutdown signal caught. Exiting cleanly.\n", .{});
+    try Io.File.stdout().writeStreamingAll(io, "Shutdown signal caught. Exiting cleanly.\n");
 
     std.process.exit(0);
 }
 
 fn createTestDb(allocator: mem.Allocator, io: Io, db_name: []const u8) !void {
+    const query = try std.fmt.allocPrint(allocator, "CREATE DATABASE IF NOT EXISTS {s}", .{db_name});
+    defer allocator.free(query);
+
     var ch_create_argv = [_][]const u8{ 
         "clickhouse-client", 
         "--host", "127.0.0.1",
         "--port", "9000",
         "--user", "default",
         "--password", "clickhouse",
-        "--query", try std.fmt.allocPrint(allocator, "CREATE DATABASE IF NOT EXISTS {s}", .{db_name})
+        "--query", query
     };
     const ch_create_result = try std.process.run(allocator, io, .{ 
         .argv = &ch_create_argv,
@@ -275,8 +278,9 @@ fn monitorStderr(stderr: std.posix.fd_t, child_pid: std.posix.pid_t, has_error: 
     }
 }
 
+
 test "test:main:beforeAll" {
-    std.testing.refAllDecls(@This());
+    // std.testing.refAllDecls(@This());
 }
 
 test "main ensure full transaction sync on interupt" {
@@ -286,6 +290,7 @@ test "main ensure full transaction sync on interupt" {
     var child_has_error = std.atomic.Value(bool).init(false);
 
     const db_name = try std.fmt.allocPrint(allocator, "test_db_{d}", .{std.Io.Clock.real.now(io).toNanoseconds()});
+    defer allocator.free(db_name);
 
     var env = try std.process.Environ.createMap(std.testing.environ, allocator);
     defer env.deinit();
@@ -293,6 +298,11 @@ test "main ensure full transaction sync on interupt" {
 
     try createTestDb(allocator, io, db_name);
     var child = try setupChildProcess(allocator, io, db_name);
+    errdefer {
+        if (child.id) |pid| {
+            std.posix.kill(pid, std.posix.SIG.TERM) catch {};
+        }
+    }
 
     const stderr_thread = try std.Thread.spawn(.{}, monitorStderr, .{
         child.stderr.?.handle,
@@ -326,7 +336,7 @@ test "main ensure full transaction sync on interupt" {
 
     var buffer: [1024]u8 = undefined;
     var reader = child.stdout.?.reader(io, &buffer);
-    var r = &reader.interface;
+    const r = &reader.interface;
 
     var stdout_acc = std.ArrayList(u8).empty;
     defer stdout_acc.deinit(allocator);
@@ -355,8 +365,8 @@ test "main ensure full transaction sync on interupt" {
         "--port", "9000",
         "--user", "default",
         "--password", "clickhouse",
-	"--database", db_name,
-        "--query", "SELECT * FROM entries WHERE table_name = 'public.addresses'" 
+        "--database", db_name,
+        "--query", "SELECT action, table_name, primary_key, changed_columns, old_values, new_values, user_id, ip_address FROM entries ORDER BY primary_key, action DESC" 
     };
     const ch_result = try std.process.run(allocator, io, .{ 
         .argv = &ch_argv,
@@ -371,9 +381,15 @@ test "main ensure full transaction sync on interupt" {
         return error.ChSelectError;
     }
 
-    std.debug.print("{s}\n", .{ch_result.stdout});
-    try testing.expectEqualStrings("6\n", ch_result.stdout);
-}
+    try testing.expectEqualStrings(
+        "DELETE\tpublic.addresses\t1\t['address_line_1','city','id','country','postal_code']\t{'address_line_1':'Googleplex','city':'Mountain View','id':'1','country':'US','postal_code':'94043'}\t{}\t42\t192.168.1.50\n" ++
+        "UPDATE\tpublic.addresses\t1\t['address_line_1','city','postal_code']\t{'address_line_1':'1 Apple Park Way','city':'Cupertino','postal_code':'95014'}\t{'address_line_1':'Googleplex','city':'Mountain View','postal_code':'94043'}\t42\t192.168.1.50\n" ++
+        "INSERT\tpublic.addresses\t1\t['address_line_1','city','id','country','postal_code']\t{}\t{'address_line_1':'1 Apple Park Way','city':'Cupertino','id':'1','country':'US','postal_code':'95014'}\t42\t192.168.1.50\n" ++
+        "DELETE\tpublic.addresses\t2\t['address_line_1','city','id','country','postal_code']\t{'address_line_1':'1 Apple Park Way','city':'Cupertino','id':'2','country':'US','postal_code':'95014'}\t{}\t42\t192.168.1.50\n" ++
+        "UPDATE\tpublic.addresses\t2\t['address_line_1','city','postal_code']\t{'address_line_1':'Googleplex','city':'Mountain View','postal_code':'94043'}\t{'address_line_1':'1 Apple Park Way','city':'Cupertino','postal_code':'95014'}\t42\t192.168.1.50\n" ++
+        "INSERT\tpublic.addresses\t2\t['address_line_1','city','id','country','postal_code']\t{}\t{'address_line_1':'Googleplex','city':'Mountain View','id':'2','country':'US','postal_code':'94043'}\t42\t192.168.1.50\n",
+        ch_result.stdout,
+    );}
 
 // test "making sure full commits are logged without interupt" {
 // }

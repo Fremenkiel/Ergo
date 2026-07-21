@@ -17,6 +17,7 @@ pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
         log_array: std.ArrayList(types.AuditEntry) = .empty,
         transaction_array: std.ArrayList(types.AuditEntry) = .empty,
         is_sync_test: bool,
+        in_flight_transaction: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
         allocator: mem.Allocator,
         io: Io,
@@ -32,6 +33,18 @@ pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
             self.transaction_array.deinit(self.allocator);
         }
 
+        fn shutdownMonitor(self: *@This(), flag: *std.atomic.Value(bool)) !void {
+            while (!flag.load(.seq_cst)) {
+                try Io.sleep(self.io, Io.Duration{ .nanoseconds = 10 * std.time.ns_per_ms }, .real);
+            }
+
+            while (self.in_flight_transaction.load(.seq_cst)) {
+                try Io.sleep(self.io, Io.Duration{ .nanoseconds = 10 * std.time.ns_per_ms }, .real);
+            }
+
+            self.pg_client.cancel();
+        }
+
         pub fn startStreaming(self: *@This(), flag: *std.atomic.Value(bool)) !void {
             self.pg_client.startWALReader() catch |err| switch (err) {
                 pg_client.PgClientError.WalConnectionNotInitialized => {
@@ -41,6 +54,8 @@ pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
                 else => return err,
             };
 
+            const monitor_thread = try std.Thread.spawn(.{}, shutdownMonitor, .{ self, flag });
+            monitor_thread.detach();
 
             // TODO: check lengts, time elapsed, transaction_array to make sure nothing is missing.
             while (!(flag.load(.seq_cst) and self.log_array.items.len == 0)) {
@@ -53,6 +68,10 @@ pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
                 }
 
                 if (response.entry) |entry| {
+                    if (self.transaction_array.items.len == 0) {
+                        self.in_flight_transaction.store(true, .seq_cst);
+                    }
+
                     try self.transaction_array.append(self.allocator, entry);
                     // remove linking
                     response.entry = null;
@@ -64,6 +83,8 @@ pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
                     }
                     try self.log_array.appendSlice(self.allocator, self.transaction_array.items);
                     self.transaction_array.clearRetainingCapacity();
+
+                    self.in_flight_transaction.store(false, .seq_cst);
 
                     // Test hook
                     if (self.log_array.items.len > 0 and self.is_sync_test) {
