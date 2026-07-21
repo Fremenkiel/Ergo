@@ -262,6 +262,19 @@ fn terminateChildProcess(io: Io, child: *std.process.Child) !std.process.Child.T
     return try child.wait(io);
 }
 
+fn monitorStderr(stderr: std.posix.fd_t, child_pid: std.posix.pid_t, has_error: *std.atomic.Value(bool)) void {
+    var buffer: [1024]u8 = undefined;
+
+    const bytes_read = std.posix.read(stderr, &buffer) catch 0;
+
+    if (bytes_read > 0) {
+        std.debug.print("Error: child process threw err: {s}\n", .{buffer[0..bytes_read]});
+
+        has_error.store(true, .seq_cst);
+        std.posix.kill(child_pid, std.posix.SIG.KILL) catch {};
+    }
+}
+
 test "test:main:beforeAll" {
     std.testing.refAllDecls(@This());
 }
@@ -269,6 +282,8 @@ test "test:main:beforeAll" {
 test "main ensure full transaction sync on interupt" {
     const allocator = testing.allocator;
     const io = testing.io;
+
+    var child_has_error = std.atomic.Value(bool).init(false);
 
     const db_name = try std.fmt.allocPrint(allocator, "test_db_{d}", .{std.Io.Clock.real.now(io).toNanoseconds()});
 
@@ -278,6 +293,13 @@ test "main ensure full transaction sync on interupt" {
 
     try createTestDb(allocator, io, db_name);
     var child = try setupChildProcess(allocator, io, db_name);
+
+    const stderr_thread = try std.Thread.spawn(.{}, monitorStderr, .{
+        child.stderr.?.handle,
+        child.id.?,
+        &child_has_error
+    });
+    stderr_thread.detach();
 
     var pg_argv = [_][]const u8{
         "psql",
@@ -301,54 +323,25 @@ test "main ensure full transaction sync on interupt" {
         std.debug.print("Error: PSQL failed: {s}\n", .{pg_result.stderr});
         return error.PsqlExecutionFailed;
     }
-    
-    var poll_fds = [_]std.posix.pollfd{
-        .{ .fd = child.stderr.?.handle, .events = std.posix.POLL.IN, .revents = 0 },
-        .{ .fd = child.stdout.?.handle, .events = std.posix.POLL.IN, .revents = 0 },
-    };
 
-    var out_buffer: [1024]u8 = undefined;
-    var err_buffer: [1024]u8 = undefined;
+    var buffer: [1024]u8 = undefined;
+    var reader = child.stdout.?.reader(io, &buffer);
+    var r = &reader.interface;
 
     var stdout_acc = std.ArrayList(u8).empty;
     defer stdout_acc.deinit(allocator);
 
     while (true) {
-        const ready = try std.posix.poll(&poll_fds, 5000);
-        if (ready == 0) continue;
+        if (try r.takeDelimiter('\n')) |line| {
+            try stdout_acc.appendSlice(allocator, line);
 
-        if (poll_fds[0].fd >= 0) {
-            if ((poll_fds[0].revents & std.posix.POLL.IN) != 0) {
-                const err_bytes = try std.posix.read(child.stderr.?.handle, &err_buffer);
-                if (err_bytes > 0) {
-                    std.debug.print("Error: child process threw err: {s}\n", .{err_buffer[0..err_bytes]});
-                    return error.ChildProcessError;
-                } else {
-                    poll_fds[0].fd = -1;
-                }
-            } else if ((poll_fds[0].revents & (std.posix.POLL.HUP | std.posix.POLL.ERR)) != 0) {
-                poll_fds[0].fd = -1;
+            if (std.mem.indexOf(u8, stdout_acc.items, "SYNC_MARKER_REACHED") != null) {
+                break;
             }
-        }
-
-        if (poll_fds[1].fd >= 0) {
-            if ((poll_fds[1].revents & std.posix.POLL.IN) != 0) {
-                const out_bytes = try std.posix.read(child.stdout.?.handle, &out_buffer);
-                if (out_bytes > 0) {
-                    try stdout_acc.appendSlice(allocator, out_buffer[0..out_bytes]);
-
-                    if (std.mem.indexOf(u8, stdout_acc.items, "SYNC_MARKER_REACHED") != null) {
-                        break;
-                    } 
-                } else {
-                    poll_fds[1].fd = -1;
-                }
-            } else if ((poll_fds[1].revents & (std.posix.POLL.HUP | std.posix.POLL.ERR)) != 0) {
-                poll_fds[1].fd = -1;
+        } else {
+            if (child_has_error.load(.seq_cst)) {
+                return error.ChildProcessError;
             }
-        }
-
-        if (poll_fds[0].fd == -1 and poll_fds[1].fd == -1) {
             return error.ChilsExitedPrematurelyError;
         }
     }
