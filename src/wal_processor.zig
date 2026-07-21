@@ -33,37 +33,34 @@ pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
             self.transaction_array.deinit(self.allocator);
         }
 
-        fn shutdownMonitor(self: *@This(), flag: *std.atomic.Value(bool)) !void {
-            while (!flag.load(.seq_cst)) {
-                try Io.sleep(self.io, Io.Duration{ .nanoseconds = 10 * std.time.ns_per_ms }, .real);
-            }
-
-            while (self.in_flight_transaction.load(.seq_cst)) {
-                try Io.sleep(self.io, Io.Duration{ .nanoseconds = 10 * std.time.ns_per_ms }, .real);
-            }
-
-            self.pg_client.cancel();
-        }
-
         pub fn startStreaming(self: *@This(), flag: *std.atomic.Value(bool)) !void {
             self.pg_client.startWALReader() catch |err| switch (err) {
                 pg_client.PgClientError.WalConnectionNotInitialized => {
                     self.pg_client.*.wal_conn = try PgClient.createWalConn(self.allocator, self.io, self.pg_client.*.conn_opts);
+
+                    try self.pg_client.retReadTimeoutMs(250);
+
                     try self.pg_client.startWALReader();
                 },
                 else => return err,
             };
 
-            const monitor_thread = try std.Thread.spawn(.{}, shutdownMonitor, .{ self, flag });
-            monitor_thread.detach();
-
             // TODO: check lengts, time elapsed, transaction_array to make sure nothing is missing.
             while (!(flag.load(.seq_cst) and self.log_array.items.len == 0)) {
-                var response = try self.pg_client.readWAL();
+                if (flag.load(.seq_cst) and !self.in_flight_transaction.load(.seq_cst)) {
+                    self.pg_client.cancel(); 
+                    return;
+                }
+
+                var response = self.pg_client.readWAL() catch |err| switch (err) {
+                    error.WouldBlock, error.Timeout => {
+                        continue; 
+                    },
+                    else => return err,
+                };
 
                 if (response.eof) {
                     try self.ch_client.writeLog(self.log_array.items);
-
                     return;
                 }
 
@@ -146,6 +143,15 @@ const MockPgClient = struct {
         };
     }
 
+    pub fn setReadTimeoutMs(self: *@This(), timeout_ms: u32) !void {
+        _ = self;
+        _ = timeout_ms;
+    }
+
+    pub fn cancel(self: *@This()) void {
+        self.wal_conn.* = false;
+    }
+
     pub fn deinit(self: *@This()) void {
         self.allocator.destroy(self.wal_conn);
     }
@@ -206,6 +212,17 @@ const MockChClient = struct {
             copy_slice[i].changed_columns = try entry.changed_columns.clone();
             copy_slice[i].new_values = try entry.new_values.clone(self.allocator);
             copy_slice[i].old_values = try entry.old_values.clone(self.allocator);
+            copy_slice[i].primary_key = try self.allocator.dupe(u8, entry.primary_key);
+
+            var old_it = copy_slice[i].old_values.iterator();
+            while (old_it.next()) |kv| {
+                kv.value_ptr.* = try self.allocator.dupe(u8, kv.value_ptr.*);
+            }
+
+            var new_it = copy_slice[i].new_values.iterator();
+            while (new_it.next()) |kv| {
+                kv.value_ptr.* = try self.allocator.dupe(u8, kv.value_ptr.*);
+            }
         }
 
         try self.written_logs.appendSlice(self.allocator, copy_slice);
@@ -230,22 +247,22 @@ test "startStreaming read and parse correctly" {
     var new_values = std.StringHashMapUnmanaged([]const u8).empty;
     try new_values.ensureUnusedCapacity(allocator, 6);
 
-    try new_values.put(allocator, "id", "1");
-    try new_values.put(allocator, "address_line_1", "1 Apple Park Way");
-    try new_values.put(allocator, "address_line_2", "");
-    try new_values.put(allocator, "postal_code", "95014");
-    try new_values.put(allocator, "city", "Cupertino");
-    try new_values.put(allocator, "country", "US");
+    try new_values.put(allocator, "id", try allocator.dupe(u8, "1"));
+    try new_values.put(allocator, "address_line_1", try allocator.dupe(u8, "1 Apple Park Way"));
+    try new_values.put(allocator, "address_line_2", try allocator.dupe(u8, ""));
+    try new_values.put(allocator, "postal_code", try allocator.dupe(u8, "95014"));
+    try new_values.put(allocator, "city", try allocator.dupe(u8, "Cupertino"));
+    try new_values.put(allocator, "country", try allocator.dupe(u8, "US"));
 
     var old_values = std.StringHashMapUnmanaged([]const u8).empty;
     try old_values.ensureUnusedCapacity(allocator, 6);
 
-    try old_values.put(allocator, "id", "1");
-    try old_values.put(allocator, "address_line_1", "Googleplex");
-    try old_values.put(allocator, "address_line_2", "");
-    try old_values.put(allocator, "postal_code", "94043");
-    try old_values.put(allocator, "city", "Mountain View");
-    try old_values.put(allocator, "country", "US");
+    try old_values.put(allocator, "id", try allocator.dupe(u8, "1"));
+    try old_values.put(allocator, "address_line_1", try allocator.dupe(u8, "Googleplex"));
+    try old_values.put(allocator, "address_line_2", try allocator.dupe(u8, ""));
+    try old_values.put(allocator, "postal_code", try allocator.dupe(u8, "94043"));
+    try old_values.put(allocator, "city", try allocator.dupe(u8, "Mountain View"));
+    try old_values.put(allocator, "country", try allocator.dupe(u8, "US"));
 
     var res = [_]pg_client.ReadResponse{
         .{ 
@@ -259,7 +276,7 @@ test "startStreaming read and parse correctly" {
                 .transaction_id = 793,
                 .user_id = try allocator.dupe(u8, "42"),
                 .ip_address = try allocator.dupe(u8, "192.168.1.50"),
-                .primary_key = "1",
+                .primary_key = try allocator.dupe(u8, "1"),
             },
             .commit_timestamp = 10
         },

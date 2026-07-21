@@ -280,7 +280,7 @@ fn monitorStderr(stderr: std.posix.fd_t, child_pid: std.posix.pid_t, has_error: 
 
 
 test "test:main:beforeAll" {
-    // std.testing.refAllDecls(@This());
+    std.testing.refAllDecls(@This());
 }
 
 test "main ensure full transaction sync on interupt" {
@@ -359,7 +359,8 @@ test "main ensure full transaction sync on interupt" {
     const term = try terminateChildProcess(io, &child);
 
     try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, term);
-    var ch_argv = [_][]const u8{ 
+
+    var ch_assert_argv = [_][]const u8{ 
         "clickhouse-client", 
         "--host", "127.0.0.1",
         "--port", "9000",
@@ -368,16 +369,16 @@ test "main ensure full transaction sync on interupt" {
         "--database", db_name,
         "--query", "SELECT action, table_name, primary_key, changed_columns, old_values, new_values, user_id, ip_address FROM entries ORDER BY primary_key, action DESC" 
     };
-    const ch_result = try std.process.run(allocator, io, .{ 
-        .argv = &ch_argv,
+    const ch_assert_result = try std.process.run(allocator, io, .{ 
+        .argv = &ch_assert_argv,
     });
     defer {
-        allocator.free(ch_result.stdout);
-        allocator.free(ch_result.stderr);
+        allocator.free(ch_assert_result.stdout);
+        allocator.free(ch_assert_result.stderr);
     }
 
-    if (ch_result.term != .exited or ch_result.term.exited != 0 or ch_result.stderr.len > 0) {
-        std.debug.print("Error: unable to select ch data: {s}\n", .{ch_result.stderr});
+    if (ch_assert_result.term != .exited or ch_assert_result.term.exited != 0 or ch_assert_result.stderr.len > 0) {
+        std.debug.print("Error: unable to select ch data: {s}\n", .{ch_assert_result.stderr});
         return error.ChSelectError;
     }
 
@@ -388,8 +389,34 @@ test "main ensure full transaction sync on interupt" {
         "DELETE\tpublic.addresses\t2\t['address_line_1','city','id','country','postal_code']\t{'address_line_1':'1 Apple Park Way','city':'Cupertino','id':'2','country':'US','postal_code':'95014'}\t{}\t42\t192.168.1.50\n" ++
         "UPDATE\tpublic.addresses\t2\t['address_line_1','city','postal_code']\t{'address_line_1':'Googleplex','city':'Mountain View','postal_code':'94043'}\t{'address_line_1':'1 Apple Park Way','city':'Cupertino','postal_code':'95014'}\t42\t192.168.1.50\n" ++
         "INSERT\tpublic.addresses\t2\t['address_line_1','city','id','country','postal_code']\t{}\t{'address_line_1':'Googleplex','city':'Mountain View','id':'2','country':'US','postal_code':'94043'}\t42\t192.168.1.50\n",
-        ch_result.stdout,
-    );}
+        ch_assert_result.stdout,
+    );
+
+    var pg_assert_argv = [_][]const u8{ 
+        "psql",
+        "-h", "127.0.0.1",
+        "-p", "5432",
+        "-U", "db_rw",
+        "-d", "db",
+        "-a",
+        "-c", "\"SELECT active FROM pg_replication_slots WHERE slot_name = 'wal_slot' AND plugin = 'pgoutput' ORDER BY active LIMIT 1;\"",
+    };
+    const pg_assert_result = try std.process.run(allocator, io, .{ 
+        .argv = &pg_assert_argv,
+    });
+    defer {
+        allocator.free(pg_assert_result.stdout);
+        allocator.free(pg_assert_result.stderr);
+    }
+
+    if (pg_assert_result.term != .exited or pg_assert_result.term.exited != 0 or pg_assert_result.stderr.len > 0) {
+        std.debug.print("Error: unable to select ch data: {s}\n", .{pg_assert_result.stderr});
+        return error.ChSelectError;
+    }
+
+    try testing.expectEqualStrings("false", pg_assert_result.stdout);
+}
+
 
 // test "making sure full commits are logged without interupt" {
 // }

@@ -877,10 +877,10 @@ test "writeLog" {
     defer changed_columns.deinit();
 
     audit_log.appendSliceAssumeCapacity(&[_]types.AuditEntry{
-        .{ .event_time = 53634634, .transaction_id = 10, .primary_key = "1", .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "test.addresses"), .action = 1, .changed_columns = changed_columns, .new_values = .empty, .old_values = .empty, .ip_address = try allocator.dupe(u8, "192.168.1.50") },
-        .{ .event_time = 53634634, .transaction_id = 10, .primary_key = "2", .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "test.addresses"), .action = 2, .changed_columns = changed_columns, .new_values = .empty, .old_values = .empty, .ip_address = try allocator.dupe(u8, "192.168.1.50") },
-        .{ .event_time = 53634634, .transaction_id = 10, .primary_key = "3", .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "test.addresses"), .action = 3, .changed_columns = changed_columns, .new_values = .empty, .old_values = .empty, .ip_address = try allocator.dupe(u8, "192.168.1.50") },
-        .{ .event_time = 53634634, .transaction_id = 11, .primary_key = "4", .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "test.addresses"), .action = 1, .changed_columns = changed_columns, .new_values = .empty, .old_values = .empty, .ip_address = try allocator.dupe(u8, "192.168.1.50") }
+        .{ .event_time = 53634634, .transaction_id = 10, .primary_key = try allocator.dupe(u8, "1"), .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "test.addresses"), .action = 1, .changed_columns = changed_columns, .new_values = .empty, .old_values = .empty, .ip_address = try allocator.dupe(u8, "192.168.1.50") },
+        .{ .event_time = 53634634, .transaction_id = 10, .primary_key = try allocator.dupe(u8, "2"), .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "test.addresses"), .action = 2, .changed_columns = changed_columns, .new_values = .empty, .old_values = .empty, .ip_address = try allocator.dupe(u8, "192.168.1.50") },
+        .{ .event_time = 53634634, .transaction_id = 10, .primary_key = try allocator.dupe(u8, "3"), .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "test.addresses"), .action = 3, .changed_columns = changed_columns, .new_values = .empty, .old_values = .empty, .ip_address = try allocator.dupe(u8, "192.168.1.50") },
+        .{ .event_time = 53634634, .transaction_id = 11, .primary_key = try allocator.dupe(u8, "4"), .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "test.addresses"), .action = 1, .changed_columns = changed_columns, .new_values = .empty, .old_values = .empty, .ip_address = try allocator.dupe(u8, "192.168.1.50") }
     });
 
     try client.writeLog(audit_log.items);
@@ -907,22 +907,22 @@ test "parseRow ensure correct output" {
     var new_values = std.StringHashMapUnmanaged([]const u8).empty;
     try new_values.ensureUnusedCapacity(allocator, 6);
 
-    try new_values.put(allocator, "id", "1");
-    try new_values.put(allocator, "address_line_1", "1 Apple Park Way");
-    try new_values.put(allocator, "address_line_2", "");
-    try new_values.put(allocator, "postal_code", "95014");
-    try new_values.put(allocator, "city", "Cupertino");
-    try new_values.put(allocator, "country", "US");
+    try new_values.put(allocator, "id", try allocator.dupe(u8, "1"));
+    try new_values.put(allocator, "address_line_1", try allocator.dupe(u8, "1 Apple Park Way"));
+    try new_values.put(allocator, "address_line_2", try allocator.dupe(u8, ""));
+    try new_values.put(allocator, "postal_code", try allocator.dupe(u8, "95014"));
+    try new_values.put(allocator, "city", try allocator.dupe(u8, "Cupertino"));
+    try new_values.put(allocator, "country", try allocator.dupe(u8, "US"));
 
     var old_values = std.StringHashMapUnmanaged([]const u8).empty;
     try old_values.ensureUnusedCapacity(allocator, 6);
 
-    try old_values.put(allocator, "id", "1");
-    try old_values.put(allocator, "address_line_1", "Googleplex");
-    try old_values.put(allocator, "address_line_2", "");
-    try old_values.put(allocator, "postal_code", "94043");
-    try old_values.put(allocator, "city", "Mountain View");
-    try old_values.put(allocator, "country", "US");
+    try old_values.put(allocator, "id", try allocator.dupe(u8, "1"));
+    try old_values.put(allocator, "address_line_1", try allocator.dupe(u8, "Googleplex"));
+    try old_values.put(allocator, "address_line_2", try allocator.dupe(u8, ""));
+    try old_values.put(allocator, "postal_code", try allocator.dupe(u8, "94043"));
+    try old_values.put(allocator, "city", try allocator.dupe(u8, "Mountain View"));
+    try old_values.put(allocator, "country", try allocator.dupe(u8, "US"));
 
     var row: types.AuditEntry = .{
         .event_time = 10,
@@ -934,7 +934,7 @@ test "parseRow ensure correct output" {
         .transaction_id = 793,
         .user_id = try allocator.dupe(u8, "42"),
         .ip_address = try allocator.dupe(u8, "192.168.1.50"),
-        .primary_key = "1",
+        .primary_key = try allocator.dupe(u8, "1"),
     };
     defer row.deinit(allocator);
 

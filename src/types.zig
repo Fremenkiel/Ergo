@@ -22,8 +22,19 @@ pub const AuditEntry = struct {
         defer allocator.free(self.table_name);
         defer if (self.user_id.len > 0) allocator.free(self.user_id);
         defer if (self.ip_address.len > 0) allocator.free(self.ip_address);
+        defer if (self.primary_key.len > 0) allocator.free(self.primary_key);
         defer self.changed_columns.deinit();
+
+        var old_it = self.old_values.valueIterator();
+        while (old_it.next()) |val| {
+            allocator.free(val.*);
+        }
         defer self.old_values.deinit(allocator);
+
+        var new_it = self.new_values.valueIterator();
+        while (new_it.next()) |val| {
+            allocator.free(val.*);
+        }
         defer self.new_values.deinit(allocator);
     }
 };
@@ -43,7 +54,7 @@ test "AuditEntry ensure correct deinit" {
     var entry = AuditEntry{
         .event_time = 1244,
         .transaction_id = 10,
-        .primary_key = "24",
+        .primary_key = try allocator.dupe(u8, "24"),
         .user_id = try allocator.dupe(u8, "43"),
         .table_name = try allocator.dupe(u8, "test"),
         .action = 1,

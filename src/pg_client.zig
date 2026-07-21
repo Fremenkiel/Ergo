@@ -85,6 +85,8 @@ pub const PgClient = struct {
     pool: ?*pg.Pool,
     wal_conn: ?*pg.Conn,
 
+    read_timeout_ms: ?i32,
+
     pub fn init(io: Io, allocator: mem.Allocator, opts: Opts) !PgClient{
         var pool = try createConnPool(allocator, io, opts);
         errdefer pool.deinit();
@@ -111,7 +113,12 @@ pub const PgClient = struct {
             .table_reg = std.AutoHashMap(u32, TableDef).init(allocator),
             .wal_conn = conn,
             .pool = pool,
+            .read_timeout_ms = null,
         };
+    }
+
+    pub fn setReadTimeoutMs(self: *@This(), timeout_ms: u32) !void {
+        self.read_timeout_ms = @intCast((timeout_ms % 1000) * 1000);
     }
 
     pub fn cancel(self: *@This()) void {
@@ -177,6 +184,23 @@ pub const PgClient = struct {
 
     pub fn readWAL(self: *@This()) !ReadResponse {
         if (self.wal_conn == null) return PgClientError.WalConnectionNotInitialized;
+
+        const reader = &self.wal_conn.?._reader;
+
+        if (reader.start == reader.pos) {
+            if (self.read_timeout_ms) |read_timeout_ms| {
+                const fd = self.wal_conn.?._stream.stream.socket.handle;
+
+                var fds = [_]std.posix.pollfd{
+                    .{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 },
+                };
+
+                const n = try std.posix.poll(&fds, read_timeout_ms);
+                if (n == 0) {
+                    return error.Timeout;
+                }
+            }
+        }
 
         const msg = try self.wal_conn.?._reader.next();
 
@@ -359,7 +383,7 @@ pub const PgClient = struct {
                             .transaction_id = self.context.xid,
                             .user_id = if (self.context.user_id.len > 0) try self.allocator.dupe(u8, self.context.user_id) else "",
                             .ip_address = if (self.context.ip_address.len > 0) try self.allocator.dupe(u8, self.context.ip_address) else "",
-                            .primary_key = self.context.primary_key,
+                            .primary_key = if (self.context.primary_key.len > 0) try self.allocator.dupe(u8, self.context.primary_key) else "",
                         };
                 } else {
                     std.debug.print("Error: Received insert for unknown relation ID {d}\n", .{rel_id});
@@ -391,7 +415,7 @@ pub const PgClient = struct {
                             .transaction_id = self.context.xid,
                             .user_id = if (self.context.user_id.len > 0) try self.allocator.dupe(u8, self.context.user_id) else "",
                             .ip_address = if (self.context.ip_address.len > 0) try self.allocator.dupe(u8, self.context.ip_address) else "",
-                            .primary_key = self.context.primary_key,
+                            .primary_key = if (self.context.primary_key.len > 0) try self.allocator.dupe(u8, self.context.primary_key) else "",
                         };
                     } else {
                         std.debug.print("Error: Expected 'N', got '{c}'\n", .{tuple_type});
@@ -420,7 +444,7 @@ pub const PgClient = struct {
                             .transaction_id = self.context.xid,
                             .user_id = if (self.context.user_id.len > 0) try self.allocator.dupe(u8, self.context.user_id) else "",
                             .ip_address = if (self.context.ip_address.len > 0) try self.allocator.dupe(u8, self.context.ip_address) else "",
-                            .primary_key = self.context.primary_key,
+                            .primary_key = if (self.context.primary_key.len > 0) try self.allocator.dupe(u8, self.context.primary_key) else "",
                         };
                     } else {
                         std.debug.print("Error: Expected 'O' or 'K', got '{c}'\n", .{tuple_type});
@@ -497,6 +521,13 @@ pub const PgClient = struct {
         }
 
         var changes = std.StringHashMapUnmanaged([]const u8).empty;
+        errdefer {
+            var it = changes.valueIterator();
+            while (it.next()) |val| {
+                self.allocator.free(val.*);
+            }
+            changes.deinit(self.allocator);
+        }
 
         for (table.columns.items) |col| {
             const col_type = try reader.takeByte();
@@ -513,7 +544,9 @@ pub const PgClient = struct {
                 't' => {
                     const col_len = try reader.takeInt(u32, .big);
 
-                    const val_buf = try reader.take(col_len);
+                    const val_buf_raw = try reader.take(col_len);
+                    const val_buf = try self.allocator.dupe(u8, val_buf_raw);
+                    errdefer self.allocator.free(val_buf);
 
                     try changes.put(self.allocator, col_name, val_buf);
                     const changed_column = try self.context.changed_columns.getOrPut(col_name);
@@ -1006,7 +1039,13 @@ test "parseTupleData" {
     var reader = Io.Reader.fixed(commit_bytes);
 
     var result = try client.parseTupleData(&reader, client.table_reg.get(16390).?);
-    defer result.deinit(allocator);
+    defer {
+        var it = result.valueIterator();
+        while (it.next()) |val| {
+            allocator.free(val.*);
+        }
+        result.deinit(allocator);
+    }
 
     try testing.expectEqualStrings("1", result.get("id").?);
     try testing.expectEqualStrings("1 Apple Park Way", result.get("address_line_1").?);
