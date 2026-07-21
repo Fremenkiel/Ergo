@@ -34,11 +34,12 @@ pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
         }
 
         pub fn startStreaming(self: *@This(), flag: *std.atomic.Value(bool)) !void {
+            try self.pg_client.setReadTimeoutMs(250);
+
+
             self.pg_client.startWALReader() catch |err| switch (err) {
                 pg_client.PgClientError.WalConnectionNotInitialized => {
                     self.pg_client.*.wal_conn = try PgClient.createWalConn(self.allocator, self.io, self.pg_client.*.conn_opts);
-
-                    try self.pg_client.retReadTimeoutMs(250);
 
                     try self.pg_client.startWALReader();
                 },
