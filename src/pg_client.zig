@@ -689,6 +689,7 @@ fn setupMockClient(allocator: mem.Allocator, io: Io) !PgClient {
         .table_reg = table_reg,
         .wal_conn = null,
         .pool = null,
+        .read_timeout_ms = null
     };
 }
 
@@ -777,6 +778,7 @@ test "parsePgOutput maps RELATION correctly" {
                 .timeout = 10_000,
             } 
         }),
+        .read_timeout_ms = null
     };
     defer client.deinit();
 
@@ -1084,6 +1086,7 @@ test "readSchemaKeys" {
         }),
         .table_reg = undefined,
         .wal_conn = null,
+        .read_timeout_ms = null,
     };
     defer client.deinit();
 

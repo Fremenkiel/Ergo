@@ -292,9 +292,9 @@ test "main ensure full transaction sync on interupt" {
     const db_name = try std.fmt.allocPrint(allocator, "test_db_{d}", .{std.Io.Clock.real.now(io).toNanoseconds()});
     defer allocator.free(db_name);
 
-    var env = try std.process.Environ.createMap(std.testing.environ, allocator);
-    defer env.deinit();
-    try env.put("PGPASSWORD", "12345678");
+    var pg_env = try std.process.Environ.createMap(std.testing.environ, allocator);
+    defer pg_env.deinit();
+    try pg_env.put("PGPASSWORD", "12345678");
 
     try createTestDb(allocator, io, db_name);
     var child = try setupChildProcess(allocator, io, db_name);
@@ -322,7 +322,7 @@ test "main ensure full transaction sync on interupt" {
     };
     const pg_result = try std.process.run(allocator, io, .{ 
         .argv = &pg_argv,
-        .environ_map = &env, 
+        .environ_map = &pg_env, 
     });
     defer {
         allocator.free(pg_result.stdout);
@@ -398,11 +398,12 @@ test "main ensure full transaction sync on interupt" {
         "-p", "5432",
         "-U", "db_rw",
         "-d", "db",
-        "-a",
-        "-c", "\"SELECT active FROM pg_replication_slots WHERE slot_name = 'wal_slot' AND plugin = 'pgoutput' ORDER BY active LIMIT 1;\"",
+        "-q", "-t", "-A", // Formatting
+        "-c", "SELECT active FROM pg_replication_slots WHERE slot_name = 'wal_slot' AND plugin = 'pgoutput' ORDER BY active LIMIT 1;",
     };
     const pg_assert_result = try std.process.run(allocator, io, .{ 
         .argv = &pg_assert_argv,
+        .environ_map = &pg_env, 
     });
     defer {
         allocator.free(pg_assert_result.stdout);
@@ -410,11 +411,11 @@ test "main ensure full transaction sync on interupt" {
     }
 
     if (pg_assert_result.term != .exited or pg_assert_result.term.exited != 0 or pg_assert_result.stderr.len > 0) {
-        std.debug.print("Error: unable to select ch data: {s}\n", .{pg_assert_result.stderr});
-        return error.ChSelectError;
+        std.debug.print("Error: unable to select pg data: {s}\n", .{pg_assert_result.stderr});
+        return error.PgSelectError;
     }
 
-    try testing.expectEqualStrings("false", pg_assert_result.stdout);
+    try testing.expectEqualStrings("f\n", pg_assert_result.stdout);
 }
 
 
