@@ -10,14 +10,18 @@ const pg = @import("pg");
 const types = @import("types.zig");
 const pg_client = @import("pg_client.zig");
 
+pub const sync_marker_str = "SYNC_MARKER_REACHED";
+pub const submit_marker_str = "CH_DATA_SUBMITTED_MARKER";
+
 pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
     return struct {
         duration: Io.Duration = Io.Duration.fromSeconds(1),
         last_write_timestamp: Io.Timestamp,
         log_array: std.ArrayList(types.AuditEntry) = .empty,
         transaction_array: std.ArrayList(types.AuditEntry) = .empty,
-        is_sync_test: bool,
         in_flight_transaction: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+        is_test: bool = false,
 
         allocator: mem.Allocator,
         io: Io,
@@ -84,7 +88,7 @@ pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
                     self.in_flight_transaction.store(false, .seq_cst);
 
                     // Test hook
-                    if (self.log_array.items.len > 0 and self.is_sync_test) {
+                    if (self.log_array.items.len > 0 and self.is_test) {
                         var marker_idx: ?usize = null;
                         for (self.log_array.items, 0..) |*item, i| {
                             if (std.mem.eql(u8, "public.test_sync_marker", item.table_name)) {
@@ -95,12 +99,11 @@ pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
 
                         if (marker_idx) |idx| {
                             _ = self.log_array.orderedRemove(idx);
-                            if (self.is_sync_test) {
-                                try std.Io.File.stdout().writeStreamingAll(self.io, "SYNC_MARKER_REACHED\n");
+                            try std.Io.File.stdout().writeStreamingAll(self.io, sync_marker_str);
+                            try Io.File.stdout().writeStreamingAll(self.io, "\n");
 
-                                while (!flag.load(.seq_cst)) {
-                                    try Io.sleep(self.io, Io.Duration{ .nanoseconds = 10 * std.time.ns_per_ms }, .real);
-                                }
+                            while (!flag.load(.seq_cst)) {
+                                try Io.sleep(self.io, Io.Duration{ .nanoseconds = 10 * std.time.ns_per_ms }, .real);
                             }
                         }
                     }
@@ -115,6 +118,11 @@ pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
                     self.log_array.clearRetainingCapacity();
 
                     self.last_write_timestamp = Io.Clock.real.now(self.io);
+
+                    if (self.is_test) {
+                        try std.Io.File.stdout().writeStreamingAll(self.io, submit_marker_str);
+                        try Io.File.stdout().writeStreamingAll(self.io, "\n");
+                    }
                 }
             }
         }
@@ -296,7 +304,6 @@ test "startStreaming read and parse correctly" {
     ),
         .allocator = allocator,
         .io = io,
-        .is_sync_test = false,
     };
     defer processor.deinit();
 

@@ -11,8 +11,11 @@ const ch = @import("ch");
 
 const PgClient = @import("pg_client.zig").PgClient;
 const ChClient = @import("ch_client.zig").ChClient;
-const WalProcessor = @import("wal_processor.zig").WalProcessor;
+const wal_processor = @import("wal_processor.zig");
 const types = @import("types.zig");
+
+const ready_str = "Service ready";
+const shutdown_str = "Shutdown signal caught. Exiting cleanly.";
 
 const Options = struct {
     ch_host: []const u8,
@@ -127,9 +130,11 @@ pub fn main(init: std.process.Init) !void {
     const user_env_key = if (builtin.os.tag == .windows) "USERNAME" else "USER";
     const os_user = init.environ_map.get(user_env_key);
 
-    const is_sync_test = init.environ_map.get("ERGO_TEST_SYNC");
+    // used for running test in child process
+    const is_test = init.environ_map.get("ERGO_TEST");
 
-    try Io.File.stdout().writeStreamingAll(io, "READY\n");
+    try Io.File.stdout().writeStreamingAll(io, ready_str);
+    try Io.File.stdout().writeStreamingAll(io, "\n");
 
     var pg_client = try PgClient.init(io, allocator, .{
         .connect = .{  
@@ -157,19 +162,20 @@ pub fn main(init: std.process.Init) !void {
     try ch_client.connect();
     defer ch_client.disconnect();
 
-    var processor = WalProcessor(PgClient, ChClient){ 
+    var processor = wal_processor.WalProcessor(PgClient, ChClient){ 
         .pg_client = &pg_client, 
         .ch_client = &ch_client,
         .last_write_timestamp = std.Io.Clock.real.now(io),
         .allocator = allocator,
         .io = io,
-        .is_sync_test = is_sync_test != null
+        .is_test = is_test != null,
     };
     defer processor.deinit();
 
     try processor.startStreaming(&is_shutting_down);
 
-    try Io.File.stdout().writeStreamingAll(io, "Shutdown signal caught. Exiting cleanly.\n");
+    try Io.File.stdout().writeStreamingAll(io, shutdown_str);
+    try Io.File.stdout().writeStreamingAll(io, "\n");
 
     std.process.exit(0);
 }
@@ -225,7 +231,7 @@ fn createTestDb(allocator: mem.Allocator, io: Io, db_name: []const u8) !void {
 fn setupChildProcess(allocator: mem.Allocator, io: Io, db_name: []const u8) !std.process.Child {
     var env = try std.process.Environ.createMap(std.testing.environ, allocator);
     defer env.deinit();
-    try env.put("ERGO_TEST_SYNC", "1");
+    try env.put("ERGO_TEST", "1");
 
     const argv = &[_][]const u8{
         "./zig-out/bin/ergo",
@@ -244,7 +250,7 @@ fn setupChildProcess(allocator: mem.Allocator, io: Io, db_name: []const u8) !std
 
     while (true) {
         if (try r.takeDelimiter('\n')) |line| {
-            if (std.mem.indexOf(u8, line, "READY") != null) {
+            if (std.mem.indexOf(u8, line, ready_str) != null) {
                 break;
             }
         } else {
@@ -345,7 +351,7 @@ test "main ensure full transaction sync on interupt" {
         if (try r.takeDelimiter('\n')) |line| {
             try stdout_acc.appendSlice(allocator, line);
 
-            if (std.mem.indexOf(u8, stdout_acc.items, "SYNC_MARKER_REACHED") != null) {
+            if (std.mem.indexOf(u8, stdout_acc.items, wal_processor.sync_marker_str) != null) {
                 break;
             }
         } else {
@@ -419,9 +425,116 @@ test "main ensure full transaction sync on interupt" {
 }
 
 
-// test "making sure full commits are logged without interupt" {
-// }
-//
+test "making sure full commits are logged without interupt" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    var child_has_error = std.atomic.Value(bool).init(false);
+
+    const db_name = try std.fmt.allocPrint(allocator, "test_db_{d}", .{std.Io.Clock.real.now(io).toNanoseconds()});
+    defer allocator.free(db_name);
+
+    var pg_env = try std.process.Environ.createMap(std.testing.environ, allocator);
+    defer pg_env.deinit();
+    try pg_env.put("PGPASSWORD", "12345678");
+
+    try createTestDb(allocator, io, db_name);
+    var child = try setupChildProcess(allocator, io, db_name);
+    errdefer {
+        if (child.id) |pid| {
+            std.posix.kill(pid, std.posix.SIG.TERM) catch {};
+        }
+    }
+
+    const stderr_thread = try std.Thread.spawn(.{}, monitorStderr, .{
+        child.stderr.?.handle,
+        child.id.?,
+        &child_has_error
+    });
+    stderr_thread.detach();
+
+    var pg_argv = [_][]const u8{
+        "psql",
+        "-h", "127.0.0.1",
+        "-p", "5432",
+        "-U", "db_rw",
+        "-d", "db",
+        "-a",
+        "-f", "./test_fixtures/standard_query.sql"
+    };
+    const pg_result = try std.process.run(allocator, io, .{ 
+        .argv = &pg_argv,
+        .environ_map = &pg_env, 
+    });
+    defer {
+        allocator.free(pg_result.stdout);
+        allocator.free(pg_result.stderr);
+    }
+
+    if (pg_result.term != .exited or pg_result.term.exited != 0 or pg_result.stderr.len > 0) {
+        std.debug.print("Error: PSQL failed: {s}\n", .{pg_result.stderr});
+        return error.PsqlExecutionFailed;
+    }
+
+    var buffer: [1024]u8 = undefined;
+    var reader = child.stdout.?.reader(io, &buffer);
+    const r = &reader.interface;
+
+    var stdout_acc = std.ArrayList(u8).empty;
+    defer stdout_acc.deinit(allocator);
+
+    while (true) {
+        if (try r.takeDelimiter('\n')) |line| {
+            try stdout_acc.appendSlice(allocator, line);
+
+            if (std.mem.indexOf(u8, stdout_acc.items, wal_processor.submit_marker_str) != null) {
+                break;
+            }
+        } else {
+            if (child_has_error.load(.seq_cst)) {
+                return error.ChildProcessError;
+            }
+            return error.ChilsExitedPrematurelyError;
+        }
+    }
+
+    var ch_assert_argv = [_][]const u8{ 
+        "clickhouse-client", 
+        "--host", "127.0.0.1",
+        "--port", "9000",
+        "--user", "default",
+        "--password", "clickhouse",
+        "--database", db_name,
+        "--query", "SELECT action, table_name, primary_key, changed_columns, old_values, new_values, user_id, ip_address FROM entries ORDER BY primary_key, action DESC" 
+    };
+    const ch_assert_result = try std.process.run(allocator, io, .{ 
+        .argv = &ch_assert_argv,
+    });
+    defer {
+        allocator.free(ch_assert_result.stdout);
+        allocator.free(ch_assert_result.stderr);
+    }
+
+    if (ch_assert_result.term != .exited or ch_assert_result.term.exited != 0 or ch_assert_result.stderr.len > 0) {
+        std.debug.print("Error: unable to select ch data: {s}\n", .{ch_assert_result.stderr});
+        return error.ChSelectError;
+    }
+
+    try testing.expectEqualStrings(
+        "DELETE\tpublic.addresses\t1\t['address_line_1','city','id','country','postal_code']\t{'address_line_1':'Googleplex','city':'Mountain View','id':'1','country':'US','postal_code':'94043'}\t{}\t42\t192.168.1.50\n" ++
+        "UPDATE\tpublic.addresses\t1\t['address_line_1','city','postal_code']\t{'address_line_1':'1 Apple Park Way','city':'Cupertino','postal_code':'95014'}\t{'address_line_1':'Googleplex','city':'Mountain View','postal_code':'94043'}\t42\t192.168.1.50\n" ++
+        "INSERT\tpublic.addresses\t1\t['address_line_1','city','id','country','postal_code']\t{}\t{'address_line_1':'1 Apple Park Way','city':'Cupertino','id':'1','country':'US','postal_code':'95014'}\t42\t192.168.1.50\n" ++
+        "DELETE\tpublic.addresses\t2\t['address_line_1','city','id','country','postal_code']\t{'address_line_1':'1 Apple Park Way','city':'Cupertino','id':'2','country':'US','postal_code':'95014'}\t{}\t42\t192.168.1.50\n" ++
+        "UPDATE\tpublic.addresses\t2\t['address_line_1','city','postal_code']\t{'address_line_1':'Googleplex','city':'Mountain View','postal_code':'94043'}\t{'address_line_1':'1 Apple Park Way','city':'Cupertino','postal_code':'95014'}\t42\t192.168.1.50\n" ++
+        "INSERT\tpublic.addresses\t2\t['address_line_1','city','id','country','postal_code']\t{}\t{'address_line_1':'Googleplex','city':'Mountain View','id':'2','country':'US','postal_code':'94043'}\t42\t192.168.1.50\n",
+        ch_assert_result.stdout,
+    );
+
+    const term = try terminateChildProcess(io, &child);
+
+    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, term);
+}
+
 // test "correct shutdown" {
 // }
 //
