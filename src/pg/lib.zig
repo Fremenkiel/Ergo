@@ -15,7 +15,6 @@ pub const Stmt = @import("stmt.zig").Stmt;
 pub const Pool = @import("pool.zig").Pool;
 pub const Stream = @import("stream.zig").Stream;
 pub const sendTerminate = @import("stream.zig").sendTerminate;
-pub const StreamController = @import("stream_controller.zig").StreamController;
 pub const metrics = @import("metrics.zig");
 pub const has_openssl = build_config.openssl;
 pub const SSLCtx = if (has_openssl) openssl.SSL_CTX else void;
@@ -29,7 +28,6 @@ pub const Iterator = result.Iterator;
 pub const IteratorUnsafe = result.IteratorUnsafe;
 pub const QueryRow = result.QueryRow;
 pub const QueryRowUnsafe = result.QueryRowUnsafe;
-pub const Mapper = result.Mapper;
 
 const reader = @import("reader.zig");
 pub const Reader = reader.Reader;

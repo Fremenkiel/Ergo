@@ -8,7 +8,6 @@ const Reader = lib.Reader;
 const NotificationResponse = lib.proto.NotificationResponse;
 
 const Stream = lib.Stream;
-const StreamController = lib.StreamController;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -41,13 +40,10 @@ pub const Listener = struct {
         var stream = try Stream.connect(io, allocator, opts, null);
         errdefer stream.close();
 
-        var controller = try StreamController.init(io, stream);
-        errdefer controller.deinit();
-
         const buf = try Buffer.init(allocator, opts.write_buffer orelse 2048);
         errdefer buf.deinit();
 
-        const reader = try Reader.init(allocator, opts.read_buffer orelse 4096, controller);
+        const reader = try Reader.init(allocator, opts.read_buffer orelse 4096, stream);
         errdefer reader.deinit();
 
         return .{
@@ -218,19 +214,6 @@ test "Listener" {
     var l = try Listener.open(t.io, t.allocator, .{ .host = "127.0.0.1" });
     defer l.deinit();
     try l.auth(t.authOpts(.{}));
-    try testListener(&l);
-}
-
-test "Listener: from Pool" {
-    var pool = try lib.Pool.init(t.io, t.allocator, .{
-        .size = 1,
-        .auth = t.authOpts(.{}),
-    });
-    defer pool.deinit();
-
-    var l = try pool.newListener();
-    defer l.deinit();
-
     try testListener(&l);
 }
 

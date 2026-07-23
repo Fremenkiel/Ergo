@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const lib = @import("lib.zig");
+const Buffer = @import("buffer").Buffer;
 
 const openssl = lib.openssl;
 
@@ -9,6 +10,7 @@ const posix = std.posix;
 const Conn = lib.Conn;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const Reader = lib.Reader;
 
 const DEFAULT_HOST = "127.0.0.1";
 
@@ -18,6 +20,7 @@ const TLSStream = struct {
     valid: bool,
     ssl: ?*openssl.SSL,
     stream: Io.net.Stream,
+    cancel_pipe: [2]posix.fd_t,
     io: Io,
 
     pub fn connect(io: Io, allocator: Allocator, opts: Conn.Opts, ctx_: ?*openssl.SSL_CTX) !Stream {
@@ -88,6 +91,7 @@ const TLSStream = struct {
             .ssl = ssl,
             .valid = true,
             .stream = stream,
+            .cancel_pipe = try Io.Threaded.pipe2(.{ .CLOEXEC = true }),
             .io = io,
         };
     }
@@ -101,6 +105,16 @@ const TLSStream = struct {
             openssl.SSL_free(ssl);
         }
         self.stream.close(self.io);
+    }
+
+    pub fn cancel(self: *@This()) !void {
+        var buf: [1]u8 = undefined;
+        const write_file = std.Io.File{ .handle = self.cancel_pipe[0] };
+
+        var writer = write_file.writer(self.io, &buf);
+        var w = &writer.interface;
+
+        try w.writeAll(&[_]u8{1});
     }
 
     pub fn shutdown(self: *const Stream, how: ShutdownHow) !void {
@@ -132,11 +146,38 @@ const TLSStream = struct {
 
         return readStream(self.stream, self.io, buf);
     }
+
+    pub fn readWithTimeout(self: *@This(), buffer: []u8, timeout_ms: i32) !usize {
+        var fds = [_]std.posix.pollfd{
+            .{ .fd = self.stream.socket.handle, .events = std.posix.POLL.IN, .revents = 0 },
+            .{ .fd = self.cancel_pipe[0], .events = std.posix.POLL.IN, .revents = 0 },
+        };
+
+        const ready_count = try posix.poll(&fds, timeout_ms);
+
+        if (ready_count == 0) {
+            return error.Timeout;
+        }
+
+        if ((fds[1].revents & posix.POLL.IN) != 0) {
+            var dummy: [1]u8 = undefined;
+            _ = try posix.read(self.cancel_pipe[0], &dummy);
+
+            return error.Cancelled;
+        }
+
+        if ((fds[0].revents & posix.POLL.IN) != 0) {
+            return try posix.read(self.stream.socket.handle, buffer);
+        }
+
+        return error.UnexpectedPollEvent;
+    }
 };
 
 const PlainStream = struct {
     io: Io,
     stream: Io.net.Stream,
+    cancel_pipe: [2]posix.fd_t,
 
     pub fn connect(io: Io, _: Allocator, opts: Conn.Opts, _: anytype) !PlainStream {
         const host = opts.host orelse DEFAULT_HOST;
@@ -163,11 +204,22 @@ const PlainStream = struct {
         return .{
             .io = io,
             .stream = stream,
+            .cancel_pipe = try Io.Threaded.pipe2(.{ .CLOEXEC = true }),
         };
     }
 
     pub fn close(self: *const PlainStream) void {
         self.stream.close(self.io);
+    }
+
+    pub fn cancel(self: *@This()) !void {
+        var buf: [1]u8 = undefined;
+        const write_file = std.Io.File{ .handle = self.cancel_pipe[0] };
+
+        var writer = write_file.writer(self.io, &buf);
+        var w = &writer.interface;
+
+        try w.writeAll(&[_]u8{1});
     }
 
     pub fn shutdown(self: *const PlainStream, how: ShutdownHow) !void {
@@ -181,6 +233,32 @@ const PlainStream = struct {
 
     pub fn read(self: *const PlainStream, buf: []u8) !usize {
         return readStream(self.stream, self.io, buf);
+    }
+
+    pub fn readWithTimeout(self: *@This(), buffer: []u8, timeout_ms: i32) !usize {
+        var fds = [_]std.posix.pollfd{
+            .{ .fd = self.stream.socket.handle, .events = std.posix.POLL.IN, .revents = 0 },
+            .{ .fd = self.cancel_pipe[0], .events = std.posix.POLL.IN, .revents = 0 },
+        };
+
+        const ready_count = try posix.poll(&fds, timeout_ms);
+
+        if (ready_count == 0) {
+            return error.Timeout;
+        }
+
+        if ((fds[1].revents & posix.POLL.IN) != 0) {
+            var dummy: [1]u8 = undefined;
+            _ = try posix.read(self.cancel_pipe[0], &dummy);
+
+            return error.Cancelled;
+        }
+
+        if ((fds[0].revents & posix.POLL.IN) != 0) {
+            return try posix.read(self.stream.socket.handle, buffer);
+        }
+
+        return error.UnexpectedPollEvent;
     }
 };
 
@@ -356,3 +434,19 @@ fn isHostName(host: []const u8) bool {
 }
 
 const windows = @import("windows.zig");
+//
+// test "cancel stream while read" {
+//     const allocator = std.testing.allocator;
+//     const io = std.testing.io;
+//
+//     var stream = try Stream.connect(io, allocator, .{ .port = 5432, .host = "localhost" }, null);
+//     errdefer stream.close();
+//
+//     const buf = try Buffer.init(allocator, 2048);
+//     errdefer buf.deinit();
+//
+//     var reader = try Reader.init(allocator, 4096, stream);
+//     errdefer reader.deinit();
+//
+//     std.testing.expectError(error.Cancelled, try reader.readWithTimeout(250));
+// }

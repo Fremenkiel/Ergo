@@ -1,11 +1,11 @@
 const std = @import("std");
 const lib = @import("lib.zig");
 
+const mem = std.mem;
+
 const types = lib.types;
 const proto = lib.proto;
 const Conn = lib.Conn;
-const Allocator = std.mem.Allocator;
-const ArenaAllocator = std.heap.ArenaAllocator;
 
 pub const Result = struct {
     number_of_columns: usize,
@@ -13,44 +13,38 @@ pub const Result = struct {
     // will be empty unless the query was executed with the column_names = true option
     column_names: [][]const u8,
 
-    _conn: *Conn,
-    _arena: *ArenaAllocator,
+    conn: *Conn,
 
     // a sliced version of _state.oids (so we don't have to keep reslicing it to
     // number_of_columns on each row)
-    _oids: []i32,
+    oids: []i32,
 
     // a sliced version of _state.values (so we don't have to keep reslicing it to
     // number_of_columns on each row)
-    _values: []State.Value,
+    values: []State.Value,
 
     // When true, result.deinit() will call conn.release()
     // Used when the result came directly from the pool.query() helper.
-    _release_conn: bool,
+    release_conn: bool,
 
     pub fn deinit(self: *const Result) void {
         // value.data references the buffer of the reader, this buffer is potentially
         // reused and potentially discarded. There are at least a few very good
         // reasons why the least we can do is blank it out.
-        for (self._values) |*value| {
+        for (self.values) |*value| {
             value.data = &[_]u8{};
         }
 
-        self._conn._reader.endFlow() catch {
+        self.conn.reader.endFlow() catch {
             // this can only fail in extreme conditions (OOM) and it will only impact
             // the next query (and if the app is using the pool, the pool will try to
             // recover from this anyways)
-            self._conn._state = .fail;
+            self.conn.state = .fail;
         };
 
-        if (self._release_conn) {
-            self._conn.release();
+        if (self.release_conn) {
+            self.conn.release();
         }
-
-        const arena = self._arena;
-        const allocator = arena.child_allocator;
-        arena.deinit();
-        allocator.destroy(arena);
     }
 
     // Caller should typically call next() until null is returned.
@@ -59,7 +53,7 @@ pub const Result = struct {
     // I don't want to do this implictly in deinit because it can fail
     // and returning an error union in deinit is a pain for the caller.
     pub fn drain(self: *Result) !void {
-        var conn = self._conn;
+        var conn = self.conn;
         // Only an in-flight query has anything to drain; reading in any other
         // state (e.g. a poisoned connection) would block.
         if (conn._state != .query) {
@@ -85,13 +79,13 @@ pub const Result = struct {
     }
 
     fn _next(self: *Result, comptime fail_mode: lib.FailMode) !(if (fail_mode == .safe) ?Row else ?RowUnsafe) {
-        if (self._conn._state != .query) {
+        if (self.conn.state != .query) {
             // Possibly weird state. Most likely cause is calling next() multiple times
             // despite null being returned.
             return null;
         }
 
-        const msg = try self._conn.read();
+        const msg = try self.conn.read();
         switch (msg.type) {
             'D' => {
                 const data = msg.data;
@@ -103,7 +97,7 @@ pub const Result = struct {
 
                 // first column starts at position 2
                 var offset: usize = 2;
-                const values = self._values;
+                const values = self.values;
                 for (values) |*value| {
                     const data_start = offset + 4;
                     const length = std.mem.readInt(i32, data[offset..data_start][0..4], .big);
@@ -121,12 +115,12 @@ pub const Result = struct {
 
                 return .{
                     .values = values,
-                    .oids = self._oids,
+                    .oids = self.oids,
                     ._result = self,
                 };
             },
             'C' => {
-                try self._conn.readyForQuery();
+                try self.conn.readyForQuery();
                 return null;
             },
             else => return error.UnexpectedDBMessage,
@@ -140,35 +134,6 @@ pub const Result = struct {
             }
         }
         return null;
-    }
-
-    const MapperOpts = struct {
-        dupe: bool = false,
-        allocator: ?Allocator = null,
-    };
-
-    pub fn mapper(self: *Result, comptime T: type, opts: MapperOpts) Mapper(T) {
-        var column_indexes: [std.meta.fields(T).len]?usize = undefined;
-
-        inline for (std.meta.fields(T), 0..) |field, i| {
-            column_indexes[i] = self.columnIndex(field.name);
-        }
-
-        // if we're given an allocator, use that.
-        // if we're not given an allocator, but asked to dupe use our arena and thus
-        // tie the lifetime of the returned T to the lifetime of the DB result object.
-        var allocator: ?Allocator = null;
-        if (opts.allocator) |a| {
-            allocator = a;
-        } else if (opts.dupe) {
-            allocator = self._arena.allocator();
-        }
-
-        return .{
-            .result = self,
-            .allocator = allocator,
-            .column_indexes = column_indexes,
-        };
     }
 
     // For every query, we need to store the type of each column (so we know
@@ -194,7 +159,7 @@ pub const Result = struct {
             data: []const u8,
         };
 
-        pub fn init(allocator: Allocator, size: usize) !State {
+        pub fn init(allocator: mem.Allocator, size: usize) !State {
             const names = try allocator.alloc([]const u8, size);
             errdefer allocator.free(names);
 
@@ -214,7 +179,7 @@ pub const Result = struct {
         // Populates the State from the RowDescription payload
         // We already read the number_of_columns from data, so we pass it in here
         // We also already know that number_of_columns fits within our arrays
-        pub fn from(self: *State, number_of_columns: u16, data: []const u8, allocator: ?Allocator) !void {
+        pub fn from(self: *State, number_of_columns: u16, data: []const u8, allocator: ?mem.Allocator) !void {
             // skip the column count, which we already know as number_of_columns
             var pos: usize = 2;
 
@@ -243,7 +208,7 @@ pub const Result = struct {
             }
         }
 
-        pub fn deinit(self: State, allocator: Allocator) void {
+        pub fn deinit(self: State, allocator: mem.Allocator) void {
             allocator.free(self.names);
             allocator.free(self.values);
             allocator.free(self.oids);
@@ -303,114 +268,6 @@ pub fn RowT(comptime fail_mode: lib.FailMode) type {
             try lib.verifyColumnName(fail_mode, name, col != null);
             return self.get(T, col.?);
         }
-
-        pub fn iterator(self: *const Self, comptime T: type, col: usize) if (fail_mode == .safe) lib.TypeError!Iterator(T) else IteratorUnsafe(T) {
-            const value = self.values[col];
-            if (value.is_null) {
-                return IteratorT(fail_mode, T).asNull();
-            }
-            return IteratorT(fail_mode, T).fromPgzRow(value, self.oids[col]) catch |err| {
-                if (comptime fail_mode == .safe) {
-                    return err;
-                }
-                @panic("Could not get iterator of type " ++ @typeName(T) ++ " for row.");
-            };
-        }
-
-        pub fn iteratorCol(self: *const Self, comptime T: type, name: []const u8) if (fail_mode == .safe) lib.TypeError!Iterator(T) else IteratorUnsafe(T) {
-            const col = self._result.columnIndex(name);
-            try lib.verifyColumnName(fail_mode, name, col != null);
-            return self.iterator(T, col.?);
-        }
-
-        pub fn record(self: *const Self, col: usize) RecordT(fail_mode) {
-            const data = self.values[col].data;
-            const number_of_columns = std.mem.readInt(i32, data[0..4], .big);
-            return .{
-                .data = data[4..],
-                .number_of_columns = @intCast(number_of_columns),
-            };
-        }
-
-        pub fn recordCol(self: *const Self, name: []const u8) if (fail_mode == .safe) lib.TypeError!Record else RecordUnsafe {
-            const col = self._result.columnIndex(name);
-            try lib.verifyColumnName(fail_mode, name, col != null);
-            return self.record(col);
-        }
-
-        const ToOpts = struct {
-            dupe: bool = false,
-            map: Mapping = .ordinal,
-            allocator: ?Allocator = null,
-
-            const Mapping = enum {
-                name,
-                ordinal,
-            };
-        };
-
-        pub fn to(self: *const Self, T: type, opts: ToOpts) !T {
-            // if we're given an allocator, use that.
-            // if we're not given an allocator, but asked to dupe use our arena and thus
-            // tie the lifetime of the returned T to the lifetime of the DB result object.
-            var allocator: ?Allocator = null;
-            if (opts.allocator) |a| {
-                allocator = a;
-            } else if (opts.dupe) {
-                allocator = self._result._arena.allocator();
-            }
-
-            return switch (opts.map) {
-                .ordinal => self.toUsingOrdinal(T, allocator),
-                .name => return self.toUsingName(T, allocator),
-            };
-        }
-
-        fn toUsingOrdinal(self: *const Self, T: type, allocator: ?Allocator) !T {
-            var value: T = undefined;
-            inline for (std.meta.fields(T), 0..) |field, column_index| {
-                @field(value, field.name) = try self.mapColumn(&field, column_index, allocator);
-            }
-            return value;
-        }
-
-        fn toUsingName(self: *const Self, T: type, allocator: ?Allocator) !T {
-            var value: T = undefined;
-            const result = self._result;
-            inline for (std.meta.fields(T)) |field| {
-                const name = field.name;
-                @field(value, name) = try self.mapColumn(&field, result.columnIndex(name), allocator);
-            }
-            return value;
-        }
-
-        fn mapColumn(self: *const Self, comptime field: *const std.builtin.Type.StructField, optional_column_index: ?usize, allocator: ?Allocator) !field.type {
-            const T = field.type;
-            const column_index = optional_column_index orelse {
-                if (field.default_value_ptr) |dflt| {
-                    return @as(*align(1) const field.type, @ptrCast(dflt)).*;
-                }
-                return error.FieldColumnMismatch;
-            };
-
-            if (comptime isSlice(T)) |S| {
-                const slice = blk: {
-                    if (@typeInfo(T) == .optional) {
-                        const it = self.get(?Iterator(S), column_index);
-                        const val = if (comptime fail_mode == .safe) try it else it;
-                        break :blk val orelse return null;
-                    } else {
-                        const it = self.get(Iterator(S), column_index);
-                        break :blk if (comptime fail_mode == .safe) try it else it;
-                    }
-                };
-                return try slice.alloc(allocator orelse return error.AllocatorRequiredForSliceMapping);
-            }
-
-            const value = self.get(field.type, column_index);
-            const a = allocator orelse return value;
-            return mapValue(T, if (comptime fail_mode == .safe) try value else value, a);
-        }
     };
 }
 
@@ -427,7 +284,7 @@ fn isSlice(comptime T: type) ?type {
     }
 }
 
-fn mapValue(comptime T: type, value: T, allocator: Allocator) !T {
+fn mapValue(comptime T: type, value: T, allocator: mem.Allocator) !T {
     switch (@typeInfo(T)) {
         .optional => |opt| {
             if (value) |v| {
@@ -449,28 +306,6 @@ fn mapValue(comptime T: type, value: T, allocator: Allocator) !T {
     return value;
 }
 
-pub fn Mapper(comptime T: type) type {
-    return struct {
-        result: *Result,
-        allocator: ?Allocator,
-        column_indexes: [std.meta.fields(T).len]?usize,
-
-        const Self = @This();
-
-        pub fn next(self: *const Self) !?T {
-            const row = (try self.result.next()) orelse return null;
-
-            var value: T = undefined;
-
-            const allocator = self.allocator;
-            inline for (std.meta.fields(T), self.column_indexes) |field, optional_column_index| {
-                @field(value, field.name) = try row.mapColumn(&field, optional_column_index, allocator);
-            }
-            return value;
-        }
-    };
-}
-
 pub const QueryRow = QueryRowT(.safe);
 pub const QueryRowUnsafe = QueryRowT(.unsafe);
 
@@ -483,29 +318,6 @@ pub fn QueryRowT(comptime fail_mode: lib.FailMode) type {
 
         pub fn get(self: *const Self, comptime T: type, col: usize) if (fail_mode == .safe) lib.TypeError!T else T {
             return self.row.get(T, col);
-        }
-
-        pub fn getCol(self: *const Self, comptime T: type, name: []const u8) if (fail_mode == .safe) lib.TypeError!T else T {
-            return self.row.getCol(T, name);
-        }
-
-        pub fn iterator(self: *const Self, comptime T: type, col: usize) if (fail_mode == .safe) lib.TypeError!Iterator(T) else IteratorUnsafe(T) {
-            return self.row.iterator(T, col);
-        }
-
-        pub fn iteratorCol(self: *const Self, comptime T: type, name: []const u8) if (fail_mode == .safe) lib.TypeError!Iterator(T) else IteratorUnsafe(T) {
-            return self.row.iteratorCol(T, name);
-        }
-
-        pub fn record(self: *const Self, col: usize) RecordT(fail_mode) {
-            return self.row.record(col);
-        }
-
-        pub fn recordCol(self: *const Self, name: []const u8) if (fail_mode == .safe) lib.TypeError!Record else RecordUnsafe {
-            return self.row.recordCol(name);
-        }
-        pub fn to(self: *const Self, T: type, opts: Row.ToOpts) !T {
-            return self.row.to(T, opts);
         }
 
         pub fn deinit(self: *Self) !void {
@@ -678,7 +490,7 @@ pub fn IteratorT(comptime fail_mode: lib.FailMode, comptime T: type) type {
             };
         }
 
-        pub fn pgzMoveOwner(self: Self, allocator: Allocator) !Self {
+        pub fn pgzMoveOwner(self: Self, allocator: mem.Allocator) !Self {
             return .{
                 .is_null = false,
                 ._len = self._len,
@@ -690,7 +502,7 @@ pub fn IteratorT(comptime fail_mode: lib.FailMode, comptime T: type) type {
 
         // Should only be called if the Iterator was created with row.to(...)
         // or a result mapper AND an explicit allocator was given
-        pub fn deinit(self: *const Self, allocator: Allocator) void {
+        pub fn deinit(self: *const Self, allocator: mem.Allocator) void {
             allocator.free(self._data);
         }
 
@@ -712,7 +524,7 @@ pub fn IteratorT(comptime fail_mode: lib.FailMode, comptime T: type) type {
             return self._decoder(data[len_end..data_end]);
         }
 
-        pub fn alloc(self: *const Self, allocator: Allocator) ![]T {
+        pub fn alloc(self: *const Self, allocator: mem.Allocator) ![]T {
             const into = try allocator.alloc(T, self._len);
             try self.fillAlloc(true, into, allocator);
             return into;
@@ -722,7 +534,7 @@ pub fn IteratorT(comptime fail_mode: lib.FailMode, comptime T: type) type {
             self.fillAlloc(false, into, undefined) catch unreachable;
         }
 
-        fn fillAlloc(self: *const Self, comptime should_dupe: bool, into: []T, allocator: Allocator) !void {
+        fn fillAlloc(self: *const Self, comptime should_dupe: bool, into: []T, allocator: mem.Allocator) !void {
             const data = self._data;
             const decoder = self._decoder;
 
@@ -1263,40 +1075,6 @@ test "Result: text[] & bytea[]" {
     try t.expectEqual(2, v2.len);
 }
 
-test "Result: text[] alloc dupes" {
-    var c = try t.connect(.{});
-    defer c.deinit();
-
-    var arr1: [][]const u8 = undefined;
-    var arr2: [][]const u8 = undefined;
-    defer {
-        for (arr1) |str| {
-            t.allocator.free(str);
-        }
-        t.allocator.free(arr1);
-
-        for (arr2) |str| {
-            t.allocator.free(str);
-        }
-        t.allocator.free(arr2);
-    }
-
-    {
-        var row = (try c.rowUnsafe("select array['Leto', 'Test']::text[]", .{})) orelse unreachable;
-        defer row.deinit() catch {};
-        arr1 = try row.iterator([]const u8, 0).alloc(t.allocator);
-    }
-
-    {
-        var row = (try c.rowUnsafe("select array['Ghanima', 'Goku']::text[]", .{})) orelse unreachable;
-        defer row.deinit() catch {};
-        arr2 = try row.iterator([]const u8, 0).alloc(t.allocator);
-    }
-
-    try t.expectStringSlice(&.{ "Leto", "Test" }, arr1);
-    try t.expectStringSlice(&.{ "Ghanima", "Goku" }, arr2);
-}
-
 test "Result: UUID" {
     var c = try t.connect(.{});
     defer c.deinit();
@@ -1320,17 +1098,6 @@ test "Result: lsn" {
     try t.expectEqual(32788447689, row.get(i64, 0));
 }
 
-test "Row: column names" {
-    var c = try t.connect(.{});
-    defer c.deinit();
-    const sql = "select 923 as id, 'Leto' as name";
-    var row = (try c.rowUnsafeOpts(sql, .{}, .{ .column_names = true })).?;
-    defer row.deinit() catch {};
-
-    try t.expectEqual(923, row.getCol(i32, "id"));
-    try t.expectString("Leto", row.getCol([]u8, "name"));
-}
-
 test "Result: mutable []u8" {
     var c = try t.connect(.{});
     defer c.deinit();
@@ -1341,453 +1108,6 @@ test "Result: mutable []u8" {
     var name = row.get([]u8, 0);
     name[3] = '!';
     try t.expectString("Let!", name);
-}
-
-test "Result: mutable [][]u8" {
-    var c = try t.connect(.{});
-    defer c.deinit();
-    const sql = "select array['Leto', 'Test']::text[]";
-    var row = (try c.rowUnsafe(sql, .{})).?;
-    defer row.deinit() catch {};
-
-    var values = try row.iterator([]u8, 0).alloc(t.allocator);
-    defer {
-        t.allocator.free(values[0]);
-        t.allocator.free(values[1]);
-        t.allocator.free(values);
-    }
-    values[0][0] = 'n';
-    try t.expectString("neto", values[0]);
-    try t.expectString("Test", values[1]);
-}
-
-test "Row.to: ordinal" {
-    const User = struct {
-        id: i32,
-        active: bool,
-        name: []const u8,
-        note: ?[]const u8,
-        choice: Choice,
-
-        const Choice = enum {
-            blue,
-            green,
-            red,
-        };
-    };
-
-    var c = try t.connect(.{});
-    defer c.deinit();
-
-    {
-        // null, no dupe
-        var row = (try c.rowUnsafe("select 1::integer, true, 'teg', null::text, 'blue'", .{})).?;
-        defer row.deinit() catch {};
-
-        const user = try row.to(User, .{});
-        try t.expectEqual(1, user.id);
-        try t.expectEqual(true, user.active);
-        try t.expectString("teg", user.name);
-        try t.expectEqual(null, user.note);
-        try t.expectEqual(.blue, user.choice);
-    }
-
-    {
-        // not null, no dupe
-        var row = (try c.rowUnsafe("select 2::integer, false, 'ghanima', 'n1', 'red'", .{})).?;
-        defer row.deinit() catch {};
-
-        const user = try row.to(User, .{});
-        try t.expectEqual(2, user.id);
-        try t.expectEqual(false, user.active);
-        try t.expectString("ghanima", user.name);
-        try t.expectString("n1", user.note.?);
-        try t.expectEqual(.red, user.choice);
-    }
-
-    {
-        // null, dupe with internal arena
-        var row = (try c.rowUnsafe("select 1::integer, true, 'teg', null::text, 'red'", .{})).?;
-        defer row.deinit() catch {};
-
-        const user = try row.to(User, .{ .dupe = true });
-        try t.expectEqual(1, user.id);
-        try t.expectEqual(true, user.active);
-        try t.expectString("teg", user.name);
-        try t.expectEqual(null, user.note);
-        try t.expectEqual(.red, user.choice);
-    }
-
-    {
-        // not null, dupe with internal arena
-        var row = (try c.rowUnsafe("select 2::integer, false, 'ghanima', 'n1', 'red'", .{})).?;
-        const user = try row.to(User, .{ .dupe = true });
-        defer row.deinit() catch {};
-
-        try t.expectEqual(2, user.id);
-        try t.expectEqual(false, user.active);
-        try t.expectString("ghanima", user.name);
-        try t.expectString("n1", user.note.?);
-        try t.expectEqual(.red, user.choice);
-    }
-
-    {
-        // null, dupe with explicit allocator
-        var row = (try c.rowUnsafe("select 1::integer, true, 'teg', null::text, 'red'", .{})).?;
-        const user = try row.to(User, .{ .allocator = t.allocator });
-        row.deinit() catch {};
-
-        defer t.allocator.free(user.name);
-        try t.expectEqual(1, user.id);
-        try t.expectEqual(true, user.active);
-        try t.expectString("teg", user.name);
-        try t.expectEqual(null, user.note);
-        try t.expectEqual(.red, user.choice);
-    }
-
-    {
-        // not null, dupe with explicit allocator
-        var row = (try c.rowUnsafe("select 2::integer, false, 'ghanima', 'n1', 'red'", .{})).?;
-
-        const user = try row.to(User, .{ .allocator = t.allocator });
-        row.deinit() catch {};
-
-        defer t.allocator.free(user.name);
-        defer t.allocator.free(user.note.?);
-
-        try t.expectEqual(2, user.id);
-        try t.expectEqual(false, user.active);
-        try t.expectString("ghanima", user.name);
-        try t.expectString("n1", user.note.?);
-        try t.expectEqual(.red, user.choice);
-    }
-}
-
-test "Row.to: name no map" {
-    const User = struct {
-        id: i32 = 9876,
-        active: bool,
-        name: []const u8,
-        note: ?[]const u8 = null,
-    };
-
-    var c = try t.connect(.{});
-    defer c.deinit();
-
-    {
-        // null, no dupe
-        var row = (try c.rowUnsafeOpts("select 1 as id, true as active, 'teg' as name, null as note", .{}, .{ .column_names = true })).?;
-        defer row.deinit() catch {};
-
-        const user = try row.to(User, .{ .map = .name });
-        try t.expectEqual(1, user.id);
-        try t.expectEqual(true, user.active);
-        try t.expectString("teg", user.name);
-        try t.expectEqual(null, user.note);
-    }
-
-    {
-        // default values are used if no colum
-        // and extra columns are ignored
-        var row = (try c.rowUnsafeOpts("select 2 as id, false as active, 'ghanima' as name, 'x123' as other", .{}, .{ .column_names = true })).?;
-        defer row.deinit() catch {};
-
-        const user = try row.to(User, .{ .map = .name });
-        try t.expectEqual(2, user.id);
-        try t.expectEqual(false, user.active);
-        try t.expectString("ghanima", user.name);
-        try t.expectEqual(null, user.note);
-    }
-
-    {
-        // nullable fields are nulled if no column
-        // and extra columns are ignored
-        var row = (try c.rowUnsafeOpts("select false as active, 'ghanima' as name, 'x123' as other", .{}, .{ .column_names = true })).?;
-        defer row.deinit() catch {};
-
-        const user = try row.to(User, .{ .map = .name });
-        try t.expectEqual(9876, user.id);
-        try t.expectEqual(false, user.active);
-        try t.expectString("ghanima", user.name);
-        try t.expectEqual(null, user.note);
-    }
-
-    {
-        // error on missing column with non-default value
-        var row = (try c.rowUnsafeOpts("select 1 as id", .{}, .{ .column_names = true })).?;
-        defer row.deinit() catch {};
-
-        try t.expectError(error.FieldColumnMismatch, row.to(User, .{ .map = .name }));
-    }
-
-    {
-        // not null, no dupe
-        var row = (try c.rowUnsafeOpts("select 2::integer as id, false as active, 'ghanima' as name, 'n1' as note", .{}, .{ .column_names = true })).?;
-        defer row.deinit() catch {};
-
-        const user = try row.to(User, .{ .map = .name });
-        try t.expectEqual(2, user.id);
-        try t.expectEqual(false, user.active);
-        try t.expectString("ghanima", user.name);
-        try t.expectString("n1", user.note.?);
-    }
-
-    {
-        // null, dupe with internal arena
-        var row = (try c.rowUnsafeOpts("select 1::integer as id, true as active, 'teg' as name, null::text as note", .{}, .{ .column_names = true })).?;
-        defer row.deinit() catch {};
-
-        const user = try row.to(User, .{ .dupe = true, .map = .name });
-        try t.expectEqual(1, user.id);
-        try t.expectEqual(true, user.active);
-        try t.expectString("teg", user.name);
-        try t.expectEqual(null, user.note);
-    }
-
-    {
-        // not null, dupe with internal arena
-        var row = (try c.rowUnsafeOpts("select 2::integer as id, false as active, 'ghanima' as name, 'n1' as note", .{}, .{ .column_names = true })).?;
-        defer row.deinit() catch {};
-
-        const user = try row.to(User, .{ .dupe = true, .map = .name });
-        try t.expectEqual(2, user.id);
-        try t.expectEqual(false, user.active);
-        try t.expectString("ghanima", user.name);
-        try t.expectString("n1", user.note.?);
-    }
-
-    {
-        // null, dupe with explicit allocator
-        var row = (try c.rowUnsafeOpts("select 1::integer as id, true as active, 'teg' as name, null::text as note", .{}, .{ .column_names = true })).?;
-        defer row.deinit() catch {};
-
-        const user = try row.to(User, .{ .allocator = t.allocator, .map = .name });
-        defer t.allocator.free(user.name);
-        try t.expectEqual(1, user.id);
-        try t.expectEqual(true, user.active);
-        try t.expectString("teg", user.name);
-        try t.expectEqual(null, user.note);
-    }
-
-    {
-        // not null, dupe with explicit allocator
-        var row = (try c.rowUnsafeOpts("select 5::integer as id, false as active, 'ghanima' as name, 'n1' as note", .{}, .{ .column_names = true })).?;
-        defer row.deinit() catch {};
-
-        const user = try row.to(User, .{ .allocator = t.allocator, .map = .name });
-        defer t.allocator.free(user.name);
-        defer t.allocator.free(user.note.?);
-
-        try t.expectEqual(5, user.id);
-        try t.expectEqual(false, user.active);
-        try t.expectString("ghanima", user.name);
-        try t.expectString("n1", user.note.?);
-    }
-}
-
-test "Result.Mapper" {
-    var c = try t.connect(.{});
-    defer c.deinit();
-
-    {
-        // mapper with missing column and non-default field
-        var result = try c.queryOpts("select 1", .{}, .{ .column_names = true });
-        defer result.deinit();
-        const mapper = result.mapper(struct { id: i32 }, .{});
-        try t.expectError(error.FieldColumnMismatch, mapper.next());
-        try result.drain();
-    }
-
-    // null, no dupe
-    try expectResultMapper(&c, "select 1 as id, true as active, 'teg' as name, null as note", .{
-        .id = 1,
-        .active = true,
-        .name = "teg",
-        .note = null,
-    }, .{});
-
-    // default values are used if no colum
-    // and extra columns are ignored
-    try expectResultMapper(&c, "select 2 as id, false as active, 'ghanima' as name, 'x123' as other", .{
-        .id = 2,
-        .active = false,
-        .name = "ghanima",
-        .note = null,
-    }, .{});
-
-    // nullable fields are nulled if no column
-    // and extra columns are ignored
-    try expectResultMapper(&c, "select false as active, 'ghanima' as name, 'x123' as other", .{
-        .id = 9876,
-        .active = false,
-        .name = "ghanima",
-        .note = null,
-    }, .{});
-
-    // not null, no dupe
-    try expectResultMapper(&c, "select 2::integer as id, false as active, 'ghanima' as name, 'n1' as note", .{
-        .id = 2,
-        .active = false,
-        .name = "ghanima",
-        .note = "n1",
-    }, .{});
-
-    // null, dupe with internal arena
-    try expectResultMapper(&c, "select 1::integer as id, true as active, 'teg' as name, null::text as note", .{
-        .id = 1,
-        .active = true,
-        .name = "teg",
-        .note = null,
-    }, .{ .dupe = true });
-
-    // not null, dupe with internal arena
-    try expectResultMapper(&c, "select 3::integer as id, false as active, 'ghanima' as name, 'n1' as note", .{
-        .id = 3,
-        .active = false,
-        .name = "ghanima",
-        .note = "n1",
-    }, .{ .dupe = true });
-
-    // null, dupe with explicit allocator
-    try expectResultMapper(&c, "select 4::integer as id, true as active, 'teg' as name, null::text as note", .{
-        .id = 4,
-        .active = true,
-        .name = "teg",
-        .note = null,
-    }, .{ .allocator = t.allocator });
-
-    // not null, dupe with explicit allocator
-    try expectResultMapper(&c, "select 5::integer as id, false as active, 'ghanima' as name, 'n1' as note", .{
-        .id = 5,
-        .active = false,
-        .name = "ghanima",
-        .note = "n1",
-    }, .{ .allocator = t.allocator });
-}
-
-test "Row.to: iterator" {
-    const User = struct {
-        parents: Iterator(i32),
-        tags: ?Iterator([]const u8),
-    };
-
-    defer t.reset();
-    var c = try t.connect(.{});
-    defer c.deinit();
-
-    {
-        var row = (try c.rowUnsafe("select array[1, 99]::integer[], null", .{})).?;
-        defer row.deinit() catch {};
-
-        const user = try row.to(User, .{});
-        try t.expectSlice(i32, &.{ 1, 99 }, try user.parents.alloc(t.arena.allocator()));
-        try t.expectEqual(null, user.tags);
-    }
-
-    {
-        var row = (try c.rowUnsafe("select array[0]::integer[], array['over', '9000']::text[]", .{})).?;
-        const user = try row.to(User, .{ .allocator = t.allocator });
-        row.deinit() catch {};
-
-        defer user.parents.deinit(t.allocator);
-        defer user.tags.?.deinit(t.allocator);
-
-        try t.expectSlice(i32, &.{0}, try user.parents.alloc(t.arena.allocator()));
-        try t.expectStringSlice(&.{ "over", "9000" }, try user.tags.?.alloc(t.arena.allocator()));
-    }
-
-    {
-        // dupe with result arena
-        var result = try c.query(
-            \\ select array[0]::integer[], array['over']::text[]
-            \\ union all
-            \\ select array[1]::integer[], array['9000']::text[]
-        , .{});
-
-        const user1 = try (try result.nextUnsafe()).?.to(User, .{ .dupe = true });
-        const user2 = try (try result.nextUnsafe()).?.to(User, .{ .dupe = true });
-        try t.expectEqual(null, try result.nextUnsafe());
-        defer result.deinit();
-
-        try t.expectSlice(i32, &.{0}, try user1.parents.alloc(t.arena.allocator()));
-        try t.expectStringSlice(&.{"over"}, try user1.tags.?.alloc(t.arena.allocator()));
-
-        try t.expectSlice(i32, &.{1}, try user2.parents.alloc(t.arena.allocator()));
-        try t.expectStringSlice(&.{"9000"}, try user2.tags.?.alloc(t.arena.allocator()));
-    }
-
-    {
-        // dupe with explicit arena
-        var result = try c.query(
-            \\ select array[0]::integer[], array['over']::text[]
-            \\ union all
-            \\ select array[1]::integer[], array['9000']::text[]
-        , .{});
-
-        const user1 = try (try result.nextUnsafe()).?.to(User, .{ .allocator = t.allocator });
-        const user2 = try (try result.nextUnsafe()).?.to(User, .{ .allocator = t.allocator });
-        try t.expectEqual(null, try result.nextUnsafe());
-        result.deinit();
-
-        defer user1.tags.?.deinit(t.allocator);
-        defer user1.parents.deinit(t.allocator);
-        defer user2.tags.?.deinit(t.allocator);
-        defer user2.parents.deinit(t.allocator);
-
-        try t.expectSlice(i32, &.{0}, try user1.parents.alloc(t.arena.allocator()));
-        try t.expectStringSlice(&.{"over"}, try user1.tags.?.alloc(t.arena.allocator()));
-
-        try t.expectSlice(i32, &.{1}, try user2.parents.alloc(t.arena.allocator()));
-        try t.expectStringSlice(&.{"9000"}, try user2.tags.?.alloc(t.arena.allocator()));
-    }
-}
-
-test "Row.to: array" {
-    const User = struct {
-        parents: []i32,
-        tags: ?[][]const u8,
-        choices: ?[]Choice,
-
-        const Choice = enum {
-            red,
-            blue,
-            green,
-        };
-    };
-
-    defer t.reset();
-    var c = try t.connect(.{});
-    defer c.deinit();
-
-    {
-        var row = (try c.rowUnsafe("select array[1, 99]::integer[], array['over', '9000']::text[], array['red', 'green']::text[]", .{})).?;
-        const user = try row.to(User, .{ .allocator = t.allocator });
-        row.deinit() catch {};
-
-        defer {
-            t.allocator.free(user.tags.?[0]);
-            t.allocator.free(user.tags.?[1]);
-            t.allocator.free(user.tags.?);
-            t.allocator.free(user.parents);
-            t.allocator.free(user.choices.?);
-        }
-        try t.expectSlice(i32, &.{ 1, 99 }, user.parents);
-        try t.expectStringSlice(&.{ "over", "9000" }, user.tags.?);
-        try t.expectSlice(User.Choice, &.{ .red, .green }, user.choices.?);
-    }
-
-    {
-        var row = (try c.rowUnsafe("select array[1, 99]::integer[], null::text[], null::text[]", .{})).?;
-        const user = try row.to(User, .{ .allocator = t.allocator });
-        row.deinit() catch {};
-
-        defer {
-            t.allocator.free(user.parents);
-        }
-        try t.expectSlice(i32, &.{ 1, 99 }, user.parents);
-        try t.expectEqual(null, user.tags);
-        try t.expectEqual(null, user.choices);
-    }
 }
 
 test "Result: safe" {
@@ -1806,35 +1126,4 @@ test "Result: safe" {
         try t.expectEqual(null, try row.get(?i32, 1));
         try t.expectEqual(null, result.next());
     }
-}
-
-fn expectResultMapper(conn: *Conn, sql: []const u8, expected: anytype, opts: Result.MapperOpts) !void {
-    const User = struct {
-        id: i32 = 9876,
-        active: bool,
-        name: []const u8,
-        note: ?[]const u8 = null,
-    };
-
-    var result = try conn.queryOpts(sql, .{}, .{ .column_names = true });
-    defer result.deinit();
-    var mapper = result.mapper(User, opts);
-
-    const user = (try mapper.next()) orelse unreachable;
-    try t.expectEqual(expected.id, user.id);
-    try t.expectEqual(expected.active, user.active);
-    try t.expectString(expected.name, user.name);
-    if (opts.allocator) |a| {
-        a.free(user.name);
-    }
-    if (@TypeOf(expected.note) == @TypeOf(null)) {
-        try t.expectEqual(null, user.note);
-    } else {
-        try t.expectString(expected.note, user.note.?);
-        if (opts.allocator) |a| {
-            a.free(user.note.?);
-        }
-    }
-
-    try t.expectEqual(null, mapper.next());
 }

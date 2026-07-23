@@ -153,28 +153,33 @@ pub const Stream = struct {
 
     pub fn deinit(self: *Stream) void {
         self.to_read.deinit(allocator);
-        self.received.deinit(allocator);
+        self.received_array.deinit(allocator);
         allocator.destroy(self);
     }
 
     pub fn reset(self: *Stream) void {
         self.read_index = 0;
         self.to_read.clearRetainingCapacity();
-        self.received.clearRetainingCapacity();
+        self.received_array.clearRetainingCapacity();
     }
 
     pub fn received(self: *Stream) []const u8 {
-        return self.received.items;
+        return self.received_array.items;
     }
 
     pub fn add(self: *Stream, value: []const u8) void {
         self.to_read.appendSlice(allocator, value) catch unreachable;
     }
 
+    pub fn readWithTimeout(self: *@This(), buf: []u8, timeout_ms: i32) !usize {
+        _ = timeout_ms;
+        return try self.read(buf);
+    }
+
     pub fn read(self: *Stream, buf: []u8) !usize {
         std.debug.assert(!self.closed);
 
-        const read_index = self._read_index;
+        const read_index = self.read_index;
         const items = self.to_read.items;
 
         if (read_index == items.len) {
@@ -203,7 +208,7 @@ pub const Stream = struct {
 
     // store messages that are written to the stream
     pub fn writeAll(self: *Stream, data: []const u8) !void {
-        self.received.appendSlice(allocator, data) catch unreachable;
+        self.received_array.appendSlice(allocator, data) catch unreachable;
     }
 
     pub fn close(self: *Stream) void {
@@ -217,7 +222,6 @@ pub fn connect(opts: anytype) !Conn {
     var c = try Conn.open(io, allocator, .{
         .tls = if (@hasField(T, "tls")) opts.tls else .off,
         .host = if (@hasField(T, "host")) opts.host else "127.0.0.1",
-        .read_buffer = if (@hasField(T, "read_buffer")) opts.read_buffer else 2000,
     });
 
     c.auth(authOpts(opts)) catch |err| {
@@ -243,14 +247,4 @@ pub fn fail(c: Conn, err: anyerror) !void {
         std.debug.print("PG ERROR: {s}\n", .{pg_err.message});
     }
     return err;
-}
-
-pub fn scalar(c: *Conn, sql: []const u8) i32 {
-    var result = c.query(sql, .{}) catch unreachable;
-    defer result.deinit();
-
-    const row = (result.nextUnsafe() catch unreachable).?;
-    const value = row.get(i32, 0);
-    result.drain() catch unreachable;
-    return value;
 }

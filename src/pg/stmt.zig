@@ -26,7 +26,7 @@ pub const Stmt = struct {
 
     // The type of each parameter, which postgresql tells us after we send it the
     // SQL and ask for a description. `param_oids.len` can be greater than
-    // `param_count` because we initially use the conn._param_oids which is
+    // `param_count` because we initially use the conn.param_oids which is
     // globally configured.
     param_oids: []i32,
 
@@ -35,7 +35,7 @@ pub const Stmt = struct {
 
     // Information about the colums in the result, which postgresql tells us after
     // we send it the SQL and ask for a description. The slices in this structure
-    // can be larger than `column_count` because we initially conn._result_state
+    // can be larger than `column_count` because we initially conn.result_state
     // which is globally configured.
     result_state: Result.State,
 
@@ -53,20 +53,18 @@ pub const Stmt = struct {
             .allocator = base_allocator,
             .param_index = 0,
             .param_count = 0,
-            .param_oids = conn._param_oids,
+            .param_oids = conn.param_oids,
             .column_count = 0,
-            .result_state = conn._result_state,
+            .result_state = conn.result_state,
             .name = opts.cache_name orelse "",
         };
     }
 
-    pub fn fromDescribe(conn: *Conn, describe: *Describe, opts: Conn.QueryOpts) !Stmt {
-        const base_allocator = opts.allocator orelse conn.allocator;
-
+    pub fn fromDescribe(allocator: Allocator, conn: *Conn, describe: *Describe, opts: Conn.QueryOpts) !Stmt {
         return .{
             .conn = conn,
             .opts = opts,
-            .allocator = base_allocator,
+            .allocator = allocator,
             .buf = &conn.buf,
             .param_index = 0,
             .param_count = @intCast(describe.param_oids.len),
@@ -81,27 +79,21 @@ pub const Stmt = struct {
     // stmt.execute() returns a result, stmt.deinit() must not be called (all
     // ownership is passed to the result).
     pub fn deinit(self: *Stmt) void {
-        self.conn._reader.endFlow() catch {
+        self.conn.reader.endFlow() catch {
             // this can only fail in extreme conditions (OOM) and it will only impact
             // the next query (and if the app is using the pool, the pool will try to
             // recover from this anyways)
-            self.conn._state = .fail;
+            self.conn.state = .fail;
         };
-
-        const arena = self.arena;
-        const allocator = arena.child_allocator;
-        arena.deinit();
-        allocator.destroy(arena);
     }
 
     // When describe_allocator != null, we intend to cache the query information
-    // (in conn.__prepared_statements).
+    // (in conn.preparedstatements).
     pub fn prepare(self: *Stmt, sql: []const u8, describe_allocator: ?Allocator) !void {
         var conn = self.conn;
         const opts = &self.opts;
-        const statement_arena = self.arena.allocator();
 
-        try conn._reader.startFlow(statement_arena, opts.timeout);
+        try conn.reader.startFlow(self.allocator, opts.timeout_ms);
 
         var buf = self.buf;
         buf.reset();
@@ -151,7 +143,7 @@ pub const Stmt = struct {
         }
 
         // no longer idle, we're now in a query
-        conn._state = .query;
+        conn.state = .query;
 
         // First message we expect back is a ParseComplete, which has no data.
         {
@@ -187,7 +179,7 @@ pub const Stmt = struct {
                 self.param_oids = param_oids;
             } else if (param_count > param_oids.len) {
                 lib.metrics.allocParams(param_count);
-                param_oids = try statement_arena.alloc(i32, param_count);
+                param_oids = try self.allocator.alloc(i32, param_count);
                 self.param_oids = param_oids;
             }
 
@@ -220,12 +212,12 @@ pub const Stmt = struct {
                         self.result_state = state;
                     } else if (column_count > state.oids.len) {
                         lib.metrics.allocColumns(column_count);
-                        // we have more columns than our self._result_state can handle, we
+                        // we have more columns than our self.result_state can handle, we
                         // need to create a new Result.State specifically for this
-                        state = try Result.State.init(statement_arena, column_count);
+                        state = try Result.State.init(self.allocator, column_count);
                         self.result_state = state;
                     }
-                    const a: ?Allocator = if (opts.column_names) (describe_allocator orelse statement_arena) else null;
+                    const a: ?Allocator = if (opts.column_names) (describe_allocator orelse self.allocator) else null;
                     try state.from(column_count, data, a);
                     self.column_count = column_count;
                 },
@@ -345,7 +337,7 @@ pub const Stmt = struct {
 
         // our call to readyForQuery above changed the state, but as far as we're
         // concerned, we're still doing the query.
-        conn._state = .query;
+        conn.state = .query;
 
         lib.metrics.query();
 
@@ -353,18 +345,15 @@ pub const Stmt = struct {
         const state = self.result_state;
         const column_count = self.column_count;
 
-        const arena = self.arena;
-
         // Put result on the heap largely for the QueryRow (created via the
-        // conn.row(...) helper). This allows QueryRow.result and QueryRow.row._result
+        // conn.row(...) helper). This allows QueryRow.result and QueryRow.row.result
         // to reference the result, which isn't otherwise owned.
-        const result = try arena.allocator().create(Result);
+        const result = try self.allocator.create(Result);
         result.* = .{
-            ._conn = conn,
-            ._arena = self.arena,
-            ._release_conn = opts.release_conn,
-            ._oids = state.oids[0..column_count],
-            ._values = state.values[0..column_count],
+            .conn = conn,
+            .release_conn = opts.release_conn,
+            .oids = state.oids[0..column_count],
+            .values = state.values[0..column_count],
             .column_names = if (opts.column_names) state.names[0..column_count] else &[_][]const u8{},
             .number_of_columns = column_count,
         };
@@ -373,7 +362,6 @@ pub const Stmt = struct {
 
     pub const Describe = struct {
         param_oids: []i32,
-        allocator: std.mem.Allocator,
         result_state: Result.State,
     };
 };

@@ -7,7 +7,7 @@ const Conn = lib.Conn;
 const Allocator = std.mem.Allocator;
 
 // to everyone else, this is our reader
-pub const Reader = ReaderT(lib.StreamController);
+pub const Reader = ReaderT(lib.Stream);
 
 const default_timeout_val: i32 = 10_000;
 
