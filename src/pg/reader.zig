@@ -7,16 +7,16 @@ const Conn = lib.Conn;
 const Allocator = std.mem.Allocator;
 
 // to everyone else, this is our reader
-pub const Reader = ReaderT(lib.Stream);
+pub const Reader = ReaderT(lib.StreamController);
 
-const zero_timeval = std.mem.toBytes(posix.timeval{ .sec = 0, .usec = 0 });
+const default_timeout_val: i32 = 10_000;
 
 // generic just for testing within this file
 fn ReaderT(comptime T: type) type {
     return struct {
         // Whether or not we've put a timeout on the request. This helps avoid
         // system calls when no timeout is set.
-        has_timeout: bool,
+        timeout_ms: i32 = default_timeout_val,
 
         // Provided when the reader was allocated (which is the allocator given
         // when the connection/pool was created). Owns `static` and unless a query-
@@ -52,7 +52,6 @@ fn ReaderT(comptime T: type) type {
                 .buf = static,
                 .stream = stream,
                 .static = static,
-                .has_timeout = false,
                 .allocator = allocator,
                 .default_allocator = allocator,
             };
@@ -69,21 +68,10 @@ fn ReaderT(comptime T: type) type {
         // dynamic buffer it creates. The idea beind this is that if reading 1 row
         // requires more than static.len other rows within the same result might
         // as well.
-        pub fn startFlow(self: *Self, allocator: ?Allocator, timeout_ms: ?u32) !void {
-            const handle = self.stream.stream.socket.handle;
-            // FIX: set timeout
-            if (timeout_ms) |ms| {
-                const timeval = std.mem.toBytes(posix.timeval{
-                    .sec = @intCast(@divTrunc(ms, 1000)),
-                    .usec = @intCast(@mod(ms, 1000) * 1000),
-                });
-                try posix.setsockopt(handle, posix.SOL.SOCKET, posix.SO.RCVTIMEO, &timeval);
-                self.has_timeout = true;
-            } else if (self.has_timeout) {
-                try posix.setsockopt(handle, posix.SOL.SOCKET, posix.SO.RCVTIMEO, &zero_timeval);
-                self.has_timeout = false;
+        pub fn startFlow(self: *Self, allocator: ?Allocator, timeout_ms: ?i32) !void {
+            if (timeout_ms) |timeout_val| {
+                self.timeout_ms = timeout_val;
             }
-
             self.allocator = allocator orelse self.default_allocator;
         }
 
@@ -141,6 +129,7 @@ fn ReaderT(comptime T: type) type {
             self.pos = extra;
             self.start = 0;
             self.buf = new_buf;
+            self.timeout_ms = default_timeout_val;
         }
 
         // If you execute "select * from invalid_table", PostgreSQL will return
@@ -228,7 +217,7 @@ fn ReaderT(comptime T: type) type {
                     }
                 }
 
-                const n = try stream.read(buf[pos..]);
+                const n = try stream.readWithTimeout(buf[pos..], self.timeout_ms);
                 if (n == 0) {
                     return error.Closed;
                 }
@@ -249,7 +238,7 @@ fn ReaderT(comptime T: type) type {
                 const to_read = @min(bytes_left, dummy_buf.len);
 
                 // Actually pull the bytes off the TCP stream
-                const bytes_read = try self.stream.read(dummy_buf[0..to_read]);
+                const bytes_read = try self.stream.readWithTimeout(dummy_buf[0..to_read], self.timeout_ms);
 
                 if (bytes_read == 0) {
                     // The connection closed unexpectedly before we finished skipping
@@ -265,7 +254,7 @@ fn ReaderT(comptime T: type) type {
             var total_read: usize = 0;
 
             while (total_read < buffer.len) {
-                const bytes_read = try self.stream.read(buffer[total_read..]);
+                const bytes_read = try self.stream.readWithTimeout(buffer[total_read..], self.timeout_ms);
                 if (bytes_read == 0) {
                     return error.EndOfStream;
                 }

@@ -10,14 +10,15 @@ const Reader = lib.Reader;
 
 pub const StreamController = struct {
     io: Io,
-    stream: posix.fd_t,
-    cancel_pipe: []posix.fd_t,
+    stream: Stream,
+    cancel_pipe: [2]posix.fd_t,
 
-    pub fn init(stream: posix.fd_t) !StreamController {
+    pub fn init(io: Io, stream: Stream) !StreamController {
 
         return .{
+            .io = io,
             .stream = stream,
-            .cancel_pipe = try Io.Threaded.pipe2(posix.O.CLOEXEC)
+            .cancel_pipe = try Io.Threaded.pipe2(.{ .CLOEXEC = true })
         };
     }
 
@@ -36,9 +37,13 @@ pub const StreamController = struct {
         try w.writeAll(&[_]u8{1});
     }
 
+    pub fn read(self: *@This(), buffer: []u8) !usize {
+        return try self.stream.read(buffer);
+    }
+
     pub fn readWithTimeout(self: *@This(), buffer: []u8, timeout_ms: i32) !usize {
         var fds = [_]std.posix.pollfd{
-            .{ .fd = self.stream, .events = std.posix.POLL.IN, .revents = 0 },
+            .{ .fd = self.stream.stream.socket.handle, .events = std.posix.POLL.IN, .revents = 0 },
             .{ .fd = self.cancel_pipe[0], .events = std.posix.POLL.IN, .revents = 0 },
         };
 
@@ -56,7 +61,7 @@ pub const StreamController = struct {
         }
 
         if ((fds[0].revents & posix.POLL.IN) != 0) {
-            return try posix.read(self.stream, &buffer);
+            return try posix.read(self.stream.stream.socket.handle, buffer);
         }
 
         return error.UnexpectedPollEvent;
@@ -70,11 +75,15 @@ test "cancel stream while read" {
     var stream = try Stream.connect(io, allocator, .{ .port = 5432, .host = "localhost" }, null);
     errdefer stream.close();
 
+    var controller = try StreamController.init(io, stream);
+    errdefer controller.deinit();
+
     const buf = try Buffer.init(allocator, 2048);
     errdefer buf.deinit();
 
-    const reader = try Reader.init(allocator, 4096, stream);
+    var reader = try Reader.init(allocator, 4096, controller);
     errdefer reader.deinit();
 
-    reader.read();
+    _ = try reader.nextWithTimeout(2500);
+    std.debug.print("Just testing", .{});
 }

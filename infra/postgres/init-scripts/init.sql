@@ -1,19 +1,38 @@
 DO $$
 BEGIN
+    -- Migrator
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'db_migrator') THEN
         CREATE ROLE db_migrator LOGIN PASSWORD '12345678';
     END IF;
 
+    -- Read / Write
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'db_rw') THEN
         CREATE ROLE db_rw LOGIN PASSWORD '12345678';
     END IF;
 
+    -- Read only
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'db_ro') THEN
         CREATE ROLE db_ro LOGIN PASSWORD '12345678';
     END IF;
 
+    -- Read only / publication
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'db_rp') THEN
         CREATE ROLE db_rp LOGIN PASSWORD '12345678';
+    END IF;
+
+    -- No password
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'db_np') THEN
+        CREATE ROLE db_np LOGIN;
+    END IF;
+
+    -- Read only / scram sha256
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'db_ro_scram_sha256') THEN
+        CREATE ROLE db_ro_scram_sha256 LOGIN PASSWORD '12345678';
+    END IF;
+
+    -- Read only / ssl
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'db_ro_ssl') THEN
+        CREATE ROLE db_ro_ssl LOGIN PASSWORD '12345678';
     END IF;
 END
 $$;
@@ -58,7 +77,6 @@ CREATE TABLE IF NOT EXISTS test_sync_marker (
   );
 ALTER TABLE test_sync_marker REPLICA IDENTITY FULL;
 
-
 -- Read/Write application user
 GRANT USAGE ON SCHEMA public TO db_rw;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO db_rw;
@@ -75,6 +93,21 @@ GRANT SELECT ON ALL TABLES IN SCHEMA public TO db_rp;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO db_rp;
 ALTER ROLE db_rp REPLICATION;
 
+-- Readonly no password user
+GRANT USAGE ON SCHEMA public TO db_np;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO db_np;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO db_np;
+
+-- Readonly scram sha256 user
+GRANT USAGE ON SCHEMA public TO db_ro_scram_sha256;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO db_ro_scram_sha256;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO db_ro_scram_sha256;
+
+-- Readonly ssl
+GRANT USAGE ON SCHEMA public TO db_ro_ssl;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO db_ro_ssl;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO db_ro_ssl;
+
 -- Default privileges for FUTURE objects created by db_migrator
 ALTER DEFAULT PRIVILEGES FOR ROLE db_migrator IN SCHEMA public
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO db_rw;
@@ -88,8 +121,17 @@ ALTER DEFAULT PRIVILEGES FOR ROLE db_migrator IN SCHEMA public
 ALTER DEFAULT PRIVILEGES FOR ROLE db_migrator IN SCHEMA public
     GRANT USAGE, SELECT ON SEQUENCES TO db_ro;
 
+ALTER DEFAULT PRIVILEGES FOR ROLE db_migrator IN SCHEMA public
+    GRANT USAGE, SELECT ON SEQUENCES TO db_np;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE db_migrator IN SCHEMA public
+    GRANT USAGE, SELECT ON SEQUENCES TO db_ro_scram_sha256;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE db_migrator IN SCHEMA public
+    GRANT USAGE, SELECT ON SEQUENCES TO db_ro_ssl;
+
 -- Allow connections
-GRANT CONNECT ON DATABASE db TO db_migrator, db_rw, db_ro, db_rp;
+GRANT CONNECT ON DATABASE db TO db_migrator, db_rw, db_ro, db_rp, db_np, db_ro_scram_sha256, db_ro_ssl;
 
 -- db publication
 CREATE PUBLICATION db_pub FOR ALL TABLES;

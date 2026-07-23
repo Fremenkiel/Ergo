@@ -2,7 +2,6 @@ services:
   db:
     container_name: db
     image: postgres:18.4
-    command: postgres -c wal_level=logical
     restart: always
     env_file:
       - ../.env
@@ -10,7 +9,18 @@ services:
     ports:
       - '5432:5432'
     volumes:
+      - ./postgres/certs:/var/lib/postgresql/certs:ro
+      - ./postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
       - ./postgres/init-scripts:/docker-entrypoint-initdb.d:ro
+      - ./postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+    command: >
+      -c wal_level=logical
+      -c config_file=/etc/postgresql/postgresql.conf
+      -c hba_file=/etc/postgresql/pg_hba.conf
+      -c ssl=on
+      -c ssl_cert_file=/var/lib/postgresql/certs/server.crt
+      -c ssl_key_file=/var/lib/postgresql/certs/server.key
+      -c ssl_ca_file=/var/lib/postgresql/certs/ca.crt
     healthcheck:
       # Gate dependents on real readiness. The postgres entrypoint starts PG,
       # runs init, then restarts it — `up -d` returning does NOT mean ready.

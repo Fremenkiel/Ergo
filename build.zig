@@ -123,9 +123,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_ch_tests.step);
 
     // PG test
-    // const pg_tests = b.addTest(.{
-    //     .root_module = pg_module,
-    // });
-    // const run_pg_tests = b.addRunArtifact(pg_tests);
-    // test_step.dependOn(&run_pg_tests.step);
+    const pg_tests = b.addTest(.{
+        .root_module = pg_module,
+    });
+    const run_pg_tests = b.addRunArtifact(pg_tests);
+    const pg_test_step = b.step("pg_test", "Run pg tests");
+    pg_test_step.dependOn(&run_pg_tests.step);
 }

@@ -3,7 +3,6 @@ const builtin = @import("builtin");
 
 const compression = @import("compression.zig");
 
-pub const CLIENT_NAME = "ClickHouse Zig Client";
 pub const CLIENT_VERSION_MAJOR: u64 = 1;
 pub const CLIENT_VERSION_MINOR: u64 = 0;
 pub const CLIENT_VERSION_PATCH: u64 = 0;
@@ -11,8 +10,8 @@ pub const CLIENT_VERSION_PATCH: u64 = 0;
 pub const PROTOCOL_VERSION: u64 = 54449;
 
 pub const ClientHello = struct {
-    pub fn write(writer: *std.Io.Writer) !void {
-        try writeString(writer, CLIENT_NAME);
+    pub fn write(writer: *std.Io.Writer, application_name: ?[]const u8) !void {
+        if (application_name != null) try writeString(writer, application_name) else try writeString(writer, application_name);
         try writeVarInt(writer, CLIENT_VERSION_MAJOR);
         try writeVarInt(writer, CLIENT_VERSION_MINOR);
         try writeVarInt(writer, PROTOCOL_VERSION);
@@ -20,7 +19,7 @@ pub const ClientHello = struct {
 };
 
 pub const ClientInfo = struct {
-    pub fn write(writer: *std.Io.Writer, query_id: []const u8, initial_user: []const u8, initial_address: []const u8, initial_timestamp: i64, os_user: []const u8) !void {
+    pub fn write(writer: *std.Io.Writer, query_id: []const u8, initial_user: []const u8, initial_address: []const u8, initial_timestamp: i64, os_user: []const u8, application_name: ?[]const u8) !void {
         var hostname_buf: [std.posix.HOST_NAME_MAX]u8 = undefined;
         const hostname = try std.posix.gethostname(&hostname_buf);
 
@@ -34,7 +33,7 @@ pub const ClientInfo = struct {
 
         try writeString(writer, os_user);
         try writeString(writer, hostname);
-        try writeString(writer, CLIENT_NAME);
+        if (application_name != null) try writeString(writer, application_name) else try writeString(writer, application_name);
         try writeVarInt(writer, CLIENT_VERSION_MAJOR);
         try writeVarInt(writer, CLIENT_VERSION_MINOR);
         try writeVarInt(writer, PROTOCOL_VERSION);

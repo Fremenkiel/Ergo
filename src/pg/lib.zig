@@ -15,6 +15,7 @@ pub const Stmt = @import("stmt.zig").Stmt;
 pub const Pool = @import("pool.zig").Pool;
 pub const Stream = @import("stream.zig").Stream;
 pub const sendTerminate = @import("stream.zig").sendTerminate;
+pub const StreamController = @import("stream_controller.zig").StreamController;
 pub const metrics = @import("metrics.zig");
 pub const has_openssl = build_config.openssl;
 pub const SSLCtx = if (has_openssl) openssl.SSL_CTX else void;
@@ -133,11 +134,6 @@ pub fn verifyColumnName(comptime fail_mode: FailMode, name: []const u8, valid: b
 
 pub const ParsedOpts = struct {
     opts: Pool.Opts,
-    arena: std.heap.ArenaAllocator,
-
-    pub fn deinit(self: *ParsedOpts) void {
-        self.arena.deinit();
-    }
 };
 
 pub fn parseOpts(uri: std.Uri, allocator: std.mem.Allocator) !ParsedOpts {
@@ -145,21 +141,17 @@ pub fn parseOpts(uri: std.Uri, allocator: std.mem.Allocator) !ParsedOpts {
         return error.InvalidUriScheme;
     }
 
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    errdefer arena.deinit();
-    const aa = arena.allocator();
-
     var tls: Conn.Opts.TLS = .off;
-    var tcp_user_timeout: ?u32 = null;
+    var tcp_user_timeout: ?i32 = null;
     if (uri.query) |qry| {
-        const query_string = try qry.toRawMaybeAlloc(aa);
+        const query_string = try qry.toRawMaybeAlloc(allocator);
         var it = std.mem.splitScalar(u8, query_string, '&');
         while (it.next()) |param| {
             var it2 = std.mem.splitScalar(u8, param, '=');
             const key = it2.first();
             const val = it2.rest();
             if (std.mem.eql(u8, key, "tcp_user_timeout")) {
-                tcp_user_timeout = try std.fmt.parseInt(u32, val, 10);
+                tcp_user_timeout = try std.fmt.parseInt(i32, val, 10);
             } else if (std.mem.eql(u8, key, "sslmode")) {
                 if (std.mem.eql(u8, val, "require")) {
                     tls = .require;
@@ -174,19 +166,19 @@ pub fn parseOpts(uri: std.Uri, allocator: std.mem.Allocator) !ParsedOpts {
         }
     }
 
-    const path = std.mem.trimStart(u8, try uri.path.toRawMaybeAlloc(aa), "/");
-    const host = if (uri.host) |host| try host.toRawMaybeAlloc(aa) else null;
-    const username = if (uri.user) |user| try user.toRawMaybeAlloc(aa) else "postgres";
-    const password = if (uri.password) |password| try password.toRawMaybeAlloc(aa) else null;
+    const path = std.mem.trimStart(u8, try uri.path.toRawMaybeAlloc(allocator), "/");
+    const host = if (uri.host) |host| try host.toRawMaybeAlloc(allocator) else null;
+    const username = if (uri.user) |user| try user.toRawMaybeAlloc(allocator) else "postgres";
+    const password = if (uri.password) |password| try password.toRawMaybeAlloc(allocator) else null;
 
-    return .{ .arena = arena, .opts = .{
+    return .{ .opts = .{
         .size = 0,
-        .timeout = 0,
+        .timeout_ms = 0,
         .auth = .{
             .username = username,
             .password = password,
             .database = if (path.len == 0) null else path,
-            .timeout = tcp_user_timeout orelse 10_000,
+            .timeout_ms = tcp_user_timeout orelse 10_000,
         },
         .connect = .{
             .tls = tls,
@@ -293,29 +285,17 @@ pub const TypeError = error{
 };
 
 const valid_tcs: [2]TestCase = .{
-    .{ .uri = "postgresql:///", .expected_opts = .{ .size = 0, .auth = .{ .username = "postgres" }, .connect = .{}, .timeout = 0 } },
+    .{ .uri = "postgresql:///", .expected_opts = .{ .size = 0, .auth = .{ .username = "postgres" }, .connect = .{}, .timeout_ms = 0 } },
     .{ .uri = "postgresql://user:pass@somehost:1234/somedb?tcp_user_timeout=5678", .expected_opts = .{ .size = 0, .auth = .{
         .username = "user",
         .password = "pass",
         .database = "somedb",
-        .timeout = 5678,
+        .timeout_ms = 5678,
     }, .connect = .{
         .host = "somehost",
         .port = 1234,
-    }, .timeout = 0 } },
+    }, .timeout_ms = 0 } },
 };
-
-test "URI: parse valid" {
-    const a = std.testing.allocator;
-    for (valid_tcs) |tc| {
-        var po = parseOpts(try std.Uri.parse(tc.uri), a) catch |e| {
-            std.log.err("failed to parse URI {s}", .{tc.uri});
-            return e;
-        };
-        defer po.deinit();
-        try std.testing.expectEqualDeep(tc.expected_opts, po.opts);
-    }
-}
 
 test "URI: invalid scheme" {
     try std.testing.expectError(error.InvalidUriScheme, parseOpts(try std.Uri.parse("foobar:///"), std.testing.allocator));

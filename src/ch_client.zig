@@ -147,7 +147,7 @@ pub const ChClient = struct {
         if (self.writer == null) return ch.ClickHouseError.ConnectionFailed;
 
         try ch.packet.writeClientPacketHeader(self.writer.?, .Hello);
-        try ch.protocol.ClientHello.write(self.writer.?);
+        try ch.protocol.ClientHello.write(self.writer.?, self.config.application_name);
 
         try self.writer.?.writeInt(u8, @as(u8, @truncate(self.config.database.len)), .little);
         try self.writer.?.writeAll(self.config.database);
@@ -218,7 +218,15 @@ pub const ChClient = struct {
         try ch.packet.writeClientPacketHeader(self.writer.?, .Query);
         try ch.protocol.writeString(self.writer.?, query_id);
 
-        try ch.protocol.ClientInfo.write(self.writer.?, query_id, self.config.username, address, timestamp, self.os_user);
+        try ch.protocol.ClientInfo.write(
+            self.writer.?,
+            query_id,
+            self.config.username,
+            address,
+            timestamp,
+            self.os_user,
+            self.config.application_name
+        );
         try ch.protocol.writeString(self.writer.?, ""); // Empty settings
         try ch.protocol.writeString(self.writer.?, ""); // auth_hash
 

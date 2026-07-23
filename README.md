@@ -23,6 +23,8 @@ https://github.com/0xrinegade/clickhouse-zig
 
 ## Setup
 Flag sql setup, roles, table setup.
+### pg
+wal_level=logical
 
 ## OBS
 Do not supprt PG 14+ with explicit streaming = 'on' flag.
@@ -32,3 +34,20 @@ Having this flag on could result in data loss and rolled back rows being logged.
 ## Needed for test
 psql
 clickhouse-client
+
+
+# Gen SSL
+openssl genrsa -out ca.key 2048
+openssl req -new -x509 -days 3650 -key ca.key -out ca.crt -subj "/CN=LocalPostgresCA"
+openssl genrsa -out server.key 2048
+openssl req -new -key server.key -out server.csr -subj "/CN=localhost"
+openssl x509 -req -in server.csr -days 3650 \
+  -CA ca.crt -CAkey ca.key -CAcreateserial \
+  -out server.crt
+chmod 600 server.key
+
+# Build
+## With SSL (MacOs and homebrew)
+zig build -Dopenssl=true \
+  -Dopenssl_lib_path=/opt/homebrew/opt/openssl@3/lib \
+  -Dopenssl_include_path=/opt/homebrew/opt/openssl@3/include

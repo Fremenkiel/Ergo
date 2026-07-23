@@ -6,19 +6,14 @@ const types = lib.types;
 const Conn = lib.Conn;
 const Result = lib.Result;
 const Allocator = std.mem.Allocator;
-const ArenaAllocator = std.heap.ArenaAllocator;
 
 pub const Stmt = struct {
+    allocator: std.mem.Allocator,
     buf: *Buffer,
 
     opts: Conn.QueryOpts,
 
     conn: *Conn,
-    // Executing a stmt may or may not require allocations. It depends on the
-    // number of columns, number of parameters, size of the SQL, size of the
-    // serialized values and our configuration (e.g. how big
-    // our write buffer is).
-    arena: *ArenaAllocator,
 
     // Every call to stmt.bind increments this value. Important because the Bind
     // message contains all the parameter meta data first, then the serialized
@@ -49,15 +44,13 @@ pub const Stmt = struct {
     name: []const u8,
 
     pub fn init(conn: *Conn, opts: Conn.QueryOpts) !Stmt {
-        const base_allocator = opts.allocator orelse conn._allocator;
-        const arena = try base_allocator.create(ArenaAllocator);
-        arena.* = ArenaAllocator.init(base_allocator);
+        const base_allocator = opts.allocator orelse conn.allocator;
 
         return .{
             .conn = conn,
             .opts = opts,
-            .buf = &conn._buf,
-            .arena = arena,
+            .buf = &conn.buf,
+            .allocator = base_allocator,
             .param_index = 0,
             .param_count = 0,
             .param_oids = conn._param_oids,
@@ -68,15 +61,13 @@ pub const Stmt = struct {
     }
 
     pub fn fromDescribe(conn: *Conn, describe: *Describe, opts: Conn.QueryOpts) !Stmt {
-        const base_allocator = opts.allocator orelse conn._allocator;
-        const arena = try base_allocator.create(ArenaAllocator);
-        arena.* = ArenaAllocator.init(base_allocator);
+        const base_allocator = opts.allocator orelse conn.allocator;
 
         return .{
             .conn = conn,
             .opts = opts,
-            .buf = &conn._buf,
-            .arena = arena,
+            .allocator = base_allocator,
+            .buf = &conn.buf,
             .param_index = 0,
             .param_count = @intCast(describe.param_oids.len),
             .param_oids = describe.param_oids,
@@ -382,7 +373,7 @@ pub const Stmt = struct {
 
     pub const Describe = struct {
         param_oids: []i32,
-        arena: ArenaAllocator,
+        allocator: std.mem.Allocator,
         result_state: Result.State,
     };
 };

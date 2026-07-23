@@ -65,16 +65,11 @@ pub const TableDef = struct {
     columns: std.ArrayList(ColumnDef),
 };
 
-pub const Opts = struct {
-    auth: pg.Conn.AuthOpts = .{},
-    connect: pg.Conn.Opts = .{},
-};
-
 pub const PgClient = struct {
     allocator: mem.Allocator,
     io: Io,
 
-    conn_opts: Opts,
+    conn_opts: pg.Conn.ConnOpts,
 
     last_lsn: u64,
     last_timestamp: i64,
@@ -87,7 +82,7 @@ pub const PgClient = struct {
 
     read_timeout_ms: ?i32,
 
-    pub fn init(io: Io, allocator: mem.Allocator, opts: Opts) !PgClient{
+    pub fn init(io: Io, allocator: mem.Allocator, opts: pg.Conn.ConnOpts) !PgClient{
         var pool = try createConnPool(allocator, io, opts);
         errdefer pool.deinit();
 
@@ -621,7 +616,7 @@ pub const PgClient = struct {
         try self.wal_conn.?._reader.endFlow();
     }
 
-    pub fn createWalConn(allocator: mem.Allocator, io:  Io, opts: Opts) !*pg.Conn {
+    pub fn createWalConn(allocator: mem.Allocator, io:  Io, opts: pg.Conn.ConnOpts) !*pg.Conn {
         var conn = try allocator.create(pg.Conn);
         conn.* = pg.Conn.open(io, allocator, opts.connect) catch |err| {
             std.debug.print("Failed to connect: {}\n", .{err});
@@ -648,7 +643,7 @@ pub const PgClient = struct {
         return conn;
     }
 
-    pub fn createConnPool(allocator: mem.Allocator, io: Io, opts: Opts) !*pg.Pool {
+    pub fn createConnPool(allocator: mem.Allocator, io: Io, opts: pg.Conn.ConnOpts) !*pg.Pool {
         return try pg.Pool.init(io, allocator, .{ .size = 1, .connect = opts.connect, .auth = opts.auth});
     }
 };
@@ -775,7 +770,7 @@ test "parsePgOutput maps RELATION correctly" {
                 .username = "db_rp",
                 .password = "12345678",
                 .database = "db",
-                .timeout = 10_000,
+                .timeout_ms = 10_000,
             } 
         }),
         .read_timeout_ms = null
@@ -1081,7 +1076,7 @@ test "readSchemaKeys" {
                 .username = "db_rp",
                 .password = "12345678",
                 .database = "db",
-                .timeout = 10_000,
+                .timeout_ms = 10_000,
             } 
         }),
         .table_reg = undefined,

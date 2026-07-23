@@ -8,6 +8,7 @@ const Reader = lib.Reader;
 const NotificationResponse = lib.proto.NotificationResponse;
 
 const Stream = lib.Stream;
+const StreamController = lib.StreamController;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -40,10 +41,13 @@ pub const Listener = struct {
         var stream = try Stream.connect(io, allocator, opts, null);
         errdefer stream.close();
 
+        var controller = try StreamController.init(io, stream);
+        errdefer controller.deinit();
+
         const buf = try Buffer.init(allocator, opts.write_buffer orelse 2048);
         errdefer buf.deinit();
 
-        const reader = try Reader.init(allocator, opts.read_buffer orelse 4096, stream);
+        const reader = try Reader.init(allocator, opts.read_buffer orelse 4096, controller);
         errdefer reader.deinit();
 
         return .{

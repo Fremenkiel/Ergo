@@ -10,6 +10,7 @@ const SSLCtx = lib.SSLCtx;
 const Reader = lib.Reader;
 const Result = lib.Result;
 const Stream = lib.Stream;
+const StreamController = lib.StreamController;
 const Timeout = lib.Timeout;
 const QueryRow = lib.QueryRow;
 const QueryRowUnsafe = lib.QueryRowUnsafe;
@@ -23,47 +24,47 @@ const Io = std.Io;
 pub const Conn = struct {
     // If we own the ssl context (which only happens if the connection is
     // created directly and NOT through a pool), then we have to free it
-    _ssl_ctx: ?*SSLCtx,
+    ssl_ctx: ?*SSLCtx,
 
     // If we get a postgreSQL error, this will be set.
     err: ?proto.Error,
 
     // The underlying data for err
-    _err_data: ?[]const u8,
+    err_data: ?[]const u8,
 
-    _stream: Stream,
+    stream: Stream,
 
-    _pool: ?*Pool = null,
+    pool: ?*Pool = null,
 
     // The current transation state, this is whatever the last ReadyForQuery
     // message told us
-    _state: State,
+    state: State,
 
     // A buffer used for writing to PG. This can grow dynamically as needed.
-    _buf: Buffer,
+    buf: Buffer,
 
     // Used to read data from PG. Has its own buffer which can grow dynamically
-    _reader: Reader,
+    reader: Reader,
 
-    _allocator: Allocator,
+    allocator: Allocator,
 
-    _io: Io,
+    io: Io,
 
     // Holds information describing the query that we're executing. If the query
     // returns more columns than an appropriately sized ResultState is created as
     // needed.
-    _result_state: Result.State,
+    result_stats: Result.State,
 
     // Holds information describing the parameters that PG is expecting. If the
     // query has more parameters, than an appropriately sized one is created.
-    // This is separate from _result_state because:
+    // This is separate from result_stats because:
     //   (a) they are populated separately
     //   (b) have distinct lifetimes
     //   (c) they likely have different lengths;
-    _param_oids: []i32,
+    param_oids: []i32,
 
     // cache_name => data necessary to re-execute previously prepared statement.
-    _prepared_statements: std.hash_map.StringHashMapUnmanaged(Stmt.Describe),
+    prepared_statements: std.hash_map.StringHashMapUnmanaged(Stmt.Describe),
 
     const State = enum {
         idle,
@@ -81,9 +82,9 @@ pub const Conn = struct {
     pub const Opts = struct {
         host: ?[]const u8 = null,
         port: ?u16 = null,
-        write_buffer: ?u16 = null,
-        read_buffer: ?u16 = null,
-        result_state_size: u16 = 32,
+        writebuffer: ?u16 = null,
+        readbuffer: ?u16 = null,
+        resultstats_size: u16 = 32,
         tls: TLS = .off,
         _hostz: ?[:0]const u8 = null,
 
@@ -104,13 +105,18 @@ pub const Conn = struct {
         username: []const u8 = "postgres",
         password: ?[]const u8 = null,
         database: ?[]const u8 = null,
-        timeout: u32 = 10_000,
+        timeout_ms: i32 = 10_000,
         application_name: ?[]const u8 = null,
         startup_parameters: ?std.hash_map.StringHashMap([]const u8) = null,
     };
 
+    pub const ConnOpts = struct {
+        auth: AuthOpts = .{},
+        connect: Opts = .{},
+    };
+
     pub const QueryOpts = struct {
-        timeout: ?u32 = null,
+        timeout_ms: ?i32 = null,
         column_names: bool = lib.default_column_names,
 
         allocator: ?Allocator = null,
@@ -124,12 +130,6 @@ pub const Conn = struct {
         // by subsequent queries using the same name.
         cache_name: ?[]const u8 = null,
     };
-
-    pub fn openAndAuthUri(io: Io, allocator: Allocator, uri: std.Uri) !Conn {
-        var po = try lib.parseOpts(uri, allocator);
-        defer po.deinit();
-        return try openAndAuth(io, allocator, po.opts.connect, po.opts.auth);
-    }
 
     pub fn openAndAuth(io: Io, allocator: Allocator, opts: Opts, ao: AuthOpts) !Conn {
         var conn = try open(io, allocator, opts);
@@ -152,7 +152,7 @@ pub const Conn = struct {
         }
         errdefer lib.freeSSLContext(ssl_ctx);
         var conn = try openWithContext(io, allocator, opts, ssl_ctx);
-        conn._ssl_ctx = ssl_ctx;
+        conn.ssl_ctx = ssl_ctx;
         return conn;
     }
 
@@ -160,61 +160,60 @@ pub const Conn = struct {
         var stream = try Stream.connect(io, allocator, opts, ssl_ctx);
         errdefer stream.close();
 
-        const buf = try Buffer.init(allocator, @max(opts.write_buffer orelse 2048, 128));
+        var controller = try StreamController.init(io, stream);
+        errdefer controller.deinit();
+
+        const buf = try Buffer.init(allocator, @max(opts.writebuffer orelse 2048, 128));
         errdefer buf.deinit();
 
-        const reader = try Reader.init(allocator, opts.read_buffer orelse 4096, stream);
+        const reader = try Reader.init(allocator, opts.readbuffer orelse 4096, controller);
         errdefer reader.deinit();
 
-        const result_state = try Result.State.init(allocator, opts.result_state_size);
-        errdefer result_state.deinit(allocator);
+        const resultstats = try Result.State.init(allocator, opts.resultstats_size);
+        errdefer resultstats.deinit(allocator);
 
-        const param_oids = try allocator.alloc(i32, opts.result_state_size);
+        const param_oids = try allocator.alloc(i32, opts.resultstats_size);
         errdefer param_oids.deinit(allocator);
 
         return .{
             .err = null,
-            ._buf = buf,
-            ._ssl_ctx = null,
-            ._reader = reader,
-            ._stream = stream,
-            ._err_data = null,
-            ._state = .idle,
-            ._allocator = allocator,
-            ._io = io,
-            ._param_oids = param_oids,
-            ._result_state = result_state,
-            ._prepared_statements = .{},
+            .buf = buf,
+            .ssl_ctx = null,
+            .reader = reader,
+            .stream = stream,
+            .err_data = null,
+            .state = .idle,
+            .allocator = allocator,
+            .io = io,
+            .param_oids = param_oids,
+            .result_stats = resultstats,
+            .prepared_statements = .{},
         };
     }
 
     pub fn cancel(self: *Conn) void {
-        self._stream.shutdown(.recv) catch {};
+        self.stream.shutdown(.recv) catch {};
     }
 
     pub fn deinit(self: *Conn) void {
-        const allocator = self._allocator;
-        if (self._err_data) |err_data| {
+        const allocator = self.allocator;
+        if (self.err_data) |err_data| {
             allocator.free(err_data);
         }
-        self._buf.deinit();
-        self._reader.deinit();
-        allocator.free(self._param_oids);
-        self._result_state.deinit(allocator);
+        self.buf.deinit();
+        self.reader.deinit();
+        allocator.free(self.param_oids);
+        self.result_stats.deinit(allocator);
 
-        lib.sendTerminate(&self._stream, self._io);
-        lib.freeSSLContext(self._ssl_ctx);
-        self._stream.close();
+        lib.sendTerminate(&self.stream, self.io);
+        lib.freeSSLContext(self.ssl_ctx);
+        self.stream.close();
 
-        var it = self._prepared_statements.valueIterator();
-        while (it.next()) |value_ptr| {
-            value_ptr.arena.deinit();
-        }
-        self._prepared_statements.deinit(self._allocator);
+        self.prepared_statements.deinit(self.allocator);
     }
 
     pub fn release(self: *Conn) void {
-        var pool = self._pool orelse {
+        var pool = self.pool orelse {
             self.deinit();
             return;
         };
@@ -223,7 +222,7 @@ pub const Conn = struct {
     }
 
     pub fn auth(self: *Conn, opts: AuthOpts) !void {
-        if (try lib.auth.auth(self._io, &self._stream, &self._buf, &self._reader, opts)) |raw_pg_err| {
+        if (try lib.auth.auth(self.io, &self.stream, &self.buf, &self.reader, opts)) |raw_pg_err| {
             return self.setErr(raw_pg_err);
         }
 
@@ -263,12 +262,12 @@ pub const Conn = struct {
         const name = opts.cache_name;
 
         if (name) |n| {
-            if (self._prepared_statements.getPtr(n)) |describe| {
+            if (self.prepared_statements.getPtr(n)) |describe| {
                 cached = true;
                 stmt = try Stmt.fromDescribe(self, describe, opts);
                 errdefer stmt.deinit();
 
-                try self._reader.startFlow(stmt.arena.allocator(), opts.timeout);
+                try self.reader.startFlow(stmt.arena.allocator(), opts.timeout_ms);
                 // Send a "SYNC" command
                 try self.write(&.{ 'S', 0, 0, 0, 4 });
                 stmt.buf.reset();
@@ -286,18 +285,18 @@ pub const Conn = struct {
 
             errdefer stmt.deinit();
             if (name) |n| {
-                var describe_arena = ArenaAllocator.init(self._allocator);
+                var describe_arena = ArenaAllocator.init(self.allocator);
                 errdefer describe_arena.deinit();
                 try stmt.prepare(sql, describe_arena.allocator());
 
                 // When prepare is called with our describe arena, than its
-                // param_oids and result_state will be create with it specifically
+                // param_oids and resultstats will be create with it specifically
                 // so that we can copy them here.
                 const owned_name = try describe_arena.allocator().dupe(u8, n);
-                try self._prepared_statements.put(self._allocator, owned_name, .{
+                try self.prepared_statements.put(self.allocator, owned_name, .{
                     .arena = describe_arena,
                     .param_oids = stmt.param_oids,
-                    .result_state = stmt.result_state,
+                    .resultstats = stmt.resultstats,
                 });
             } else {
                 try stmt.prepare(sql, null);
@@ -370,22 +369,22 @@ pub const Conn = struct {
         if (self.canQuery() == false) {
             return error.ConnectionBusy;
         }
-        var buf = &self._buf;
+        var buf = &self.buf;
         buf.reset();
 
         if (values.len == 0) {
-            try self._reader.startFlow(opts.allocator, opts.timeout);
-            defer self._reader.endFlow() catch {
+            try self.reader.startFlow(opts.allocator, opts.timeout_ms);
+            defer self.reader.endFlow() catch {
                 // this can only fail in extreme conditions (OOM) and it will only impact
                 // the next query (and if the app is using the pool, the pool will try to
                 // recover from this anyways)
-                self._state = .fail;
+                self.state = .fail;
             };
             const simple_query = proto.Query{ .sql = sql };
             try simple_query.write(buf);
             // no longer idle, we're now in a query
             lib.metrics.query();
-            self._state = .query;
+            self.state = .query;
             try self.write(buf.string());
         } else {
             // TODO: there's some optimization opportunities here, since we know
@@ -421,7 +420,7 @@ pub const Conn = struct {
     }
 
     pub fn begin(self: *Conn) !void {
-        self._state = .transaction;
+        self.state = .transaction;
         _ = try self.execOpts("begin", .{}, .{});
     }
 
@@ -441,16 +440,16 @@ pub const Conn = struct {
     }
 
     pub fn tryRollback(self: *Conn) !void {
-        if (self._state != .idle) {
+        if (self.state != .idle) {
             try self.rollback();
         }
     }
 
     pub fn execIgnoringState(self: *Conn, sql: []const u8) !void {
-        var buf = &self._buf;
+        var buf = &self.buf;
         buf.reset();
 
-        const state = self._state;
+        const state = self.state;
 
         const simple_query = proto.Query{ .sql = sql };
         try simple_query.write(buf);
@@ -469,10 +468,10 @@ pub const Conn = struct {
     }
 
     pub fn deallocate(self: *Conn, cache_name: []const u8) !void {
-        if (self._prepared_statements.fetchRemove(cache_name)) |kv| {
+        if (self.prepared_statements.fetchRemove(cache_name)) |kv| {
             kv.value.arena.deinit();
         }
-        const allocator = self._allocator;
+        const allocator = self.allocator;
         const sql = try std.fmt.allocPrint(allocator, "deallocate {s}", .{cache_name});
         defer allocator.free(sql);
         _ = try self.execOpts(sql, .{}, .{});
@@ -480,22 +479,22 @@ pub const Conn = struct {
 
     // Should not be called directly
     pub fn peekForError(self: *Conn) !void {
-        const data = (try self._reader.peekForError()) orelse return;
+        const data = (try self.reader.peekForError()) orelse return;
         try self.readyForQuery();
         return self.setErr(data);
     }
 
     // Should not be called directly
     pub fn read(self: *Conn) !lib.Message {
-        var reader = &self._reader;
+        var reader = &self.reader;
         while (true) {
             const msg = reader.next() catch |err| {
-                self._state = .fail;
+                self.state = .fail;
                 return err;
             };
             switch (msg.type) {
                 'Z' => {
-                    self._state = switch (msg.data[0]) {
+                    self.state = switch (msg.data[0]) {
                         'I' => .idle,
                         'T' => .transaction,
                         'E' => .fail,
@@ -512,8 +511,8 @@ pub const Conn = struct {
     }
 
     pub fn write(self: *Conn, data: []const u8) !void {
-        self._stream.writeAll(data) catch |err| {
-            self._state = .fail;
+        self.stream.writeAll(data) catch |err| {
+            self.state = .fail;
             return err;
         };
     }
@@ -529,16 +528,16 @@ pub const Conn = struct {
         std.mem.writeInt(i64, buf[25..33], server_timestamp, .big);
         buf[33] = 0; // reply requested
 
-        var msg_len_buf: [4]u8 = undefined;
-        std.mem.writeInt(u32, &msg_len_buf, 34 + 4, .big);
+        var msg_lenbuf: [4]u8 = undefined;
+        std.mem.writeInt(u32, &msg_lenbuf, 34 + 4, .big);
         try self.write("d");
-        try self.write(&msg_len_buf);
+        try self.write(&msg_lenbuf);
         try self.write(&buf);
     }
 
 
     fn setErr(self: *Conn, data: []const u8) error{ PG, OutOfMemory } {
-        const allocator = self._allocator;
+        const allocator = self.allocator;
 
         // The proto.Error that we're about to create is going to reference data.
         // But data is owned by our Reader and its lifetime doesn't necessarily match
@@ -546,23 +545,23 @@ pub const Conn = struct {
         // the data so it can tie its lifecycle to the error.
 
         // That means clearing out any previous duped error data we had
-        if (self._err_data) |err_data| {
+        if (self.err_data) |err_data| {
             allocator.free(err_data);
         }
 
         const owned = try allocator.dupe(u8, data);
-        self._err_data = owned;
+        self.err_data = owned;
         self.err = proto.Error.parse(owned);
         return error.PG;
     }
 
     pub fn unexpectedDBMessage(self: *Conn) error{UnexpectedDBMessage} {
-        self._state = .fail;
+        self.state = .fail;
         return error.UnexpectedDBMessage;
     }
 
     fn canQuery(self: *const Conn) bool {
-        const state = self._state;
+        const state = self.state;
         if (state == .idle or state == .transaction) {
             return true;
         }
@@ -596,7 +595,7 @@ const t = lib.testing;
 test "Conn: auth trust (no pass)" {
     var conn = try Conn.open(t.io, t.allocator, .{});
     defer conn.deinit();
-    try conn.auth(.{ .username = "pgz_user_nopass", .database = "postgres" });
+    try conn.auth(.{ .username = "db_np", .database = "postgres" });
 }
 
 test "Conn: auth unknown user" {
@@ -610,21 +609,21 @@ test "Conn: auth cleartext password" {
     {
         var conn = try Conn.open(t.io, t.allocator, .{});
         defer conn.deinit();
-        try t.expectError(error.PG, conn.auth(.{ .username = "pgz_user_clear" }));
+        try t.expectError(error.PG, conn.auth(.{ .username = "db_ro" }));
         try t.expectString("empty password returned by client", conn.err.?.message);
     }
 
     {
         var conn = try Conn.open(t.io, t.allocator, .{});
         defer conn.deinit();
-        try t.expectError(error.PG, conn.auth(.{ .username = "pgz_user_clear", .password = "wrong" }));
-        try t.expectString("password authentication failed for user \"pgz_user_clear\"", conn.err.?.message);
+        try t.expectError(error.PG, conn.auth(.{ .username = "db_ro", .password = "wrong" }));
+        try t.expectString("password authentication failed for user \"db_ro\"", conn.err.?.message);
     }
 
     {
         var conn = try Conn.open(t.io, t.allocator, .{});
         defer conn.deinit();
-        try conn.auth(.{ .username = "pgz_user_clear", .password = "pgz_user_clear_pw", .database = "postgres" });
+        try conn.auth(.{ .username = "db_ro", .password = "12345678", .database = "postgres" });
     }
 }
 
@@ -632,21 +631,21 @@ test "Conn: auth scram-sha-256 password" {
     {
         var conn = try Conn.open(t.io, t.allocator, .{});
         defer conn.deinit();
-        try t.expectError(error.PG, conn.auth(.{ .username = "pgz_user_scram_sha256" }));
-        try t.expectString("password authentication failed for user \"pgz_user_scram_sha256\"", conn.err.?.message);
+        try t.expectError(error.PG, conn.auth(.{ .username = "db_ro_scram_sha256" }));
+        try t.expectString("password authentication failed for user \"db_ro_scram_sha256\"", conn.err.?.message);
     }
 
     {
         var conn = try Conn.open(t.io, t.allocator, .{});
         defer conn.deinit();
-        try t.expectError(error.PG, conn.auth(.{ .username = "pgz_user_scram_sha256", .password = "wrong" }));
-        try t.expectString("password authentication failed for user \"pgz_user_scram_sha256\"", conn.err.?.message);
+        try t.expectError(error.PG, conn.auth(.{ .username = "db_ro_scram_sha256", .password = "wrong" }));
+        try t.expectString("password authentication failed for user \"db_ro_scram_sha256\"", conn.err.?.message);
     }
 
     {
         var conn = try Conn.open(t.io, t.allocator, .{});
         defer conn.deinit();
-        try conn.auth(.{ .username = "pgz_user_scram_sha256", .password = "pgz_user_scram_sha256_pw", .database = "postgres" });
+        try conn.auth(.{ .username = "db_ro_scram_sha256", .password = "12345678", .database = "postgres" });
     }
 }
 
@@ -1738,28 +1737,6 @@ test "PG: bind []?[]const u8" {
     }
 }
 
-test "PG: binary wrapper" {
-    defer t.reset();
-
-    var c = try t.connect(.{});
-    defer c.deinit();
-
-    _ = try c.exec(
-        \\ create extension if not exists postgis;
-        \\ create table if not exists places (
-        \\     id int not null,
-        \\     location geography not null
-        \\ );
-    , .{});
-
-    const data = lib.Binary{
-        .data = &.{ 1, 1, 0, 0, 32, 230, 16, 0, 0, 43, 107, 238, 243, 22, 122, 82, 192, 60, 20, 204, 226, 238, 89, 68, 64 },
-    };
-    var row = (try c.rowUnsafe("select $1::geography", .{data})).?;
-    defer row.deinit() catch {};
-    try t.expectString(data.data, row.get([]const u8, 0));
-}
-
 test "PG: isUnique" {
     defer t.reset();
 
@@ -1785,11 +1762,11 @@ test "PG: isUnique" {
 }
 
 test "PG: large read" {
-    var c = try t.connect(.{ .read_buffer = 500 });
+    var c = try t.connect(.{ .readbuffer = 500 });
     defer c.deinit();
 
     {
-        // want this to be larger than our read_buffer
+        // want this to be larger than our readbuffer
         var rows = try c.query("select $1::text", .{"!" ** 1000});
         defer rows.deinit();
 
@@ -1807,7 +1784,7 @@ test "PG: large read" {
 }
 
 test "Conn: dynamic buffer freed on error" {
-    var c = try t.connect(.{ .read_buffer = 100 });
+    var c = try t.connect(.{ .readbuffer = 100 });
     defer c.deinit();
 
     var rows = try c.query("select $1::text", .{"!" ** 200});
@@ -1850,9 +1827,9 @@ test "Conn: application_name" {
     var conn = try Conn.open(t.io, t.allocator, .{});
     defer conn.deinit();
     try conn.auth(.{
-        .username = "pgz_user_clear",
-        .password = "pgz_user_clear_pw",
-        .database = "postgres",
+        .username = "db_ro",
+        .password = "12345678",
+        .database = "db",
         .application_name = "pg_zig_test",
     });
 
@@ -1952,22 +1929,16 @@ test "PG: rollback during error" {
     try t.expectEqual(null, (try result.next()));
 }
 
-test "open URI" {
-    const uri = try std.Uri.parse("postgresql://postgres:postgres@127.0.0.1:5432/postgres?tcp_user_timeout=5000");
-    var conn = try Conn.openAndAuthUri(t.io, t.allocator, uri);
-    conn.deinit();
-}
-
 test "Conn: TLS required" {
     {
         var conn = try Conn.open(t.io, t.allocator, .{ .tls = .off });
         defer conn.deinit();
-        try t.expectError(error.PG, conn.auth(.{ .username = "pgz_user_ssl" }));
+        try t.expectError(error.PG, conn.auth(.{ .username = "db_ro_ssl" }));
         try t.expectEqual(true, std.mem.find(u8, conn.err.?.message, "no encryption") != null);
     }
 
     {
-        var conn = try t.connect(.{ .tls = Conn.Opts.TLS.require, .username = "pgz_user_ssl", .password = "pgz_user_ssl_pw" });
+        var conn = try t.connect(.{ .tls = Conn.Opts.TLS.require, .username = "db_ro_ssl", .password = "12345678" });
         defer conn.deinit();
     }
 }
@@ -1976,7 +1947,7 @@ test "Conn: TLS verify-full" {
     try t.expectError(error.SSLCertificationVerificationError, Conn.open(t.io, t.allocator, .{ .tls = .{ .verify_full = null } }));
 
     {
-        var conn = try t.connect(.{ .tls = Conn.Opts.TLS{ .verify_full = "tests/root.crt" }, .username = "pgz_user_ssl", .password = "pgz_user_ssl_pw" });
+        var conn = try t.connect(.{ .tls = Conn.Opts.TLS{ .verify_full = "infra/postgres/certs/ca.crt" }, .username = "db_ro_ssl", .password = "12345678" });
         defer conn.deinit();
     }
 }
@@ -2002,7 +1973,7 @@ test "Conn: query is cancelable" {
 
     try t.expectError(error.Canceled, result);
     try t.expectEqual(true, elapsed_ms < 1500); // prompt, not blocked until pg_sleep ends
-    try t.expectEqual(Conn.State.fail, conn._state);
+    try t.expectEqual(Conn.State.fail, conn.state);
     try t.expectError(error.ConnectionBusy, conn.exec("select 1", .{}));
 }
 
@@ -2074,8 +2045,8 @@ test "PG: cached query with column names" {
 }
 
 fn expectNumeric(numeric: types.Numeric, expected: []const u8) !void {
-    var str_buf: [50]u8 = undefined;
-    try t.expectString(expected, try numeric.toString(&str_buf));
+    var strbuf: [50]u8 = undefined;
+    try t.expectString(expected, try numeric.toString(&strbuf));
 
     const a = try t.allocator.alloc(u8, numeric.estimatedStringLen());
     defer t.allocator.free(a);

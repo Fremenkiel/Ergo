@@ -6,6 +6,20 @@ const Conn = @import("conn.zig").Conn;
 pub const allocator = std.testing.allocator;
 pub const io = std.testing.io;
 
+const test_opts: Conn.ConnOpts = .{
+        .connect = .{  
+            .port = 5432,
+            .host = "localhost",
+        },
+        .auth = .{
+            .username = "postgres",
+            .password = "postgres",
+            .database = "db",
+            .application_name = "Ergo",
+            .timeout_ms = 10_000,
+        } 
+};
+
 pub var arena = std.heap.ArenaAllocator.init(allocator);
 
 pub fn reset() void {
@@ -45,7 +59,7 @@ pub fn getRandom() std.Random.DefaultPrng {
 }
 
 pub fn setup() !void {
-    var c = try connect(.{});
+    var c = try connect(test_opts);
     defer c.deinit();
     _ = c.exec(
         \\ drop user if exists pgz_user_nopass;
@@ -121,47 +135,47 @@ pub fn setup() !void {
 // Dummy net.Stream, lets us setup data to be read and capture data that is written.
 pub const Stream = struct {
     closed: bool,
-    _read_index: usize,
+    read_index: usize,
     socket: c_int = 0,
-    _to_read: std.ArrayList(u8),
-    _received: std.ArrayList(u8),
+    to_read: std.ArrayList(u8),
+    received_array: std.ArrayList(u8),
 
     pub fn init() *Stream {
         const s = allocator.create(Stream) catch unreachable;
         s.* = .{
             .closed = false,
-            ._read_index = 0,
-            ._to_read = .empty,
-            ._received = .empty,
+            .read_index = 0,
+            .to_read = .empty,
+            .received_array = .empty,
         };
         return s;
     }
 
     pub fn deinit(self: *Stream) void {
-        self._to_read.deinit(allocator);
-        self._received.deinit(allocator);
+        self.to_read.deinit(allocator);
+        self.received.deinit(allocator);
         allocator.destroy(self);
     }
 
     pub fn reset(self: *Stream) void {
-        self._read_index = 0;
-        self._to_read.clearRetainingCapacity();
-        self._received.clearRetainingCapacity();
+        self.read_index = 0;
+        self.to_read.clearRetainingCapacity();
+        self.received.clearRetainingCapacity();
     }
 
     pub fn received(self: *Stream) []const u8 {
-        return self._received.items;
+        return self.received.items;
     }
 
     pub fn add(self: *Stream, value: []const u8) void {
-        self._to_read.appendSlice(allocator, value) catch unreachable;
+        self.to_read.appendSlice(allocator, value) catch unreachable;
     }
 
     pub fn read(self: *Stream, buf: []u8) !usize {
         std.debug.assert(!self.closed);
 
         const read_index = self._read_index;
-        const items = self._to_read.items;
+        const items = self.to_read.items;
 
         if (read_index == items.len) {
             return 0;
@@ -181,7 +195,7 @@ pub const Stream = struct {
             // we'll give it when it can take
             data = data[0..buf.len];
         }
-        self._read_index = read_index + data.len;
+        self.read_index = read_index + data.len;
 
         @memcpy(buf[0..data.len], data);
         return data.len;
@@ -189,7 +203,7 @@ pub const Stream = struct {
 
     // store messages that are written to the stream
     pub fn writeAll(self: *Stream, data: []const u8) !void {
-        self._received.appendSlice(allocator, data) catch unreachable;
+        self.received.appendSlice(allocator, data) catch unreachable;
     }
 
     pub fn close(self: *Stream) void {

@@ -14,6 +14,8 @@ const ChClient = @import("ch_client.zig").ChClient;
 const wal_processor = @import("wal_processor.zig");
 const types = @import("types.zig");
 
+const application_name = "Ergo";
+
 const ready_str = "Service ready";
 const shutdown_str = "Shutdown signal caught. Exiting cleanly.";
 
@@ -145,7 +147,8 @@ pub fn main(init: std.process.Init) !void {
             .username = options.pg_user,
             .password = options.pg_pass,
             .database = options.pg_db,
-            .timeout = 10_000,
+            .application_name = "Ergo",
+            .timeout_ms = 10_000,
         } 
     });
     defer pg_client.deinit();
@@ -156,6 +159,7 @@ pub fn main(init: std.process.Init) !void {
         .username = options.ch_user,
         .password = options.ch_pass,
         .database = options.ch_db,
+        .application_name = application_name,
     }, os_user.?);
     defer ch_client.deinit();
 
