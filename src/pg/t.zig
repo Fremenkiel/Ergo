@@ -222,6 +222,7 @@ pub fn connect(opts: anytype) !Conn {
     var c = try Conn.open(io, allocator, .{
         .tls = if (@hasField(T, "tls")) opts.tls else .off,
         .host = if (@hasField(T, "host")) opts.host else "127.0.0.1",
+        .read_buffer = if (@hasField(T, "read_buffer")) opts.read_buffer else 2000,
     });
 
     c.auth(authOpts(opts)) catch |err| {

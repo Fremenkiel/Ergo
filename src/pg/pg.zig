@@ -11,8 +11,6 @@ pub const Iterator = lib.Iterator;
 pub const QueryRow = lib.QueryRow;
 pub const Binary = lib.Binary;
 
-pub const Listener = @import("listener.zig").Listener;
-
 pub const types = lib.types;
 pub const Cidr = types.Cidr;
 pub const Numeric = types.Numeric;

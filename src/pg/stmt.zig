@@ -2,13 +2,14 @@ const std = @import("std");
 const lib = @import("lib.zig");
 const Buffer = @import("buffer").Buffer;
 
+const mem = std.mem;
+
 const types = lib.types;
 const Conn = lib.Conn;
 const Result = lib.Result;
-const Allocator = std.mem.Allocator;
 
 pub const Stmt = struct {
-    allocator: std.mem.Allocator,
+    allocator: mem.Allocator,
     buf: *Buffer,
 
     opts: Conn.QueryOpts,
@@ -43,14 +44,12 @@ pub const Stmt = struct {
     // by the server
     name: []const u8,
 
-    pub fn init(conn: *Conn, opts: Conn.QueryOpts) !Stmt {
-        const base_allocator = opts.allocator orelse conn.allocator;
-
+    pub fn init(allocator: mem.Allocator, conn: *Conn, opts: Conn.QueryOpts) !Stmt {
         return .{
             .conn = conn,
             .opts = opts,
             .buf = &conn.buf,
-            .allocator = base_allocator,
+            .allocator = allocator,
             .param_index = 0,
             .param_count = 0,
             .param_oids = conn.param_oids,
@@ -60,7 +59,7 @@ pub const Stmt = struct {
         };
     }
 
-    pub fn fromDescribe(allocator: Allocator, conn: *Conn, describe: *Describe, opts: Conn.QueryOpts) !Stmt {
+    pub fn fromDescribe(allocator: mem.Allocator, conn: *Conn, describe: *Describe, opts: Conn.QueryOpts) !Stmt {
         return .{
             .conn = conn,
             .opts = opts,
@@ -78,22 +77,16 @@ pub const Stmt = struct {
     // Should only be called in an error case. In a normal case, where
     // stmt.execute() returns a result, stmt.deinit() must not be called (all
     // ownership is passed to the result).
-    pub fn deinit(self: *Stmt) void {
-        self.conn.reader.endFlow() catch {
-            // this can only fail in extreme conditions (OOM) and it will only impact
-            // the next query (and if the app is using the pool, the pool will try to
-            // recover from this anyways)
-            self.conn.state = .fail;
-        };
+    pub fn deinit(self: *@This()) void {
+        self.allocator.free(self.param_oids);
     }
 
-    // When describe_allocator != null, we intend to cache the query information
     // (in conn.preparedstatements).
-    pub fn prepare(self: *Stmt, sql: []const u8, describe_allocator: ?Allocator) !void {
+    pub fn prepare(self: *@This(), sql: []const u8) !void {
         var conn = self.conn;
         const opts = &self.opts;
 
-        try conn.reader.startFlow(self.allocator, opts.timeout_ms);
+        try conn.reader.startFlow(opts.timeout_ms);
 
         var buf = self.buf;
         buf.reset();
@@ -168,25 +161,23 @@ pub const Stmt = struct {
                 return conn.unexpectedDBMessage();
             }
 
-            var param_oids = self.param_oids;
+            if (self.name.len > 0) {
+                self.result_state = try Result.State.init(self.allocator, param_count);
+            } else {
+                if (conn.param_oids.len < param_count) {
+                    self.allocator.free(conn.param_oids);
+                    conn.param_oids = try self.allocator.alloc(i32, param_count);
+                }
+                self.param_oids = conn.param_oids;
+            }
             const data = msg.data;
             param_count = std.mem.readInt(u16, data[0..2], .big);
-            if (describe_allocator) |da| {
-                // If we plan on caching this prepared statement, then we need
-                // to allocate a new param_oids list which will outlive this
-                // statement
-                param_oids = try da.alloc(i32, param_count);
-                self.param_oids = param_oids;
-            } else if (param_count > param_oids.len) {
-                lib.metrics.allocParams(param_count);
-                param_oids = try self.allocator.alloc(i32, param_count);
-                self.param_oids = param_oids;
-            }
+            self.param_oids = try self.allocator.alloc(i32, param_count);
 
             var pos: usize = 2;
             for (0..param_count) |i| {
                 const end = pos + 4;
-                param_oids[i] = std.mem.readInt(i32, data[pos..end][0..4], .big);
+                self.param_oids[i] = std.mem.readInt(i32, data[pos..end][0..4], .big);
                 pos = end;
             }
             self.param_count = param_count;
@@ -201,24 +192,23 @@ pub const Stmt = struct {
             switch (msg.type) {
                 'n' => {}, // no data, column_count = 0
                 'T' => {
-                    var state = self.result_state;
                     const data = msg.data;
                     const column_count = std.mem.readInt(u16, data[0..2], .big);
-                    if (describe_allocator) |da| {
-                        // If we plan on caching this prepared statement, then we need
-                        // to allocate a new param_oids list which will outlive this
-                        // statement
-                        state = try Result.State.init(da, column_count);
-                        self.result_state = state;
-                    } else if (column_count > state.oids.len) {
-                        lib.metrics.allocColumns(column_count);
-                        // we have more columns than our self.result_state can handle, we
-                        // need to create a new Result.State specifically for this
-                        state = try Result.State.init(self.allocator, column_count);
-                        self.result_state = state;
+
+                    if (self.name.len > 0) {
+                        self.result_state = try Result.State.init(self.allocator, column_count);
+                    } else {
+                        if (conn.result_state.capacity < column_count) {
+                            conn.result_state.deinit(self.allocator);
+                            conn.result_state = try Result.State.init(self.allocator, column_count);
+                        }
+                        self.result_state = conn.result_state;
                     }
-                    const a: ?Allocator = if (opts.column_names) (describe_allocator orelse self.allocator) else null;
-                    try state.from(column_count, data, a);
+                    try self.result_state.from(self.allocator, column_count, data);
+
+                    if (self.name.len == 0) {
+                        conn.result_state = self.result_state;
+                    }
                     self.column_count = column_count;
                 },
                 else => return conn.unexpectedDBMessage(),
@@ -231,7 +221,7 @@ pub const Stmt = struct {
     // We need to call Bind for every value we're binding. Rather than having
     // to check "is this the first call to bind" each time, we make it the caller's
     // responsibility to "prepareForBind" upfront.
-    pub fn prepareForBind(self: *Stmt, param_count: u16) !void {
+    pub fn prepareForBind(self: *@This(), param_count: u16) !void {
         try self.conn.readyForQuery();
 
         var buf = self.buf;
@@ -263,7 +253,7 @@ pub const Stmt = struct {
         try buf.writeIntBig(u16, param_count);
     }
 
-    pub fn bind(self: *Stmt, value: anytype) !void {
+    pub fn bind(self: *@This(), value: anytype) !void {
         const name = self.name;
 
         const param_index = self.param_index;
@@ -278,7 +268,7 @@ pub const Stmt = struct {
         self.param_index = param_index + 1;
     }
 
-    pub fn execute(self: *Stmt) !*Result {
+    pub fn execute(self: *@This()) !*Result {
         lib.assert(self.param_index == self.param_count);
 
         // We haven't sent our `bind` message yet. We need to finish it, and then
@@ -354,11 +344,21 @@ pub const Stmt = struct {
             .release_conn = opts.release_conn,
             .oids = state.oids[0..column_count],
             .values = state.values[0..column_count],
-            .column_names = if (opts.column_names) state.names[0..column_count] else &[_][]const u8{},
+            .column_names = if (opts.column_names and state.names != null) state.names.?[0..column_count] else &[_][]const u8{},
             .number_of_columns = column_count,
         };
         return result;
     }
+
+    pub fn endStmt(self: *@This()) void {
+        self.conn.reader.endFlow() catch {
+            // this can only fail in extreme conditions (OOM) and it will only impact
+            // the next query (and if the app is using the pool, the pool will try to
+            // recover from this anyways)
+            self.conn.state = .fail;
+        };
+    }
+
 
     pub const Describe = struct {
         param_oids: []i32,

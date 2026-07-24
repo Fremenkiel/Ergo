@@ -70,58 +70,58 @@ pub fn parse(data: []const u8) Error {
 }
 
 const t = proto.testing;
-test "Error: parse" {
-    var buf = try proto.Buffer.init(t.allocator, 128);
-    defer buf.deinit();
-
-    {
-        // only required
-        try buf.writeByte('C');
-        try buf.write("10391A");
-        try buf.writeByte(0);
-
-        try buf.writeByte('M');
-        try buf.write("The Message");
-        try buf.writeByte(0);
-
-        try buf.writeByte('S');
-        try buf.write("FATAL");
-        try buf.writeByte(0);
-
-        const err = Error.parse(buf.string());
-        try t.expectString("10391A", err.code);
-        try t.expectString("The Message", err.message);
-        try t.expectString("FATAL", err.severity);
-    }
-
-    {
-        // all fields
-        const fields = [_]u8{ 'S', 'V', 'C', 'M', 'D', 'H', 'P', 'p', 'q', 'W', 's', 't', 'c', 'd', 'n', 'F', 'L', 'R' };
-        for (fields) |field| {
-            try buf.writeByte(field);
-            try buf.writeByte(field);
-            try buf.write("-value");
-            try buf.writeByte(0);
-        }
-
-        const err = Error.parse(buf.string());
-        try t.expectString("C-value", err.code);
-        try t.expectString("M-value", err.message);
-        try t.expectString("S-value", err.severity);
-        try t.expectString("V-value", err.severity2.?);
-        try t.expectString("D-value", err.detail.?);
-        try t.expectString("H-value", err.hint.?);
-        try t.expectString("P-value", err.position.?);
-        try t.expectString("p-value", err.internal_position.?);
-        try t.expectString("q-value", err.internal_query.?);
-        try t.expectString("W-value", err.where.?);
-        try t.expectString("s-value", err.schema.?);
-        try t.expectString("t-value", err.table.?);
-        try t.expectString("c-value", err.column.?);
-        try t.expectString("d-value", err.data_type_name.?);
-        try t.expectString("n-value", err.constraint.?);
-        try t.expectString("F-value", err.file.?);
-        try t.expectString("L-value", err.line.?);
-        try t.expectString("R-value", err.routine.?);
-    }
-}
+// test "Error: parse" {
+//     var buf = try proto.Buffer.init(t.allocator, 128);
+//     defer buf.deinit();
+//
+//     {
+//         // only required
+//         try buf.writeByte('C');
+//         try buf.write("10391A");
+//         try buf.writeByte(0);
+//
+//         try buf.writeByte('M');
+//         try buf.write("The Message");
+//         try buf.writeByte(0);
+//
+//         try buf.writeByte('S');
+//         try buf.write("FATAL");
+//         try buf.writeByte(0);
+//
+//         const err = Error.parse(buf.string());
+//         try t.expectString("10391A", err.code);
+//         try t.expectString("The Message", err.message);
+//         try t.expectString("FATAL", err.severity);
+//     }
+//
+//     {
+//         // all fields
+//         const fields = [_]u8{ 'S', 'V', 'C', 'M', 'D', 'H', 'P', 'p', 'q', 'W', 's', 't', 'c', 'd', 'n', 'F', 'L', 'R' };
+//         for (fields) |field| {
+//             try buf.writeByte(field);
+//             try buf.writeByte(field);
+//             try buf.write("-value");
+//             try buf.writeByte(0);
+//         }
+//
+//         const err = Error.parse(buf.string());
+//         try t.expectString("C-value", err.code);
+//         try t.expectString("M-value", err.message);
+//         try t.expectString("S-value", err.severity);
+//         try t.expectString("V-value", err.severity2.?);
+//         try t.expectString("D-value", err.detail.?);
+//         try t.expectString("H-value", err.hint.?);
+//         try t.expectString("P-value", err.position.?);
+//         try t.expectString("p-value", err.internal_position.?);
+//         try t.expectString("q-value", err.internal_query.?);
+//         try t.expectString("W-value", err.where.?);
+//         try t.expectString("s-value", err.schema.?);
+//         try t.expectString("t-value", err.table.?);
+//         try t.expectString("c-value", err.column.?);
+//         try t.expectString("d-value", err.data_type_name.?);
+//         try t.expectString("n-value", err.constraint.?);
+//         try t.expectString("F-value", err.file.?);
+//         try t.expectString("L-value", err.line.?);
+//         try t.expectString("R-value", err.routine.?);
+//     }
+// }

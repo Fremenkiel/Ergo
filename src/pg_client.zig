@@ -607,7 +607,7 @@ pub const PgClient = struct {
     pub fn startFlow(self: *@This()) !void {
         if (self.wal_conn == null) return PgClientError.WalConnectionNotInitialized;
 
-        try self.wal_conn.?._reader.startFlow(null, 250);
+        try self.wal_conn.?.reader.startFlow(null, 250);
     }
 
     pub fn endFlow(self: *@This()) !void {

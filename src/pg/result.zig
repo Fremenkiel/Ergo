@@ -15,11 +15,11 @@ pub const Result = struct {
 
     conn: *Conn,
 
-    // a sliced version of _state.oids (so we don't have to keep reslicing it to
+    // a sliced version of state.oids (so we don't have to keep reslicing it to
     // number_of_columns on each row)
     oids: []i32,
 
-    // a sliced version of _state.values (so we don't have to keep reslicing it to
+    // a sliced version of state.values (so we don't have to keep reslicing it to
     // number_of_columns on each row)
     values: []State.Value,
 
@@ -27,7 +27,7 @@ pub const Result = struct {
     // Used when the result came directly from the pool.query() helper.
     release_conn: bool,
 
-    pub fn deinit(self: *const Result) void {
+    pub fn deinit(self: *@This(), allocator: mem.Allocator) void {
         // value.data references the buffer of the reader, this buffer is potentially
         // reused and potentially discarded. There are at least a few very good
         // reasons why the least we can do is blank it out.
@@ -45,6 +45,8 @@ pub const Result = struct {
         if (self.release_conn) {
             self.conn.release();
         }
+
+        allocator.destroy(self);
     }
 
     // Caller should typically call next() until null is returned.
@@ -52,11 +54,11 @@ pub const Result = struct {
     // "drain" to empty the rest of the result.
     // I don't want to do this implictly in deinit because it can fail
     // and returning an error union in deinit is a pain for the caller.
-    pub fn drain(self: *Result) !void {
+    pub fn drain(self: *@This()) !void {
         var conn = self.conn;
         // Only an in-flight query has anything to drain; reading in any other
         // state (e.g. a poisoned connection) would block.
-        if (conn._state != .query) {
+        if (conn.state != .query) {
             return;
         }
 
@@ -71,14 +73,14 @@ pub const Result = struct {
         }
     }
 
-    pub fn next(self: *Result) !?Row {
+    pub fn next(self: *@This()) !?Row {
         return self._next(.safe);
     }
-    pub fn nextUnsafe(self: *Result) !?RowUnsafe {
+    pub fn nextUnsafe(self: *@This()) !?RowUnsafe {
         return self._next(.unsafe);
     }
 
-    fn _next(self: *Result, comptime fail_mode: lib.FailMode) !(if (fail_mode == .safe) ?Row else ?RowUnsafe) {
+    fn _next(self: *@This(), comptime fail_mode: lib.FailMode) !(if (fail_mode == .safe) ?Row else ?RowUnsafe) {
         if (self.conn.state != .query) {
             // Possibly weird state. Most likely cause is calling next() multiple times
             // despite null being returned.
@@ -116,7 +118,7 @@ pub const Result = struct {
                 return .{
                     .values = values,
                     .oids = self.oids,
-                    ._result = self,
+                    .result = self,
                 };
             },
             'C' => {
@@ -127,7 +129,7 @@ pub const Result = struct {
         }
     }
 
-    pub fn columnIndex(self: *const Result, column_name: []const u8) ?usize {
+    pub fn columnIndex(self: *@This(), column_name: []const u8) ?usize {
         for (self.column_names, 0..) |n, i| {
             if (std.mem.eql(u8, n, column_name)) {
                 return i;
@@ -143,7 +145,7 @@ pub const Result = struct {
     pub const State = struct {
         // The name for each returned column, we only populate this if we're told
         // to (since it requires us to dupe the data)
-        names: [][]const u8,
+        names: ?[][]const u8,
 
         // This is different than the above. The above are set once per query
         // from the RowDescription response of our Describe message. This is set for
@@ -154,15 +156,15 @@ pub const Result = struct {
         // The OID for each returned column
         oids: []i32,
 
+        capacity: usize,
+        len: usize,
+
         pub const Value = struct {
             is_null: bool,
             data: []const u8,
         };
 
         pub fn init(allocator: mem.Allocator, size: usize) !State {
-            const names = try allocator.alloc([]const u8, size);
-            errdefer allocator.free(names);
-
             const values = try allocator.alloc(Value, size);
             errdefer allocator.free(values);
 
@@ -170,27 +172,44 @@ pub const Result = struct {
             errdefer allocator.free(oids);
 
             return .{
-                .names = names,
+                .names = null,
                 .values = values,
                 .oids = oids,
+                .capacity = size,
+                .len = 0,
             };
+        }
+
+        pub fn deinit(self: *const @This(), allocator: mem.Allocator) void {
+            if (self.names) |names| {
+                for (0..self.len) |i| {
+                    allocator.free(names[i]);
+                }
+                allocator.free(names);
+            }
+            allocator.free(self.values);
+            allocator.free(self.oids);
         }
 
         // Populates the State from the RowDescription payload
         // We already read the number_of_columns from data, so we pass it in here
         // We also already know that number_of_columns fits within our arrays
-        pub fn from(self: *State, number_of_columns: u16, data: []const u8, allocator: ?mem.Allocator) !void {
+        pub fn from(self: *@This(), allocator: mem.Allocator, number_of_columns: u16, data: []const u8) !void {
             // skip the column count, which we already know as number_of_columns
             var pos: usize = 2;
 
+            if (self.names == null) {
+                self.names = try allocator.alloc([]const u8, self.capacity);
+                errdefer allocator.free(self.names);
+            }
+
+            self.len = number_of_columns;
             for (0..number_of_columns) |i| {
                 const end_pos = std.mem.indexOfScalarPos(u8, data, pos, 0) orelse return error.InvalidDataRow;
                 if (data.len < (end_pos + 19)) {
                     return error.InvalidDataRow;
                 }
-                if (allocator) |a| {
-                    self.names[i] = try a.dupe(u8, data[pos..end_pos]);
-                }
+                self.names.?[i] = try allocator.dupe(u8, data[pos..end_pos]);
 
                 // skip the name null terminator (1)
                 // skip the table object_id this table belongs to (4)
@@ -207,12 +226,6 @@ pub const Result = struct {
                 pos += 8;
             }
         }
-
-        pub fn deinit(self: State, allocator: mem.Allocator) void {
-            allocator.free(self.names);
-            allocator.free(self.values);
-            allocator.free(self.oids);
-        }
     };
 };
 
@@ -221,13 +234,11 @@ pub const RowUnsafe = RowT(.unsafe);
 
 pub fn RowT(comptime fail_mode: lib.FailMode) type {
     return struct {
-        _result: *Result,
+        result: *Result,
         oids: []i32,
         values: []Result.State.Value,
 
-        const Self = @This();
-
-        pub fn get(self: *const Self, comptime T: type, col: usize) if (fail_mode == .safe) lib.TypeError!T else T {
+        pub fn get(self: *const @This(), comptime T: type, col: usize) if (fail_mode == .safe) lib.TypeError!T else T {
             const value = self.values[col];
             const TT = switch (@typeInfo(T)) {
                 .optional => |opt| {
@@ -263,8 +274,8 @@ pub fn RowT(comptime fail_mode: lib.FailMode) type {
             return types.decodeScalar(fail_mode, TT, value.data, self.oids[col]);
         }
 
-        pub fn getCol(self: *const Self, comptime T: type, name: []const u8) if (fail_mode == .safe) lib.TypeError!T else T {
-            const col = self._result.columnIndex(name);
+        pub fn getCol(self: *@This(), comptime T: type, name: []const u8) if (fail_mode == .safe) lib.TypeError!T else T {
+            const col = self.result.columnIndex(name);
             try lib.verifyColumnName(fail_mode, name, col != null);
             return self.get(T, col.?);
         }
@@ -316,11 +327,11 @@ pub fn QueryRowT(comptime fail_mode: lib.FailMode) type {
 
         const Self = @This();
 
-        pub fn get(self: *const Self, comptime T: type, col: usize) if (fail_mode == .safe) lib.TypeError!T else T {
+        pub fn get(self: *@This(), comptime T: type, col: usize) if (fail_mode == .safe) lib.TypeError!T else T {
             return self.row.get(T, col);
         }
 
-        pub fn deinit(self: *Self) !void {
+        pub fn deinit(self: *@This()) !void {
             // this is unfortunate
             try self.result.drain();
             self.result.deinit();
@@ -337,10 +348,10 @@ pub fn IteratorUnsafe(comptime T: type) type {
 pub fn IteratorT(comptime fail_mode: lib.FailMode, comptime T: type) type {
     return struct {
         is_null: bool,
-        _len: usize,
-        _pos: usize,
-        _data: []const u8,
-        _decoder: *const fn (data: []const u8) ItemType(),
+        len: usize,
+        pos: usize,
+        data: []const u8,
+        decoder: *const fn (data: []const u8) ItemType(),
 
         fn ItemType() type {
             return switch (@typeInfo(T)) {
@@ -351,17 +362,13 @@ pub fn IteratorT(comptime fail_mode: lib.FailMode, comptime T: type) type {
 
         const Self = @This();
 
-        pub fn len(self: Self) usize {
-            return self._len;
-        }
-
         fn asNull() Self {
             return .{
                 .is_null = true,
-                ._len = 0,
-                ._pos = 0,
-                ._data = &.{},
-                ._decoder = struct {
+                .len = 0,
+                .pos = 0,
+                .data = &.{},
+                .decoder = struct {
                     fn noop(_: []const u8) ItemType() {
                         unreachable;
                     }
@@ -462,10 +469,10 @@ pub fn IteratorT(comptime fail_mode: lib.FailMode, comptime T: type) type {
                 // we have an empty array
                 return .{
                     .is_null = false,
-                    ._len = 0,
-                    ._pos = 0,
-                    ._data = &[_]u8{},
-                    ._decoder = decoder,
+                    .len = 0,
+                    .pos = 0,
+                    .data = &[_]u8{},
+                    .decoder = decoder,
                 };
             }
 
@@ -483,32 +490,32 @@ pub fn IteratorT(comptime fail_mode: lib.FailMode, comptime T: type) type {
 
             return .{
                 .is_null = false,
-                ._len = @intCast(l),
-                ._pos = 0,
-                ._data = data[20..],
-                ._decoder = decoder,
+                .len = @intCast(l),
+                .pos = 0,
+                .data = data[20..],
+                .decoder = decoder,
             };
         }
 
-        pub fn pgzMoveOwner(self: Self, allocator: mem.Allocator) !Self {
+        pub fn pgzMoveOwner(self: *@This(), allocator: mem.Allocator) !Self {
             return .{
                 .is_null = false,
-                ._len = self._len,
-                ._pos = self._pos,
-                ._data = try allocator.dupe(u8, self._data),
-                ._decoder = self._decoder,
+                .len = self.len,
+                .pos = self.pos,
+                .data = try allocator.dupe(u8, self.data),
+                .decoder = self.decoder,
             };
         }
 
         // Should only be called if the Iterator was created with row.to(...)
         // or a result mapper AND an explicit allocator was given
-        pub fn deinit(self: *const Self, allocator: mem.Allocator) void {
-            allocator.free(self._data);
+        pub fn deinit(self: *@This(), allocator: mem.Allocator) void {
+            allocator.free(self.data);
         }
 
-        pub fn next(self: *Self) ?T {
-            const pos = self._pos;
-            const data = self._data;
+        pub fn next(self: *@This()) ?T {
+            const pos = self.pos;
+            const data = self.data;
             if (pos == data.len) {
                 return null;
             }
@@ -520,26 +527,26 @@ pub fn IteratorT(comptime fail_mode: lib.FailMode, comptime T: type) type {
             const data_end = len_end + @as(usize, @intCast(value_len));
             lib.assert(data.len >= data_end);
 
-            self._pos = data_end;
-            return self._decoder(data[len_end..data_end]);
+            self.pos = data_end;
+            return self.decoder(data[len_end..data_end]);
         }
 
-        pub fn alloc(self: *const Self, allocator: mem.Allocator) ![]T {
-            const into = try allocator.alloc(T, self._len);
+        pub fn alloc(self: *@This(), allocator: mem.Allocator) ![]T {
+            const into = try allocator.alloc(T, self.len);
             try self.fillAlloc(true, into, allocator);
             return into;
         }
 
-        pub fn fill(self: *const Self, into: []T) void {
+        pub fn fill(self: *@This(), into: []T) void {
             self.fillAlloc(false, into, undefined) catch unreachable;
         }
 
-        fn fillAlloc(self: *const Self, comptime should_dupe: bool, into: []T, allocator: mem.Allocator) !void {
-            const data = self._data;
-            const decoder = self._decoder;
+        fn fillAlloc(self: *@This(), comptime should_dupe: bool, into: []T, allocator: mem.Allocator) !void {
+            const data = self.data;
+            const decoder = self.decoder;
 
             var pos: usize = 0;
-            const limit = @min(into.len, self._len);
+            const limit = @min(into.len, self.len);
             for (0..limit) |i| {
                 // TODO: for fixed length types, we don't need to decode the length
                 const len_end = pos + 4;
@@ -583,7 +590,7 @@ pub fn RecordT(comptime fail_mode: lib.FailMode) type {
 
         const Self = @This();
 
-        pub fn next(self: *Self, comptime T: type) if (fail_mode == .safe) lib.TypeError!T else T {
+        pub fn next(self: *@This(), comptime T: type) if (fail_mode == .safe) lib.TypeError!T else T {
             var data = self.data;
 
             // at least 4 bytes for the type and 4 bytes for the lenght
@@ -617,6 +624,7 @@ pub fn RecordT(comptime fail_mode: lib.FailMode) type {
 const t = lib.testing;
 
 test "Result: ints" {
+    const allocator = std.testing.allocator;
     var c = try t.connect(.{});
     defer c.deinit();
     const sql = "select $1::smallint, $2::int, $3::bigint";
@@ -624,7 +632,7 @@ test "Result: ints" {
     {
         // int max
         var result = try c.query(sql, .{ @as(i16, 32767), @as(i32, 2147483647), @as(i64, 9223372036854775807) });
-        defer result.deinit();
+        defer result.deinit(allocator);
         const row = (try result.nextUnsafe()).?;
         try t.expectEqual(32767, row.get(i16, 0));
         try t.expectEqual(2147483647, row.get(i32, 1));
@@ -640,7 +648,7 @@ test "Result: ints" {
     {
         // int min
         var result = try c.query(sql, .{ @as(i16, -32768), @as(i32, -2147483648), @as(i64, -9223372036854775808) });
-        defer result.deinit();
+        defer result.deinit(allocator);
         const row = (try result.nextUnsafe()).?;
         try t.expectEqual(-32768, row.get(i16, 0));
         try t.expectEqual(-2147483648, row.get(i32, 1));
@@ -651,7 +659,7 @@ test "Result: ints" {
     {
         // int null
         var result = try c.query(sql, .{ null, null, null });
-        defer result.deinit();
+        defer result.deinit(allocator);
         defer result.drain() catch unreachable;
         const row = (try result.nextUnsafe()).?;
         try t.expectEqual(null, row.get(?i16, 0));
@@ -662,7 +670,7 @@ test "Result: ints" {
     {
         // uint within limit
         var result = try c.query(sql, .{ @as(u16, 32767), @as(u32, 2147483647), @as(u64, 9223372036854775807) });
-        defer result.deinit();
+        defer result.deinit(allocator);
         const row = (try result.nextUnsafe()).?;
         try t.expectEqual(32767, row.get(i16, 0));
         try t.expectEqual(2147483647, row.get(i32, 1));
@@ -685,6 +693,7 @@ test "Result: ints" {
 }
 
 test "Result: floats" {
+    const allocator = std.testing.allocator;
     var c = try t.connect(.{});
     defer c.deinit();
     const sql = "select $1::float4, $2::float8";
@@ -692,7 +701,7 @@ test "Result: floats" {
     {
         // positive float
         var result = try c.query(sql, .{ @as(f32, 1.23456), @as(f64, 1093.229183) });
-        defer result.deinit();
+        defer result.deinit(allocator);
         const row = (try result.nextUnsafe()).?;
         try t.expectEqual(1.23456, row.get(f32, 0));
         try t.expectEqual(1093.229183, row.get(f64, 1));
@@ -706,7 +715,7 @@ test "Result: floats" {
     {
         // negative float
         var result = try c.query(sql, .{ @as(f32, -392.31), @as(f64, -99991.99992) });
-        defer result.deinit();
+        defer result.deinit(allocator);
         const row = (try result.nextUnsafe()).?;
         try t.expectEqual(-392.31, row.get(f32, 0));
         try t.expectEqual(-99991.99992, row.get(f64, 1));
@@ -716,7 +725,7 @@ test "Result: floats" {
     {
         // null float
         var result = try c.query(sql, .{ null, null });
-        defer result.deinit();
+        defer result.deinit(allocator);
         const row = (try result.nextUnsafe()).?;
         try t.expectEqual(null, row.get(?f32, 0));
         try t.expectEqual(null, row.get(?f64, 1));
@@ -725,6 +734,7 @@ test "Result: floats" {
 }
 
 test "Result: bool" {
+    const allocator = std.testing.allocator;
     var c = try t.connect(.{});
     defer c.deinit();
     const sql = "select $1::bool";
@@ -732,7 +742,7 @@ test "Result: bool" {
     {
         // true
         var result = try c.query(sql, .{true});
-        defer result.deinit();
+        defer result.deinit(allocator);
         defer result.drain() catch unreachable;
         const row = (try result.nextUnsafe()).?;
         try t.expectEqual(true, row.get(bool, 0));
@@ -743,7 +753,7 @@ test "Result: bool" {
     {
         // false
         var result = try c.query(sql, .{false});
-        defer result.deinit();
+        defer result.deinit(allocator);
         defer result.drain() catch unreachable;
         const row = (try result.nextUnsafe()).?;
         try t.expectEqual(false, row.get(bool, 0));
@@ -754,7 +764,7 @@ test "Result: bool" {
     {
         // null
         var result = try c.query(sql, .{null});
-        defer result.deinit();
+        defer result.deinit(allocator);
         defer result.drain() catch unreachable;
         const row = (try result.nextUnsafe()).?;
         try t.expectEqual(null, row.get(?bool, 0));
@@ -763,6 +773,7 @@ test "Result: bool" {
 }
 
 test "Result: text and bytea" {
+    const allocator = std.testing.allocator;
     var c = try t.connect(.{});
     defer c.deinit();
     const sql = "select $1::text, $2::bytea";
@@ -770,7 +781,7 @@ test "Result: text and bytea" {
     {
         // empty
         var result = try c.query(sql, .{ "", "" });
-        defer result.deinit();
+        defer result.deinit(allocator);
         const row = (try result.nextUnsafe()).?;
         try t.expectString("", row.get([]u8, 0));
         try t.expectString("", row.get(?[]u8, 0).?);
@@ -782,7 +793,7 @@ test "Result: text and bytea" {
     {
         // not empty
         var result = try c.query(sql, .{ "it's over 9000!!!", "i will Not fear" });
-        defer result.deinit();
+        defer result.deinit(allocator);
         const row = (try result.nextUnsafe()).?;
         try t.expectString("it's over 9000!!!", row.get([]u8, 0));
         try t.expectString("it's over 9000!!!", row.get(?[]const u8, 0).?);
@@ -794,7 +805,7 @@ test "Result: text and bytea" {
     {
         // as an array
         var result = try c.query(sql, .{ [_]u8{ 'a', 'c', 'b' }, [_]u8{ 'z', 'z', '3' } });
-        defer result.deinit();
+        defer result.deinit(allocator);
         const row = (try result.nextUnsafe()).?;
         try t.expectString("acb", row.get([]const u8, 0));
         try t.expectString("acb", row.get(?[]u8, 0).?);
@@ -810,7 +821,7 @@ test "Result: text and bytea" {
         @memcpy(s1, "Leto");
 
         var result = try c.query(sql, .{ s1, constString() });
-        defer result.deinit();
+        defer result.deinit(allocator);
         const row = (try result.nextUnsafe()).?;
         try t.expectString("Leto", row.get([]u8, 0));
         try t.expectString("Leto", row.get(?[]u8, 0).?);
@@ -822,7 +833,7 @@ test "Result: text and bytea" {
     {
         // null
         var result = try c.query(sql, .{ null, null });
-        defer result.deinit();
+        defer result.deinit(allocator);
         const row = (try result.nextUnsafe()).?;
         try t.expectEqual(null, row.get(?[]u8, 0));
         try t.expectEqual(null, row.get(?[]u8, 1));
@@ -835,6 +846,7 @@ fn constString() []const u8 {
 }
 
 test "Result: optional" {
+    const allocator = std.testing.allocator;
     var c = try t.connect(.{});
     defer c.deinit();
     const sql = "select $1::int, $2::int";
@@ -842,7 +854,7 @@ test "Result: optional" {
     {
         // int max
         var result = try c.query(sql, .{ @as(?i32, 321), @as(?i32, null) });
-        defer result.deinit();
+        defer result.deinit(allocator);
         const row = (try result.nextUnsafe()).?;
         try t.expectEqual(321, row.get(i32, 0));
 
@@ -852,235 +864,13 @@ test "Result: optional" {
     }
 }
 
-test "Result: iterator" {
-    var c = try t.connect(.{});
-    defer c.deinit();
-
-    {
-        // empty row.iterator()
-        var result = try c.query("select $1::int[]", .{[_]i32{}});
-        defer result.deinit();
-        var row = (try result.nextUnsafe()).?;
-
-        var iterator = row.iterator(i32, 0);
-        try t.expectEqual(0, iterator.len());
-
-        try t.expectEqual(null, iterator.next());
-        try t.expectEqual(null, iterator.next());
-
-        const a = try iterator.alloc(t.allocator);
-        try t.expectEqual(0, a.len);
-        try result.drain();
-    }
-
-    {
-        // empty row.get()
-        var result = try c.query("select $1::int[]", .{[_]i32{}});
-        defer result.deinit();
-        var row = (try result.nextUnsafe()).?;
-
-        var iterator = row.get(Iterator(i32), 0);
-        try t.expectEqual(0, iterator.len());
-
-        try t.expectEqual(null, iterator.next());
-        try t.expectEqual(null, iterator.next());
-
-        const a = try iterator.alloc(t.allocator);
-        try t.expectEqual(0, a.len);
-        try result.drain();
-    }
-
-    {
-        // one: row.iterator
-        var result = try c.query("select $1::int[]", .{[_]i32{9}});
-        defer result.deinit();
-        var row = (try result.nextUnsafe()).?;
-
-        var iterator = row.iterator(i32, 0);
-        try t.expectEqual(1, iterator.len());
-
-        try t.expectEqual(9, iterator.next());
-        try t.expectEqual(null, iterator.next());
-
-        const arr = try iterator.alloc(t.allocator);
-        defer t.allocator.free(arr);
-        try t.expectEqual(1, arr.len);
-        try t.expectSlice(i32, &.{9}, arr);
-        try result.drain();
-    }
-
-    {
-        // one: row.get
-        var result = try c.query("select $1::int[]", .{[_]i32{9}});
-        defer result.deinit();
-        var row = (try result.nextUnsafe()).?;
-
-        var iterator = row.get(Iterator(i32), 0);
-        try t.expectEqual(1, iterator.len());
-
-        try t.expectEqual(9, iterator.next());
-        try t.expectEqual(null, iterator.next());
-
-        const arr = try iterator.alloc(t.allocator);
-        defer t.allocator.free(arr);
-        try t.expectEqual(1, arr.len);
-        try t.expectSlice(i32, &.{9}, arr);
-        try result.drain();
-    }
-
-    {
-        // fill
-        var result = try c.query("select $1::int[]", .{[_]i32{ 0, -19 }});
-        defer result.deinit();
-        var row = (try result.nextUnsafe()).?;
-
-        var iterator = row.iterator(i32, 0);
-        try t.expectEqual(2, iterator.len());
-
-        try t.expectEqual(0, iterator.next());
-        try t.expectEqual(-19, iterator.next());
-        try t.expectEqual(null, iterator.next());
-
-        var arr1: [2]i32 = undefined;
-        iterator.fill(&arr1);
-        try t.expectSlice(i32, &.{ 0, -19 }, &arr1);
-        try result.drain();
-
-        // smaller
-        var arr2: [1]i32 = undefined;
-        iterator.fill(&arr2);
-        try t.expectSlice(i32, &.{0}, &arr2);
-        try result.drain();
-    }
-}
-
-test "Result: null iterator" {
-    var c = try t.connect(.{});
-    defer c.deinit();
-
-    {
-        // null int
-        var result = try c.query("select $1::int[]", .{null});
-        defer result.deinit();
-
-        var row = (try result.nextUnsafe()).?;
-
-        var iterator = row.iterator(i32, 0);
-        try t.expectEqual(true, iterator.is_null);
-        try t.expectEqual(null, iterator.next());
-        try result.drain();
-    }
-
-    {
-        // null text
-        var result = try c.query("select $1::text[]", .{null});
-        defer result.deinit();
-
-        var row = (try result.nextUnsafe()).?;
-
-        var iterator = row.iterator([]u8, 0);
-        try t.expectEqual(true, iterator.is_null);
-        try t.expectEqual(null, iterator.next());
-        try result.drain();
-    }
-}
-
-test "Result: int[]" {
-    var c = try t.connect(.{});
-    defer c.deinit();
-    const sql = "select $1::smallint[], $2::int[], $3::bigint[]";
-
-    var result = try c.query(sql, .{ [_]i16{ -303, 9449, 2 }, [_]i32{ -3003, 49493229, 0 }, [_]i64{ 944949338498392, -2 } });
-    defer result.deinit();
-
-    var row = (try result.nextUnsafe()).?;
-
-    const v1 = try row.iterator(i16, 0).alloc(t.allocator);
-    defer t.allocator.free(v1);
-    try t.expectSlice(i16, &.{ -303, 9449, 2 }, v1);
-
-    const v2 = try row.iterator(i32, 1).alloc(t.allocator);
-    defer t.allocator.free(v2);
-    try t.expectSlice(i32, &.{ -3003, 49493229, 0 }, v2);
-
-    const v3 = try row.iterator(i64, 2).alloc(t.allocator);
-    defer t.allocator.free(v3);
-    try t.expectSlice(i64, &.{ 944949338498392, -2 }, v3);
-}
-
-test "Result: float[]" {
-    var c = try t.connect(.{});
-    defer c.deinit();
-    const sql = "select $1::float4[], $2::float8[]";
-
-    var result = try c.query(sql, .{ [_]f32{ 1.1, 0, -384.2 }, [_]f64{ -888585.123322, 0.001 } });
-    defer result.deinit();
-
-    var row = (try result.nextUnsafe()).?;
-
-    const v1 = try row.iterator(f32, 0).alloc(t.allocator);
-    defer t.allocator.free(v1);
-    try t.expectSlice(f32, &.{ 1.1, 0, -384.2 }, v1);
-
-    const v2 = try row.iterator(f64, 1).alloc(t.allocator);
-    defer t.allocator.free(v2);
-    try t.expectSlice(f64, &.{ -888585.123322, 0.001 }, v2);
-}
-
-test "Result: bool[]" {
-    var c = try t.connect(.{});
-    defer c.deinit();
-    const sql = "select $1::bool[]";
-
-    var result = try c.query(sql, .{[_]bool{ true, false, false }});
-    defer result.deinit();
-
-    var row = (try result.nextUnsafe()).?;
-
-    const v1 = try row.iterator(bool, 0).alloc(t.allocator);
-    defer t.allocator.free(v1);
-    try t.expectSlice(bool, &.{ true, false, false }, v1);
-}
-
-test "Result: text[] & bytea[]" {
-    var c = try t.connect(.{});
-    defer c.deinit();
-    const sql = "select $1::text[], $2::bytea[]";
-
-    var arr1 = [_]u8{ 0, 1, 2 };
-    var arr2 = [_]u8{255};
-    var result = try c.query(sql, .{ [_][]const u8{ "over", "9000" }, [_][]u8{ &arr1, &arr2 } });
-    defer result.deinit();
-
-    var row = (try result.nextUnsafe()).?;
-
-    const v1 = try row.iterator([]u8, 0).alloc(t.allocator);
-    defer {
-        t.allocator.free(v1[0]);
-        t.allocator.free(v1[1]);
-        t.allocator.free(v1);
-    }
-    try t.expectString("over", v1[0]);
-    try t.expectString("9000", v1[1]);
-    try t.expectEqual(2, v1.len);
-
-    const v2 = try row.iterator([]const u8, 1).alloc(t.allocator);
-    defer {
-        t.allocator.free(v2[0]);
-        t.allocator.free(v2[1]);
-        t.allocator.free(v2);
-    }
-    try t.expectString(&arr1, v2[0]);
-    try t.expectString(&arr2, v2[1]);
-    try t.expectEqual(2, v2.len);
-}
-
 test "Result: UUID" {
+    const allocator = std.testing.allocator;
     var c = try t.connect(.{});
     defer c.deinit();
     const sql = "select $1::uuid, $2::uuid";
     var result = try c.query(sql, .{ "fcbebf0f-b996-43b9-9818-672bc689cda8", &[_]u8{ 174, 47, 71, 95, 128, 112, 65, 183, 186, 51, 134, 187, 168, 137, 123, 222 } });
-    defer result.deinit();
+    defer result.deinit(allocator);
 
     const row = (try result.nextUnsafe()).?;
     try t.expectSlice(u8, &.{ 252, 190, 191, 15, 185, 150, 67, 185, 152, 24, 103, 43, 198, 137, 205, 168 }, row.get([]u8, 0));
@@ -1088,36 +878,26 @@ test "Result: UUID" {
 }
 
 test "Result: lsn" {
+    const allocator = std.testing.allocator;
     var c = try t.connect(.{});
     defer c.deinit();
     const sql = "select $1::pg_lsn + 1";
     var result = try c.query(sql, .{32788447688});
-    defer result.deinit();
+    defer result.deinit(allocator);
 
     const row = (try result.nextUnsafe()).?;
     try t.expectEqual(32788447689, row.get(i64, 0));
 }
 
-test "Result: mutable []u8" {
-    var c = try t.connect(.{});
-    defer c.deinit();
-    const sql = "select 'Leto'";
-    var row = (try c.rowUnsafe(sql, .{})).?;
-    defer row.deinit() catch {};
-
-    var name = row.get([]u8, 0);
-    name[3] = '!';
-    try t.expectString("Let!", name);
-}
-
 test "Result: safe" {
+    const allocator = std.testing.allocator;
     var c = try t.connect(.{});
     defer c.deinit();
     const sql = "select $1::int, $2::int";
 
     {
         var result = try c.query(sql, .{ @as(?i32, 321), @as(?i32, null) });
-        defer result.deinit();
+        defer result.deinit(allocator);
         const row = (try result.next()).?;
         try t.expectEqual(321, try row.get(i32, 0));
         try t.expectEqual(error.InvalidType, row.get(bool, 0));

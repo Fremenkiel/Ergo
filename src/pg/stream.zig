@@ -24,10 +24,26 @@ const TLSStream = struct {
     io: Io,
 
     pub fn connect(io: Io, allocator: Allocator, opts: Conn.Opts, ctx_: ?*openssl.SSL_CTX) !Stream {
-        const plain = try PlainStream.connect(io, allocator, opts, null);
-        errdefer plain.close();
+        const host = opts.host orelse DEFAULT_HOST;
+        const is_unix = host.len > 0 and host[0] == '/';
 
-        const stream = plain.stream;
+        const stream = try blk: {
+            if (is_unix) {
+                if (comptime Io.net.has_unix_sockets == false or std.posix.AF == void) {
+                    return error.UnixPathNotSupported;
+                }
+                const addr: Io.net.UnixAddress = try .init(host);
+                break :blk addr.connect(io);
+            }
+            const port = opts.port orelse 5432;
+            const hostname: Io.net.HostName = try .init(host);
+            break :blk hostname.connect(io, port, .{ .mode = .stream });
+        };
+        errdefer stream.close(io);
+
+        if (is_unix == false) {
+            try setKeepalive(stream.socket.handle, opts);
+        }
 
         var ssl: ?*openssl.SSL = null;
         if (ctx_) |ctx| {
@@ -42,27 +58,25 @@ const TLSStream = struct {
             ssl = openssl.SSL_new(ctx) orelse return error.SSLNewFailed;
             errdefer openssl.SSL_free(ssl);
 
-            if (opts.host) |host| {
-                if (isHostName(host)) {
-                    // don't send this for an ip address
-                    var owned = false;
-                    const h = opts._hostz orelse blk: {
-                        owned = true;
-                        break :blk try allocator.dupeZ(u8, host);
-                    };
+            if (isHostName(host)) {
+                // don't send this for an ip address
+                var owned = false;
+                const h = opts.hostz orelse blk: {
+                    owned = true;
+                    break :blk try allocator.dupeZ(u8, host);
+                };
 
-                    defer if (owned) {
-                        allocator.free(h);
-                    };
+                defer if (owned) {
+                    allocator.free(h);
+                };
 
-                    if (openssl.SSL_set_tlsext_host_name(ssl, h.ptr) != 1) {
-                        return error.SSLHostNameFailed;
-                    }
+                if (openssl.SSL_set_tlsext_host_name(ssl, h.ptr) != 1) {
+                    return error.SSLHostNameFailed;
                 }
-                switch (opts.tls) {
-                    .verify_full => openssl.SSL_set_verify(ssl, openssl.SSL_VERIFY_PEER, null),
-                    else => {},
-                }
+            }
+            switch (opts.tls) {
+                .verify_full => openssl.SSL_set_verify(ssl, openssl.SSL_VERIFY_PEER, null),
+                else => {},
             }
 
             if (openssl.SSL_set_fd(ssl, if (@import("builtin").os.tag == .windows) @intCast(@intFromPtr(stream.socket.handle)) else stream.socket.handle) != 1) {
@@ -148,29 +162,31 @@ const TLSStream = struct {
     }
 
     pub fn readWithTimeout(self: *@This(), buffer: []u8, timeout_ms: i32) !usize {
-        var fds = [_]std.posix.pollfd{
-            .{ .fd = self.stream.socket.handle, .events = std.posix.POLL.IN, .revents = 0 },
-            .{ .fd = self.cancel_pipe[0], .events = std.posix.POLL.IN, .revents = 0 },
-        };
-
-        const ready_count = try posix.poll(&fds, timeout_ms);
-
-        if (ready_count == 0) {
-            return error.Timeout;
-        }
-
-        if ((fds[1].revents & posix.POLL.IN) != 0) {
-            var dummy: [1]u8 = undefined;
-            _ = try posix.read(self.cancel_pipe[0], &dummy);
-
-            return error.Cancelled;
-        }
-
-        if ((fds[0].revents & posix.POLL.IN) != 0) {
-            return try posix.read(self.stream.socket.handle, buffer);
-        }
-
-        return error.UnexpectedPollEvent;
+        _ = timeout_ms;
+        return self.read(buffer);
+        // var fds = [_]std.posix.pollfd{
+        //     .{ .fd = self.stream.socket.handle, .events = std.posix.POLL.IN, .revents = 0 },
+        //     .{ .fd = self.cancel_pipe[0], .events = std.posix.POLL.IN, .revents = 0 },
+        // };
+        //
+        // const ready_count = try posix.poll(&fds, timeout_ms);
+        //
+        // if (ready_count == 0) {
+        //     return error.Timeout;
+        // }
+        //
+        // if ((fds[1].revents & posix.POLL.IN) != 0) {
+        //     var dummy: [1]u8 = undefined;
+        //     _ = try posix.read(self.cancel_pipe[0], &dummy);
+        //
+        //     return error.Cancelled;
+        // }
+        //
+        // if ((fds[0].revents & posix.POLL.IN) != 0) {
+        //     return self.read(buffer);
+        // }
+        //
+        // return error.UnexpectedPollEvent;
     }
 };
 
@@ -236,29 +252,31 @@ const PlainStream = struct {
     }
 
     pub fn readWithTimeout(self: *@This(), buffer: []u8, timeout_ms: i32) !usize {
-        var fds = [_]std.posix.pollfd{
-            .{ .fd = self.stream.socket.handle, .events = std.posix.POLL.IN, .revents = 0 },
-            .{ .fd = self.cancel_pipe[0], .events = std.posix.POLL.IN, .revents = 0 },
-        };
-
-        const ready_count = try posix.poll(&fds, timeout_ms);
-
-        if (ready_count == 0) {
-            return error.Timeout;
-        }
-
-        if ((fds[1].revents & posix.POLL.IN) != 0) {
-            var dummy: [1]u8 = undefined;
-            _ = try posix.read(self.cancel_pipe[0], &dummy);
-
-            return error.Cancelled;
-        }
-
-        if ((fds[0].revents & posix.POLL.IN) != 0) {
-            return try posix.read(self.stream.socket.handle, buffer);
-        }
-
-        return error.UnexpectedPollEvent;
+        _ = timeout_ms;
+            return self.read(buffer);
+        // var fds = [_]std.posix.pollfd{
+        //     .{ .fd = self.stream.socket.handle, .events = std.posix.POLL.IN, .revents = 0 },
+        //     .{ .fd = self.cancel_pipe[0], .events = std.posix.POLL.IN, .revents = 0 },
+        // };
+        //
+        // const ready_count = try posix.poll(&fds, timeout_ms);
+        //
+        // if (ready_count == 0) {
+        //     return error.Timeout;
+        // }
+        //
+        // if ((fds[1].revents & posix.POLL.IN) != 0) {
+        //     var dummy: [1]u8 = undefined;
+        //     _ = try posix.read(self.cancel_pipe[0], &dummy);
+        //
+        //     return error.Cancelled;
+        // }
+        //
+        // if ((fds[0].revents & posix.POLL.IN) != 0) {
+        //     return try posix.read(self.stream.socket.handle, buffer);
+        // }
+        //
+        // return error.UnexpectedPollEvent;
     }
 };
 

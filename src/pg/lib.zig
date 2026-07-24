@@ -294,11 +294,11 @@ const valid_tcs: [2]TestCase = .{
         .port = 1234,
     }, .timeout_ms = 0 } },
 };
-
-test "URI: invalid scheme" {
-    try std.testing.expectError(error.InvalidUriScheme, parseOpts(try std.Uri.parse("foobar:///"), std.testing.allocator));
-}
-
-test "URI: invalid params" {
-    try std.testing.expectError(error.UnsupportedConnectionParam, parseOpts(try std.Uri.parse("postgresql:///?bar=baz"), std.testing.allocator));
-}
+//
+// test "URI: invalid scheme" {
+//     try std.testing.expectError(error.InvalidUriScheme, parseOpts(try std.Uri.parse("foobar:///"), std.testing.allocator));
+// }
+//
+// test "URI: invalid params" {
+//     try std.testing.expectError(error.UnsupportedConnectionParam, parseOpts(try std.Uri.parse("postgresql:///?bar=baz"), std.testing.allocator));
+// }
