@@ -24,10 +24,6 @@ const result = @import("result.zig");
 pub const Row = result.Row;
 pub const RowUnsafe = result.RowUnsafe;
 pub const Result = result.Result;
-pub const Iterator = result.Iterator;
-pub const IteratorUnsafe = result.IteratorUnsafe;
-pub const QueryRow = result.QueryRow;
-pub const QueryRowUnsafe = result.QueryRowUnsafe;
 
 const reader = @import("reader.zig");
 pub const Reader = reader.Reader;
@@ -187,17 +183,6 @@ pub fn parseOpts(uri: std.Uri, allocator: std.mem.Allocator) !ParsedOpts {
 }
 
 pub fn initializeSSLContext(config: Conn.Opts.TLS) !*SSLCtx {
-    // OpenSSL documentation says these are implicitly called, and only need to
-    // be called if you're doing something special
-
-    // if (openssl.OPENSSL_init_ssl(openssl.OPENSSL_INIT_LOAD_SSL_STRINGS | openssl.OPENSSL_INIT_LOAD_CRYPTO_STRINGS, null) != 1) {
-    //     return error.OpenSSLInitSslFailed;
-    // }
-
-    // if (openssl.OPENSSL_init_crypto(openssl.OPENSSL_INIT_ADD_ALL_CIPHERS | openssl.OPENSSL_INIT_ADD_ALL_DIGESTS | openssl.OPENSSL_INIT_LOAD_CRYPTO_STRINGS, null) != 1) {
-    //     return error.OpenSSLInitCryptoFailed;
-    // }
-
     const ctx = openssl.SSL_CTX_new(openssl.TLS_client_method()) orelse {
         return error.SSLContextNew;
     };
@@ -294,11 +279,11 @@ const valid_tcs: [2]TestCase = .{
         .port = 1234,
     }, .timeout_ms = 0 } },
 };
-//
-// test "URI: invalid scheme" {
-//     try std.testing.expectError(error.InvalidUriScheme, parseOpts(try std.Uri.parse("foobar:///"), std.testing.allocator));
-// }
-//
-// test "URI: invalid params" {
-//     try std.testing.expectError(error.UnsupportedConnectionParam, parseOpts(try std.Uri.parse("postgresql:///?bar=baz"), std.testing.allocator));
-// }
+
+test "URI: invalid scheme" {
+    try std.testing.expectError(error.InvalidUriScheme, parseOpts(try std.Uri.parse("foobar:///"), std.testing.allocator));
+}
+
+test "URI: invalid params" {
+    try std.testing.expectError(error.UnsupportedConnectionParam, parseOpts(try std.Uri.parse("postgresql:///?bar=baz"), std.testing.allocator));
+}

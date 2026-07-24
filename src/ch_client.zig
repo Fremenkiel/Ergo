@@ -686,7 +686,7 @@ test "startInsert ensure correct query info" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
 
-    const user_env_key = if (builtin.os.tag == .windows) "USERNAME" else "USER";
+    const user_env_key = "USER";
     const os_user = try std.testing.environ.getAlloc(allocator, user_env_key);
     defer allocator.free(os_user);
 
@@ -861,7 +861,7 @@ test "writeLog" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
 
-    const user_env_key = if (builtin.os.tag == .windows) "USERNAME" else "USER";
+    const user_env_key = "USER";
     const os_user = try std.testing.environ.getAlloc(allocator, user_env_key);
     defer allocator.free(os_user);
 
@@ -986,7 +986,7 @@ test "insertRow ensure correct insertion" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
 
-    const user_env_key = if (builtin.os.tag == .windows) "USERNAME" else "USER";
+    const user_env_key = "USER";
     const os_user = try std.testing.environ.getAlloc(allocator, user_env_key);
     defer allocator.free(os_user);
 

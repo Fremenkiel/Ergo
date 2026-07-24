@@ -1,5 +1,5 @@
 const std = @import("std");
-const proto = @import("_proto.zig");
+const proto = @import("proto.zig");
 
 const StartupMessage = @This();
 

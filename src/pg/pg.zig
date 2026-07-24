@@ -7,8 +7,6 @@ pub const Reader = lib.Reader;
 pub const Pool = lib.Pool;
 pub const Stmt = lib.Stmt;
 pub const Result = lib.Result;
-pub const Iterator = lib.Iterator;
-pub const QueryRow = lib.QueryRow;
 pub const Binary = lib.Binary;
 
 pub const types = lib.types;

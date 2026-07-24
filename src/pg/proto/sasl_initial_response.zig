@@ -1,5 +1,5 @@
 const std = @import("std");
-const proto = @import("_proto.zig");
+const proto = @import("proto.zig");
 
 //Client sends this based on getting a request.sasl
 const SASLInitialResponse = @This();

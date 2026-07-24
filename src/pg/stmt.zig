@@ -161,6 +161,8 @@ pub const Stmt = struct {
                 return conn.unexpectedDBMessage();
             }
 
+            const data = msg.data;
+            param_count = std.mem.readInt(u16, data[0..2], .big);
             if (self.name.len > 0) {
                 self.result_state = try Result.State.init(self.allocator, param_count);
             } else {
@@ -170,9 +172,6 @@ pub const Stmt = struct {
                 }
                 self.param_oids = conn.param_oids;
             }
-            const data = msg.data;
-            param_count = std.mem.readInt(u16, data[0..2], .big);
-            self.param_oids = try self.allocator.alloc(i32, param_count);
 
             var pos: usize = 2;
             for (0..param_count) |i| {
@@ -335,9 +334,6 @@ pub const Stmt = struct {
         const state = self.result_state;
         const column_count = self.column_count;
 
-        // Put result on the heap largely for the QueryRow (created via the
-        // conn.row(...) helper). This allows QueryRow.result and QueryRow.row.result
-        // to reference the result, which isn't otherwise owned.
         const result = try self.allocator.create(Result);
         result.* = .{
             .conn = conn,

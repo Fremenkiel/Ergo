@@ -1,5 +1,5 @@
 const std = @import("std");
-const proto = @import("_proto.zig");
+const proto = @import("proto.zig");
 const Reader = proto.Reader;
 
 // The server making an authentication request to the client. This is in response

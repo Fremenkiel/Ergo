@@ -1,5 +1,5 @@
 const std = @import("std");
-const proto = @import("_proto.zig");
+const proto = @import("proto.zig");
 const Reader = proto.Reader;
 
 // #3 - Client finalizes with this

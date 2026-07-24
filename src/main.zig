@@ -129,7 +129,7 @@ pub fn main(init: std.process.Init) !void {
     var options = try parseArgs(allocator, args[1..]);
     defer options.deinit(allocator);
 
-    const user_env_key = if (builtin.os.tag == .windows) "USERNAME" else "USER";
+    const user_env_key = "USER";
     const os_user = init.environ_map.get(user_env_key);
 
     // used for running test in child process

@@ -5,8 +5,6 @@ const log = lib.log;
 const Conn = lib.Conn;
 const Result = lib.Result;
 const SSLCtx = lib.SSLCtx;
-const QueryRow = lib.QueryRow;
-const QueryRowUnsafe = lib.QueryRowUnsafe;
 
 const Thread = std.Thread;
 const Allocator = std.mem.Allocator;
@@ -91,18 +89,18 @@ pub const Pool = struct {
             .allocator = allocator,
             .available = connect_on_init_count,
             .reconnector = Reconnector.init(pool),
-            .timeout_ms = @as(i32, @intCast(opts.timeout_ms)) * std.time.ns_per_ms,
+            .timeout_ms = opts.timeout_ms,
         };
 
         var opened_connections: usize = 0;
         errdefer {
             for (0..opened_connections) |i| {
-                conns[i].deinit();
+                pool.conns[i].deinit();
             }
         }
 
         for (0..connect_on_init_count) |i| {
-            conns[i] = try newConnection(pool, true);
+            pool.conns[i] = try newConnection(pool, true);
             opened_connections += 1;
         }
 
@@ -122,13 +120,29 @@ pub const Pool = struct {
             conn.deinit();
             allocator.destroy(conn);
         }
+        allocator.free(self.conns);
+
+        if (self.opts.connect.host) |host| {
+            self.allocator.free(host);
+        }
+
+        if (self.opts.auth.database) |database| {
+            self.allocator.free(database);
+        }
+        if (self.opts.auth.password) |password| {
+            self.allocator.free(password);
+        }
+        self.allocator.free(self.opts.auth.username);
+
+
         lib.freeSSLContext(self.ssl_ctx);
+        self.allocator.destroy(self);
     }
 
     pub fn acquire(self: *Pool) !*Conn {
         const conns = self.conns;
         const io = self.io;
-        const deadline = @as(i64, @intCast(self.timeout_ms));
+        const deadline = @as(i64, @intCast(self.timeout_ms)) * std.time.ns_per_ms;
         const start = std.Io.Timestamp.now(io, .awake);
 
         try self.mutex.lock(io);
@@ -325,95 +339,95 @@ fn newConnection(pool: *Pool, log_failure: bool) !*Conn {
 }
 
 const t = lib.testing;
-// test "Pool" {
-//     var pool = try Pool.init(t.io, t.allocator, .{
-//         .size = 2,
-//         .auth = t.authOpts(.{}),
-//         .connect_on_init_count = 1,
-//     });
-//     defer pool.deinit();
-//
-//     {
-//         const c1 = try pool.acquire();
-//         defer pool.release(c1);
-//         _ = try c1.exec(
-//             \\ drop table if exists pool_test;
-//             \\ create table pool_test (id int not null)
-//         , .{});
-//     }
-//
-//     const t1 = try std.Thread.spawn(.{}, testPool, .{pool});
-//     const t2 = try std.Thread.spawn(.{}, testPool, .{pool});
-//     const t3 = try std.Thread.spawn(.{}, testPool, .{pool});
-//
-//     t1.join();
-//     t2.join();
-//     t3.join();
-//
-//     {
-//         const c1 = try pool.acquire();
-//         defer c1.release();
-//
-//         const affected = try c1.exec("delete from pool_test", .{});
-//         try t.expectEqual(1500, affected.?);
-//     }
-// }
-//
-// test "Pool: Release" {
-//     var pool = try Pool.init(t.io, t.allocator, .{
-//         .size = 2,
-//         .auth = .{
-//             .database = "postgres",
-//             .username = "postgres",
-//             .password = "postgres",
-//         },
-//     });
-//     defer pool.deinit();
-//
-//     const c1 = try pool.acquire();
-//     c1.state = .query;
-//     pool.release(c1);
-// }
-//
-// test "Pool: init owns its connection strings" {
-//     // Heap-allocate the auth strings and free them right after init to prove the
-//     // pool kept its own copies and doesn't depend on the caller's `opts`.
-//     const username = try t.allocator.dupe(u8, "postgres");
-//     const password = try t.allocator.dupe(u8, "postgres");
-//     const database = try t.allocator.dupe(u8, "postgres");
-//     const host = try t.allocator.dupe(u8, "127.0.0.1");
-//
-//     var pool = try Pool.init(t.io, t.allocator, .{
-//         .size = 2,
-//         .auth = .{ .username = username, .password = password, .database = database },
-//         .connect = .{ .host = host },
-//     });
-//     defer pool.deinit();
-//
-//     t.allocator.free(username);
-//     t.allocator.free(password);
-//     t.allocator.free(database);
-//     t.allocator.free(host);
-//
-//     try forceReconnect(pool);
-// }
-//
-// fn testPool(p: *Pool) void {
-//     for (0..500) |i| {
-//         const conn = p.acquire() catch unreachable;
-//         _ = conn.exec("insert into pool_test (id) values ($1)", .{i}) catch unreachable;
-//         conn.release();
-//     }
-// }
-//
-// // forces release() to discard the connection and open a fresh one, exercising
-// // reconnect with the pool's stored auth strings.
-// fn forceReconnect(pool: *Pool) !void {
-//     const c1 = try pool.acquire();
-//     c1.state = .query;
-//     pool.release(c1);
-//
-//     const c2 = try pool.acquire();
-//     defer pool.release(c2);
-//     _ = try c2.exec("select 1", .{});
-// }
+test "Pool" {
+    var pool = try Pool.init(t.io, t.allocator, .{
+        .size = 2,
+        .auth = t.authOpts(.{}),
+        .connect_on_init_count = 1,
+    });
+    defer pool.deinit();
+
+    {
+        const c1 = try pool.acquire();
+        defer pool.release(c1);
+        _ = try c1.exec(
+            \\ drop table if exists pool_test;
+            \\ create table pool_test (id int not null)
+        , .{});
+    }
+
+    const t1 = try std.Thread.spawn(.{}, testPool, .{pool});
+    const t2 = try std.Thread.spawn(.{}, testPool, .{pool});
+    const t3 = try std.Thread.spawn(.{}, testPool, .{pool});
+
+    t1.join();
+    t2.join();
+    t3.join();
+
+    {
+        const c1 = try pool.acquire();
+        defer c1.release();
+
+        const affected = try c1.exec("delete from pool_test", .{});
+        try t.expectEqual(1500, affected.?);
+    }
+}
+
+test "Pool: Release" {
+    var pool = try Pool.init(t.io, t.allocator, .{
+        .size = 2,
+        .auth = .{
+            .database = "postgres",
+            .username = "postgres",
+            .password = "postgres",
+        },
+    });
+    defer pool.deinit();
+
+    const c1 = try pool.acquire();
+    c1.state = .query;
+    pool.release(c1);
+}
+
+test "Pool: init owns its connection strings" {
+    // Heap-allocate the auth strings and free them right after init to prove the
+    // pool kept its own copies and doesn't depend on the caller's `opts`.
+    const username = try t.allocator.dupe(u8, "postgres");
+    const password = try t.allocator.dupe(u8, "postgres");
+    const database = try t.allocator.dupe(u8, "postgres");
+    const host = try t.allocator.dupe(u8, "127.0.0.1");
+
+    var pool = try Pool.init(t.io, t.allocator, .{
+        .size = 2,
+        .auth = .{ .username = username, .password = password, .database = database },
+        .connect = .{ .host = host },
+    });
+    defer pool.deinit();
+
+    t.allocator.free(username);
+    t.allocator.free(password);
+    t.allocator.free(database);
+    t.allocator.free(host);
+
+    try forceReconnect(pool);
+}
+
+fn testPool(p: *Pool) void {
+    for (0..500) |i| {
+        const conn = p.acquire() catch unreachable;
+        _ = conn.exec("insert into pool_test (id) values ($1)", .{i}) catch unreachable;
+        conn.release();
+    }
+}
+
+// forces release() to discard the connection and open a fresh one, exercising
+// reconnect with the pool's stored auth strings.
+fn forceReconnect(pool: *Pool) !void {
+    const c1 = try pool.acquire();
+    c1.state = .query;
+    pool.release(c1);
+
+    const c2 = try pool.acquire();
+    defer pool.release(c2);
+    _ = try c2.exec("select 1", .{});
+}

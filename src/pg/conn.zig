@@ -11,8 +11,6 @@ const Reader = lib.Reader;
 const Result = lib.Result;
 const Stream = lib.Stream;
 const Timeout = lib.Timeout;
-const QueryRow = lib.QueryRow;
-const QueryRowUnsafe = lib.QueryRowUnsafe;
 const has_openssl = lib.has_openssl;
 
 const os = std.os;
@@ -300,7 +298,6 @@ pub const Conn = struct {
                 try stmt.bind(value);
             }
         }
-        defer stmt.deinit();
 
         return stmt.execute() catch |err| {
             stmt.endStmt();
@@ -344,7 +341,7 @@ pub const Conn = struct {
             // Instead of having to do:
             //    Parse + Describe + Sync  ... read response ...  Bind + Exec + Sync
             const result = try self.queryOpts(sql, values, opts);
-            result.deinit();
+            result.deinit(self.allocator);
         }
 
         // affected can be null, so we need a separate boolean to track if we
@@ -366,61 +363,6 @@ pub const Conn = struct {
                 else => return self.unexpectedDBMessage(),
             }
         }
-    }
-
-    pub fn begin(self: *Conn) !void {
-        self.state = .transaction;
-        _ = try self.execOpts("begin", .{}, .{});
-    }
-
-    pub fn commit(self: *Conn) !void {
-        _ = try self.execOpts("commit", .{}, .{});
-    }
-
-    // We don't use `execOpts` here because rollback can be called at any point
-    // and we want to send this command even if the conn is in a fail state.
-    // So we issue the rollback, no matter what state we're in.
-    // It's also possible rollback was called while we were reading results,
-    // so we need to keep reading replies until we get a ready to query state,
-    // just skipping over any data rows or any other in-flight messages there
-    // might be.
-    pub fn rollback(self: *Conn) !void {
-        return self.execIgnoringState("rollback");
-    }
-
-    pub fn tryRollback(self: *Conn) !void {
-        if (self.state != .idle) {
-            try self.rollback();
-        }
-    }
-
-    pub fn execIgnoringState(self: *Conn, sql: []const u8) !void {
-        var buf = &self.buf;
-        buf.reset();
-
-        const state = self.state;
-
-        const simple_query = proto.Query{ .sql = sql };
-        try simple_query.write(buf);
-        try self.write(buf.string());
-        while (true) {
-            const msg = self.read() catch |err| {
-                if (state != .fail and err == error.PG) try self.recoverFromError();
-                return err;
-            };
-            switch (msg.type) {
-                'Z' => return,
-                'C', 'T', 'D', 'n' => {},
-                else => return self.unexpectedDBMessage(),
-            }
-        }
-    }
-
-    pub fn deallocate(self: *Conn, cache_name: []const u8) !void {
-        const allocator = self.allocator;
-        const sql = try std.fmt.allocPrint(allocator, "deallocate {s}", .{cache_name});
-        defer allocator.free(sql);
-        _ = try self.execOpts(sql, .{}, .{});
     }
 
     // Should not be called directly
@@ -538,241 +480,222 @@ pub const Conn = struct {
 };
 
 const t = lib.testing;
-// test "Conn: auth trust (no pass)" {
-//     var conn = try Conn.open(t.io, t.allocator, .{});
-//     defer conn.deinit();
-//     try conn.auth(.{ .username = "db_np", .database = "postgres" });
-// }
-//
-// test "Conn: auth unknown user" {
-//     var conn = try Conn.open(t.io, t.allocator, .{});
-//     defer conn.deinit();
-//     try t.expectError(error.PG, conn.auth(.{ .username = "does_not_exist" }));
-//     try t.expectEqual(true, std.mem.find(u8, conn.err.?.message, "user \"does_not_exist\"") != null);
-// }
-//
-// test "Conn: auth cleartext password" {
-//     {
-//         var conn = try Conn.open(t.io, t.allocator, .{});
-//         defer conn.deinit();
-//         try t.expectError(error.PG, conn.auth(.{ .username = "db_ro" }));
-//         try t.expectString("empty password returned by client", conn.err.?.message);
-//     }
-//
-//     {
-//         var conn = try Conn.open(t.io, t.allocator, .{});
-//         defer conn.deinit();
-//         try t.expectError(error.PG, conn.auth(.{ .username = "db_ro", .password = "wrong" }));
-//         try t.expectString("password authentication failed for user \"db_ro\"", conn.err.?.message);
-//     }
-//
-//     {
-//         var conn = try Conn.open(t.io, t.allocator, .{});
-//         defer conn.deinit();
-//         try conn.auth(.{ .username = "db_ro", .password = "12345678", .database = "postgres" });
-//     }
-// }
-//
-// test "Conn: auth scram-sha-256 password" {
-//     {
-//         var conn = try Conn.open(t.io, t.allocator, .{});
-//         defer conn.deinit();
-//         try t.expectError(error.PG, conn.auth(.{ .username = "db_ro_scram_sha256" }));
-//         try t.expectString("password authentication failed for user \"db_ro_scram_sha256\"", conn.err.?.message);
-//     }
-//
-//     {
-//         var conn = try Conn.open(t.io, t.allocator, .{});
-//         defer conn.deinit();
-//         try t.expectError(error.PG, conn.auth(.{ .username = "db_ro_scram_sha256", .password = "wrong" }));
-//         try t.expectString("password authentication failed for user \"db_ro_scram_sha256\"", conn.err.?.message);
-//     }
-//
-//     {
-//         var conn = try Conn.open(t.io, t.allocator, .{});
-//         defer conn.deinit();
-//         try conn.auth(.{ .username = "db_ro_scram_sha256", .password = "12345678", .database = "postgres" });
-//     }
-// }
-//
-// test "Conn: exec rowsAffected" {
-//     var c = try t.connect(.{});
-//     defer c.deinit();
-//
-//     {
-//         const n = try c.exec("insert into simple_table values ('exec_insert_a'), ('exec_insert_b')", .{});
-//         try t.expectEqual(2, n.?);
-//     }
-//
-//     {
-//         const n = try c.exec("update simple_table set value = 'exec_insert_a' where value = 'exec_insert_a'", .{});
-//         try t.expectEqual(1, n.?);
-//     }
-//
-//     {
-//         const n = try c.exec("delete from simple_table where value like 'exec_insert%'", .{});
-//         try t.expectEqual(2, n.?);
-//     }
-//
-//     {
-//         try t.expectEqual(null, try c.exec("begin", .{}));
-//         try t.expectEqual(null, try c.exec("end", .{}));
-//     }
-// }
-//
-// test "Conn: exec with values rowsAffected" {
-//     var c = try t.connect(.{});
-//     defer c.deinit();
-//
-//     {
-//         const n = try c.exec("insert into simple_table values ($1), ($2)", .{ "exec_insert_args_a", "exec_insert_args_b" });
-//         try t.expectEqual(2, n.?);
-//     }
-// }
-//
-// test "Conn: exec query that returns rows" {
-//     var c = try t.connect(.{});
-//     defer c.deinit();
-//     _ = try c.exec("insert into simple_table values ('exec_sel_1'), ('exec_sel_2')", .{});
-//     try t.expectEqual(0, c.exec("select * from simple_table where value = 'none'", .{}));
-//     try t.expectEqual(2, c.exec("select * from simple_table where value like $1", .{"exec_sel_%"}));
-// }
-//
-// test "PG: query column names" {
-//     var c = try t.connect(.{});
-//     defer c.deinit();
-//     {
-//         var result = try c.query("select 1 as id, 'leto' as name", .{});
-//         try t.expectEqual(0, result.column_names.len);
-//         try result.drain();
-//         result.deinit();
-//     }
-//
-//     {
-//         var result = try c.queryOpts("select 1 as id, 'leto' as name", .{}, .{ .column_names = true });
-//         defer result.deinit();
-//         try t.expectEqual(2, result.column_names.len);
-//         try t.expectString("id", result.column_names[0]);
-//         try t.expectString("name", result.column_names[1]);
-//     }
-// }
-//
-// test "PG: eager error" {
-//     var c = try t.connect(.{});
-//     defer c.deinit();
-//
-//     {
-//         // Some errors happen when the prepared statement is executed
-//         try t.expectError(error.PG, c.query("select * from invalid", .{}));
-//         try t.expectString("relation \"invalid\" does not exist", c.err.?.message);
-//     }
-//
-//     {
-//         // some errors only happen when the result is read
-//         try c.begin();
-//         defer c.rollback() catch {};
-//         const sql = "create temp table test1 (id int) on commit drop";
-//         _ = try c.exec(sql, .{});
-//         try t.expectError(error.PG, c.query(sql, .{}));
-//     }
-// }
-//
-// // https://github.com/karlseguin/pg.zig/issues/44
-// test "PG: eager error conn state" {
-//     var pool = try lib.Pool.init(t.io, t.allocator, .{ .size = 1, .auth = t.authOpts(.{}) });
-//     defer pool.deinit();
-//
-//     {
-//         var c = try pool.acquire();
-//         defer c.release();
-//
-//         // duplicate it
-//         _ = try c.exec("insert into all_types (id) values ($1)", .{2000});
-//         try t.expectError(error.PG, c.exec("insert into all_types (id) values ($1)", .{2000}));
-//     }
-//
-//     {
-//         // only 1 connection in our pool, so the fact that the above fails and
-//         // this one succeeds, means we're properly handling the failure
-//         var c = try pool.acquire();
-//         defer c.release();
-//         _ = try c.exec("insert into all_types (id) values ($1)", .{2001});
-//     }
-// }
-//
-// test "Conn: TLS required" {
-//     {
-//         var conn = try Conn.open(t.io, t.allocator, .{ .tls = .off });
-//         defer conn.deinit();
-//         try t.expectError(error.PG, conn.auth(.{ .username = "db_ro_ssl" }));
-//         try t.expectEqual(true, std.mem.find(u8, conn.err.?.message, "no encryption") != null);
-//     }
-//
-//     {
-//         var conn = try t.connect(.{ .tls = Conn.Opts.TLS.require, .username = "db_ro_ssl", .password = "12345678" });
-//         defer conn.deinit();
-//     }
-// }
-//
-// test "Conn: TLS verify-full" {
-//     try t.expectError(error.SSLCertificationVerificationError, Conn.open(t.io, t.allocator, .{ .tls = .{ .verify_full = null } }));
-//
-//     {
-//         var conn = try t.connect(.{ .tls = Conn.Opts.TLS{ .verify_full = "infra/postgres/certs/ca.crt" }, .username = "db_ro_ssl", .password = "12345678" });
-//         defer conn.deinit();
-//     }
-// }
-//
-// test "Conn: query is cancelable" {
-//     const S = struct {
-//         fn sleepQuery(c: *Conn) !void {
-//             var result = try c.query("select pg_sleep(3)", .{});
-//             result.deinit();
-//         }
-//     };
-//
-//     var conn = try t.connect(.{});
-//     defer conn.deinit();
-//
-//     // Run the query concurrently, let it reach its blocking read, then cancel.
-//     var future = try t.io.concurrent(S.sleepQuery, .{&conn});
-//     try t.io.sleep(.fromMilliseconds(50), .awake);
-//
-//     const start = std.Io.Clock.Timestamp.now(t.io, .awake);
-//     const result = future.cancel(t.io);
-//     const elapsed_ms = start.untilNow(t.io).raw.toMilliseconds();
-//
-//     try t.expectError(error.Canceled, result);
-//     try t.expectEqual(true, elapsed_ms < 1500); // prompt, not blocked until pg_sleep ends
-//     try t.expectEqual(Conn.State.fail, conn.state);
-//     try t.expectError(error.ConnectionBusy, conn.exec("select 1", .{}));
-// }
-//
-// fn expectNumeric(numeric: types.Numeric, expected: []const u8) !void {
-//     var strbuf: [50]u8 = undefined;
-//     try t.expectString(expected, try numeric.toString(&strbuf));
-//
-//     const a = try t.allocator.alloc(u8, numeric.estimatedStringLen());
-//     defer t.allocator.free(a);
-//     try t.expectString(expected, try numeric.toString(a));
-//
-//     if (std.mem.eql(u8, expected, "nan")) {
-//         try t.expectEqual(true, std.math.isNan(numeric.toFloat()));
-//     } else if (std.mem.eql(u8, expected, "inf")) {
-//         try t.expectEqual(true, std.math.isInf(numeric.toFloat()));
-//     } else if (std.mem.eql(u8, expected, "-inf")) {
-//         try t.expectEqual(true, std.math.isNegativeInf(numeric.toFloat()));
-//     } else {
-//         try t.expectDelta(try std.fmt.parseFloat(f64, expected), numeric.toFloat(), 0.000001);
-//     }
-// }
-//
-// const DummyStruct = struct {
-//     id: i32,
-//     name: []const u8,
-// };
-//
-// const DummyEnum = enum {
-//     val1,
-//     val2,
-// };
+test "Conn: auth trust (no pass)" {
+    var conn = try Conn.open(t.io, t.allocator, .{});
+    defer conn.deinit();
+    try conn.auth(.{ .username = "db_np", .database = "postgres" });
+}
+
+test "Conn: auth unknown user" {
+    var conn = try Conn.open(t.io, t.allocator, .{});
+    defer conn.deinit();
+    try t.expectError(error.PG, conn.auth(.{ .username = "does_not_exist" }));
+    try t.expectEqual(true, std.mem.find(u8, conn.err.?.message, "user \"does_not_exist\"") != null);
+}
+
+test "Conn: auth cleartext password" {
+    {
+        var conn = try Conn.open(t.io, t.allocator, .{});
+        defer conn.deinit();
+        try t.expectError(error.PG, conn.auth(.{ .username = "db_ro" }));
+        try t.expectString("empty password returned by client", conn.err.?.message);
+    }
+
+    {
+        var conn = try Conn.open(t.io, t.allocator, .{});
+        defer conn.deinit();
+        try t.expectError(error.PG, conn.auth(.{ .username = "db_ro", .password = "wrong" }));
+        try t.expectString("password authentication failed for user \"db_ro\"", conn.err.?.message);
+    }
+
+    {
+        var conn = try Conn.open(t.io, t.allocator, .{});
+        defer conn.deinit();
+        try conn.auth(.{ .username = "db_ro", .password = "12345678", .database = "postgres" });
+    }
+}
+
+test "Conn: auth scram-sha-256 password" {
+    {
+        var conn = try Conn.open(t.io, t.allocator, .{});
+        defer conn.deinit();
+        try t.expectError(error.PG, conn.auth(.{ .username = "db_ro_scram_sha256" }));
+        try t.expectString("password authentication failed for user \"db_ro_scram_sha256\"", conn.err.?.message);
+    }
+
+    {
+        var conn = try Conn.open(t.io, t.allocator, .{});
+        defer conn.deinit();
+        try t.expectError(error.PG, conn.auth(.{ .username = "db_ro_scram_sha256", .password = "wrong" }));
+        try t.expectString("password authentication failed for user \"db_ro_scram_sha256\"", conn.err.?.message);
+    }
+
+    {
+        var conn = try Conn.open(t.io, t.allocator, .{});
+        defer conn.deinit();
+        try conn.auth(.{ .username = "db_ro_scram_sha256", .password = "12345678", .database = "postgres" });
+    }
+}
+
+test "Conn: exec rowsAffected" {
+    var c = try t.connect(.{});
+    defer c.deinit();
+
+    {
+        const n = try c.exec("insert into simple_table values ('exec_insert_a'), ('exec_insert_b')", .{});
+        try t.expectEqual(2, n.?);
+    }
+
+    {
+        const n = try c.exec("update simple_table set value = 'exec_insert_a' where value = 'exec_insert_a'", .{});
+        try t.expectEqual(1, n.?);
+    }
+
+    {
+        const n = try c.exec("delete from simple_table where value like 'exec_insert%'", .{});
+        try t.expectEqual(2, n.?);
+    }
+
+    {
+        try t.expectEqual(null, try c.exec("begin", .{}));
+        try t.expectEqual(null, try c.exec("end", .{}));
+    }
+}
+
+test "Conn: exec with values rowsAffected" {
+    var c = try t.connect(.{});
+    defer c.deinit();
+
+    {
+        const n = try c.exec("insert into simple_table values ($1), ($2)", .{ "exec_insert_args_a", "exec_insert_args_b" });
+        try t.expectEqual(2, n.?);
+    }
+}
+
+test "Conn: exec query that returns rows" {
+    var c = try t.connect(.{});
+    defer c.deinit();
+    _ = try c.exec("insert into simple_table values ('exec_sel_1'), ('exec_sel_2')", .{});
+    try t.expectEqual(0, c.exec("select * from simple_table where value = 'none'", .{}));
+    try t.expectEqual(2, c.exec("select * from simple_table where value like $1", .{"exec_sel_%"}));
+}
+
+test "PG: query column names" {
+    const allocator = std.testing.allocator;
+    var c = try t.connect(.{});
+    defer c.deinit();
+    {
+        var result = try c.query("select 1 as id, 'leto' as name", .{});
+        try t.expectEqual(0, result.column_names.len);
+        try result.drain();
+        result.deinit(allocator);
+    }
+
+    {
+        var result = try c.queryOpts("select 1 as id, 'leto' as name", .{}, .{ .column_names = true });
+        defer result.deinit(allocator);
+        try t.expectEqual(2, result.column_names.len);
+        try t.expectString("id", result.column_names[0]);
+        try t.expectString("name", result.column_names[1]);
+    }
+}
+
+test "PG: eager error conn state" {
+    var pool = try lib.Pool.init(t.io, t.allocator, .{ .size = 1, .auth = t.authOpts(.{}) });
+    defer pool.deinit();
+
+    {
+        var c = try pool.acquire();
+        defer c.release();
+
+        // duplicate it
+        _ = try c.exec("insert into all_types (id) values ($1)", .{2000});
+        try t.expectError(error.PG, c.exec("insert into all_types (id) values ($1)", .{2000}));
+    }
+
+    {
+        // only 1 connection in our pool, so the fact that the above fails and
+        // this one succeeds, means we're properly handling the failure
+        var c = try pool.acquire();
+        defer c.release();
+        _ = try c.exec("insert into all_types (id) values ($1)", .{2001});
+    }
+}
+
+test "Conn: TLS required" {
+    {
+        var conn = try Conn.open(t.io, t.allocator, .{ .tls = .off });
+        defer conn.deinit();
+        try t.expectError(error.PG, conn.auth(.{ .username = "db_ro_ssl" }));
+        try t.expectEqual(true, std.mem.find(u8, conn.err.?.message, "no encryption") != null);
+    }
+
+    {
+        var conn = try t.connect(.{ .tls = Conn.Opts.TLS.require, .username = "db_ro_ssl", .password = "12345678" });
+        defer conn.deinit();
+    }
+}
+
+test "Conn: TLS verify-full" {
+    try t.expectError(error.SSLCertificationVerificationError, Conn.open(t.io, t.allocator, .{ .tls = .{ .verify_full = null } }));
+
+    {
+        var conn = try t.connect(.{ .tls = Conn.Opts.TLS{ .verify_full = "infra/postgres/certs/ca.crt" }, .username = "db_ro_ssl", .password = "12345678" });
+        defer conn.deinit();
+    }
+}
+
+test "Conn: query is cancelable" {
+    const allocator = std.testing.allocator;
+    const S = struct {
+        fn sleepQuery(c: *Conn) !void {
+            var result = try c.query("select pg_sleep(3)", .{});
+            result.deinit(allocator);
+        }
+    };
+
+    var conn = try t.connect(.{});
+    defer conn.deinit();
+
+    // Run the query concurrently, let it reach its blocking read, then cancel.
+    var future = try t.io.concurrent(S.sleepQuery, .{&conn});
+    try t.io.sleep(.fromMilliseconds(50), .awake);
+
+    const start = std.Io.Clock.Timestamp.now(t.io, .awake);
+    const result = future.cancel(t.io);
+    const elapsed_ms = start.untilNow(t.io).raw.toMilliseconds();
+
+    try t.expectError(error.Canceled, result);
+    try t.expectEqual(true, elapsed_ms < 1500); // prompt, not blocked until pg_sleep ends
+    try t.expectEqual(Conn.State.fail, conn.state);
+    try t.expectError(error.ConnectionBusy, conn.exec("select 1", .{}));
+}
+
+fn expectNumeric(numeric: types.Numeric, expected: []const u8) !void {
+    var strbuf: [50]u8 = undefined;
+    try t.expectString(expected, try numeric.toString(&strbuf));
+
+    const a = try t.allocator.alloc(u8, numeric.estimatedStringLen());
+    defer t.allocator.free(a);
+    try t.expectString(expected, try numeric.toString(a));
+
+    if (std.mem.eql(u8, expected, "nan")) {
+        try t.expectEqual(true, std.math.isNan(numeric.toFloat()));
+    } else if (std.mem.eql(u8, expected, "inf")) {
+        try t.expectEqual(true, std.math.isInf(numeric.toFloat()));
+    } else if (std.mem.eql(u8, expected, "-inf")) {
+        try t.expectEqual(true, std.math.isNegativeInf(numeric.toFloat()));
+    } else {
+        try t.expectDelta(try std.fmt.parseFloat(f64, expected), numeric.toFloat(), 0.000001);
+    }
+}
+
+const DummyStruct = struct {
+    id: i32,
+    name: []const u8,
+};
+
+const DummyEnum = enum {
+    val1,
+    val2,
+};

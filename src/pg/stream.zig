@@ -14,9 +14,7 @@ const Reader = lib.Reader;
 
 const DEFAULT_HOST = "127.0.0.1";
 
-pub const Stream = if (lib.has_openssl) TLSStream else PlainStream;
-
-const TLSStream = struct {
+pub const Stream = struct {
     valid: bool,
     ssl: ?*openssl.SSL,
     stream: Io.net.Stream,
@@ -79,7 +77,7 @@ const TLSStream = struct {
                 else => {},
             }
 
-            if (openssl.SSL_set_fd(ssl, if (@import("builtin").os.tag == .windows) @intCast(@intFromPtr(stream.socket.handle)) else stream.socket.handle) != 1) {
+            if (openssl.SSL_set_fd(ssl, stream.socket.handle) != 1) {
                 return error.SSLSetFdFailed;
             }
 
@@ -110,7 +108,7 @@ const TLSStream = struct {
         };
     }
 
-    pub fn close(self: *Stream) void {
+    pub fn close(self: *@This()) void {
         if (self.ssl) |ssl| {
             if (self.valid) {
                 _ = openssl.SSL_shutdown(ssl);
@@ -131,11 +129,11 @@ const TLSStream = struct {
         try w.writeAll(&[_]u8{1});
     }
 
-    pub fn shutdown(self: *const Stream, how: ShutdownHow) !void {
+    pub fn shutdown(self: *const @This(), how: ShutdownHow) !void {
         return sockShutdown(self.stream.socket.handle, how);
     }
 
-    pub fn writeAll(self: *Stream, data: []const u8) !void {
+    pub fn writeAll(self: *@This(), data: []const u8) !void {
         if (self.ssl) |ssl| {
             const result = openssl.SSL_write(ssl, data.ptr, @intCast(data.len));
             if (result <= 0) {
@@ -190,96 +188,6 @@ const TLSStream = struct {
     }
 };
 
-const PlainStream = struct {
-    io: Io,
-    stream: Io.net.Stream,
-    cancel_pipe: [2]posix.fd_t,
-
-    pub fn connect(io: Io, _: Allocator, opts: Conn.Opts, _: anytype) !PlainStream {
-        const host = opts.host orelse DEFAULT_HOST;
-        const is_unix = host.len > 0 and host[0] == '/';
-
-        const stream = try blk: {
-            if (is_unix) {
-                if (comptime Io.net.has_unix_sockets == false or std.posix.AF == void) {
-                    return error.UnixPathNotSupported;
-                }
-                const addr: Io.net.UnixAddress = try .init(host);
-                break :blk addr.connect(io);
-            }
-            const port = opts.port orelse 5432;
-            const hostname: Io.net.HostName = try .init(host);
-            break :blk hostname.connect(io, port, .{ .mode = .stream });
-        };
-        errdefer stream.close(io);
-
-        if (is_unix == false) {
-            try setKeepalive(stream.socket.handle, opts);
-        }
-
-        return .{
-            .io = io,
-            .stream = stream,
-            .cancel_pipe = try Io.Threaded.pipe2(.{ .CLOEXEC = true }),
-        };
-    }
-
-    pub fn close(self: *const PlainStream) void {
-        self.stream.close(self.io);
-    }
-
-    pub fn cancel(self: *@This()) !void {
-        var buf: [1]u8 = undefined;
-        const write_file = std.Io.File{ .handle = self.cancel_pipe[0] };
-
-        var writer = write_file.writer(self.io, &buf);
-        var w = &writer.interface;
-
-        try w.writeAll(&[_]u8{1});
-    }
-
-    pub fn shutdown(self: *const PlainStream, how: ShutdownHow) !void {
-        const sock = self.stream.socket.handle;
-        return sockShutdown(sock, how);
-    }
-
-    pub fn writeAll(self: *const PlainStream, data: []const u8) !void {
-        return writeStream(self.stream, self.io, data);
-    }
-
-    pub fn read(self: *const PlainStream, buf: []u8) !usize {
-        return readStream(self.stream, self.io, buf);
-    }
-
-    pub fn readWithTimeout(self: *@This(), buffer: []u8, timeout_ms: i32) !usize {
-        _ = timeout_ms;
-            return self.read(buffer);
-        // var fds = [_]std.posix.pollfd{
-        //     .{ .fd = self.stream.socket.handle, .events = std.posix.POLL.IN, .revents = 0 },
-        //     .{ .fd = self.cancel_pipe[0], .events = std.posix.POLL.IN, .revents = 0 },
-        // };
-        //
-        // const ready_count = try posix.poll(&fds, timeout_ms);
-        //
-        // if (ready_count == 0) {
-        //     return error.Timeout;
-        // }
-        //
-        // if ((fds[1].revents & posix.POLL.IN) != 0) {
-        //     var dummy: [1]u8 = undefined;
-        //     _ = try posix.read(self.cancel_pipe[0], &dummy);
-        //
-        //     return error.Cancelled;
-        // }
-        //
-        // if ((fds[0].revents & posix.POLL.IN) != 0) {
-        //     return try posix.read(self.stream.socket.handle, buffer);
-        // }
-        //
-        // return error.UnexpectedPollEvent;
-    }
-};
-
 fn setKeepalive(handle: posix.socket_t, opts: Conn.Opts) !void {
     if (opts.keepalive == false) {
         return;
@@ -319,100 +227,27 @@ fn setKeepalive(handle: posix.socket_t, opts: Conn.Opts) !void {
 }
 
 fn setsockopt(fd: posix.socket_t, level: i32, optname: u32, opt: []const u8) !void {
-    if (@import("builtin").os.tag != .windows) {
-        return posix.setsockopt(fd, level, optname, opt);
-    }
-
-    const SO = posix.SO;
-    const SOL = posix.SOL;
-    const timeval = posix.timeval;
-
-    var ms_buf: u32 = 0;
-    var opt_ptr: [*]const u8 = opt.ptr;
-    var opt_len: i32 = @intCast(opt.len);
-    if (level == SOL.SOCKET and (optname == SO.RCVTIMEO or optname == SO.SNDTIMEO) and opt.len == @sizeOf(timeval)) {
-        const tv: *const timeval = @ptrCast(@alignCast(opt.ptr));
-        const total_ms = @as(i64, tv.sec) * 1000 + @divTrunc(@as(i64, tv.usec), 1000);
-        ms_buf = if (total_ms < 0) 0 else @intCast(@min(total_ms, std.math.maxInt(u32)));
-        opt_ptr = @ptrCast(&ms_buf);
-        opt_len = @sizeOf(u32);
-    }
-
-    const in: []const u8 = @ptrCast(&std.os.windows.AFD.SOCKOPT_INFO{
-        .mode = .set,
-        .level = level,
-        .optname = optname,
-        .optval = opt_ptr,
-        .optlen = @intCast(opt_len),
-    });
-
-    var iosb: std.os.windows.IO_STATUS_BLOCK = undefined;
-    switch (std.os.windows.ntdll.NtDeviceIoControlFile(
-        fd,
-        null, // event
-        null, // APC routine
-        null, // APC context
-        &iosb,
-        std.os.windows.IOCTL.AFD.SOCKOPT,
-        if (in.len > 0) in.ptr else null,
-        @intCast(in.len),
-        null,
-        0,
-    )) {
-        .SUCCESS => return,
-        .CANCELLED => return error.Canceled,
-        .INSUFFICIENT_RESOURCES => return error.SystemResources,
-        else => |status| return std.os.windows.unexpectedStatus(status),
-    }
+    return posix.setsockopt(fd, level, optname, opt);
 }
 
 const ShutdownHow = enum { recv, send, both };
 fn sockShutdown(sock: posix.socket_t, how: ShutdownHow) !void {
-    if (comptime @import("builtin").os.tag == .windows) {
-        const in: []const u8 = @ptrCast(&std.os.windows.AFD.PARTIAL_DISCONNECT_INFO{
-            .DisconnectMode = switch (how) {
-                .recv => .{ .RECEIVE = true },
-                .send => .{ .SEND = true },
-                .both => .{ .RECEIVE = true, .SEND = true },
-            },
-            .Timeout = -1,
-        });
-
-        var iosb: std.os.windows.IO_STATUS_BLOCK = undefined;
-        switch (std.os.windows.ntdll.NtDeviceIoControlFile(
-            sock,
-            null, // event
-            null, // APC routine
-            null, // APC context
-            &iosb,
-            std.os.windows.IOCTL.AFD.PARTIAL_DISCONNECT,
-            if (in.len > 0) in.ptr else null,
-            @intCast(in.len),
-            null,
-            0,
-        )) {
-            .SUCCESS => return,
-            .CANCELLED => return error.Canceled,
-            .INSUFFICIENT_RESOURCES => return error.SystemResources,
-            else => |status| return std.os.windows.unexpectedStatus(status),
-        }
-    } else {
-        const rc = posix.system.shutdown(sock, switch (how) {
-            .recv => posix.system.SHUT.RD,
-            .send => posix.system.SHUT.WR,
-            .both => posix.system.SHUT.RDWR,
-        });
-        switch (posix.errno(rc)) {
-            .SUCCESS => return,
-            .BADF => unreachable,
-            .INVAL => unreachable,
-            .NOTCONN => return error.SocketNotConnected,
-            .NOTSOCK => unreachable,
-            .NOBUFS => return error.SystemResources,
-            else => return error.Unexpected,
-        }
+    const rc = posix.system.shutdown(sock, switch (how) {
+        .recv => posix.system.SHUT.RD,
+        .send => posix.system.SHUT.WR,
+        .both => posix.system.SHUT.RDWR,
+    });
+    switch (posix.errno(rc)) {
+        .SUCCESS => return,
+        .BADF => unreachable,
+        .INVAL => unreachable,
+        .NOTCONN => return error.SocketNotConnected,
+        .NOTSOCK => unreachable,
+        .NOBUFS => return error.SystemResources,
+        else => return error.Unexpected,
     }
 }
+
 fn readStream(stream: Io.net.Stream, io: Io, buf: []u8) !usize {
     var vecs: [1][]u8 = .{buf};
     var reader = stream.reader(io, &.{});
@@ -450,8 +285,6 @@ fn isHostName(host: []const u8) bool {
     }
     return std.mem.findNone(u8, host, "0123456789.") != null;
 }
-
-const windows = @import("windows.zig");
 //
 // test "cancel stream while read" {
 //     const allocator = std.testing.allocator;

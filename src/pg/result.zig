@@ -201,6 +201,10 @@ pub const Result = struct {
             if (self.names == null) {
                 self.names = try allocator.alloc([]const u8, self.capacity);
                 errdefer allocator.free(self.names);
+            } else {
+                for (0..self.len) |i| {
+                    allocator.free(self.names.?[i]);
+                }
             }
 
             self.len = number_of_columns;
@@ -282,344 +286,68 @@ pub fn RowT(comptime fail_mode: lib.FailMode) type {
     };
 }
 
-fn isSlice(comptime T: type) ?type {
-    switch (@typeInfo(T)) {
-        .pointer => |ptr| {
-            if (ptr.size != .slice) {
-                compileHaltGetError(T);
-            }
-            return if (ptr.child == u8) null else ptr.child;
-        },
-        .optional => |opt| return isSlice(opt.child),
-        else => return null,
-    }
-}
+// pub const QueryRow = QueryRowT(.safe);
+// pub const QueryRowUnsafe = QueryRowT(.unsafe);
+//
+// pub fn QueryRowT(comptime fail_mode: lib.FailMode) type {
+//     return struct {
+//         row: RowT(fail_mode),
+//         result: *Result,
+//
+//         const Self = @This();
+//
+//         pub fn get(self: *@This(), comptime T: type, col: usize) if (fail_mode == .safe) lib.TypeError!T else T {
+//             return self.row.get(T, col);
+//         }
+//
+//         pub fn deinit(self: *@This()) !void {
+//             // this is unfortunate
+//             try self.result.drain();
+//             self.result.deinit();
+//         }
+//     };
+// }
 
-fn mapValue(comptime T: type, value: T, allocator: mem.Allocator) !T {
-    switch (@typeInfo(T)) {
-        .optional => |opt| {
-            if (value) |v| {
-                return try mapValue(opt.child, v, allocator);
-            }
-            return null;
-        },
-        else => {},
-    }
-
-    if (T == []u8 or T == []const u8) {
-        return try allocator.dupe(u8, value);
-    }
-
-    if (std.meta.hasFn(T, "pgzMoveOwner")) {
-        return value.pgzMoveOwner(allocator);
-    }
-
-    return value;
-}
-
-pub const QueryRow = QueryRowT(.safe);
-pub const QueryRowUnsafe = QueryRowT(.unsafe);
-
-pub fn QueryRowT(comptime fail_mode: lib.FailMode) type {
-    return struct {
-        row: RowT(fail_mode),
-        result: *Result,
-
-        const Self = @This();
-
-        pub fn get(self: *@This(), comptime T: type, col: usize) if (fail_mode == .safe) lib.TypeError!T else T {
-            return self.row.get(T, col);
-        }
-
-        pub fn deinit(self: *@This()) !void {
-            // this is unfortunate
-            try self.result.drain();
-            self.result.deinit();
-        }
-    };
-}
-
-pub fn Iterator(comptime T: type) type {
-    return IteratorT(.safe, T);
-}
-pub fn IteratorUnsafe(comptime T: type) type {
-    return IteratorT(.unsafe, T);
-}
-pub fn IteratorT(comptime fail_mode: lib.FailMode, comptime T: type) type {
-    return struct {
-        is_null: bool,
-        len: usize,
-        pos: usize,
-        data: []const u8,
-        decoder: *const fn (data: []const u8) ItemType(),
-
-        fn ItemType() type {
-            return switch (@typeInfo(T)) {
-                .optional => |opt| opt.child,
-                else => T,
-            };
-        }
-
-        const Self = @This();
-
-        fn asNull() Self {
-            return .{
-                .is_null = true,
-                .len = 0,
-                .pos = 0,
-                .data = &.{},
-                .decoder = struct {
-                    fn noop(_: []const u8) ItemType() {
-                        unreachable;
-                    }
-                }.noop,
-            };
-        }
-
-        // used internally by row.get(Iterator(T))
-        fn fromPgzRow(value: Result.State.Value, oid: i32) !Self {
-            const data = value.data;
-            const TT = switch (@typeInfo(T)) {
-                .optional => |opt| opt.child,
-                else => T,
-            };
-
-            const decoder = switch (TT) {
-                u8 => blk: {
-                    lib.verifyDecodeType(fail_mode, []u8, &.{types.CharArray.oid.decimal}, oid) catch |err| {
-                        if (comptime fail_mode == .unsafe) unreachable;
-                        return err;
-                    };
-                    break :blk &types.Char.decodeKnown;
-                },
-                i16 => blk: {
-                    lib.verifyDecodeType(fail_mode, []i16, &.{types.Int16Array.oid.decimal}, oid) catch |err| {
-                        if (comptime fail_mode == .unsafe) unreachable;
-                        return err;
-                    };
-                    break :blk &types.Int16.decodeKnown;
-                },
-                i32 => blk: {
-                    lib.verifyDecodeType(fail_mode, []i32, &.{types.Int32Array.oid.decimal}, oid) catch |err| {
-                        if (comptime fail_mode == .unsafe) unreachable;
-                        return err;
-                    };
-                    break :blk &types.Int32.decodeKnown;
-                },
-                i64 => switch (oid) {
-                    types.TimestampArray.oid.decimal => &types.Timestamp.decodeKnown,
-                    types.TimestampTzArray.oid.decimal => &types.Timestamp.decodeKnown,
-                    types.Int64Array.oid.decimal => &types.Int64.decodeKnown,
-                    else => std.debug.panic("{d} oid cannot target i64 iterator", .{oid}),
-                },
-                f32 => blk: {
-                    lib.verifyDecodeType(fail_mode, []f32, &.{types.Float32Array.oid.decimal}, oid) catch |err| {
-                        if (comptime fail_mode == .unsafe) unreachable;
-                        return err;
-                    };
-                    break :blk &types.Float32.decodeKnown;
-                },
-                f64 => switch (oid) {
-                    types.Float64Array.oid.decimal => &types.Float64.decodeKnown,
-                    types.NumericArray.oid.decimal => &types.Numeric.decodeKnownToFloat,
-                    else => std.debug.panic("{d} oid cannot target f64 iterator", .{oid}),
-                },
-                bool => blk: {
-                    lib.verifyDecodeType(fail_mode, []bool, &.{types.BoolArray.oid.decimal}, oid) catch |err| {
-                        if (comptime fail_mode == .unsafe) unreachable;
-                        return err;
-                    };
-                    break :blk &types.Bool.decodeKnown;
-                },
-                []const u8 => switch (oid) {
-                    types.JSONBArray.oid.decimal => &types.JSONB.decodeKnown,
-                    else => &types.Bytea.decodeKnown,
-                },
-                []u8 => switch (oid) {
-                    types.JSONBArray.oid.decimal => &types.JSONB.decodeKnownMutable,
-                    else => &types.Bytea.decodeKnownMutable,
-                },
-                types.Numeric => blk: {
-                    lib.verifyDecodeType(fail_mode, []f64, &.{types.NumericArray.oid.decimal}, oid) catch |err| {
-                        if (comptime fail_mode == .unsafe) unreachable;
-                        return err;
-                    };
-                    break :blk &types.Numeric.decodeKnown;
-                },
-                types.Cidr => blk: {
-                    lib.verifyDecodeType(fail_mode, []types.Cidr, &.{ types.CidrArray.oid.decimal, types.CidrArray.inet_oid.decimal }, oid) catch |err| {
-                        if (comptime fail_mode == .unsafe) unreachable;
-                        return err;
-                    };
-                    break :blk &types.Cidr.decodeKnown;
-                },
-                else => switch (@typeInfo(TT)) {
-                    .@"enum" => blk: {
-                        lib.verifyDecodeType(fail_mode, []const u8, &.{types.StringArray.oid.decimal}, oid) catch |err| {
-                            if (comptime fail_mode == .unsafe) unreachable;
-                            return err;
-                        };
-                        break :blk &EnumDecoder(TT).decodeKnown;
-                    },
-                    else => compileHaltGetError(T),
-                },
-            };
-
-            if (data.len == 12) {
-                // we have an empty array
-                return .{
-                    .is_null = false,
-                    .len = 0,
-                    .pos = 0,
-                    .data = &[_]u8{},
-                    .decoder = decoder,
-                };
-            }
-
-            // minimum size for 1 empty array
-            lib.assert(data.len >= 20);
-            const dimensions = std.mem.readInt(i32, data[0..4], .big);
-            lib.assert(dimensions == 1);
-
-            const has_nulls = std.mem.readInt(i32, data[4..8][0..4], .big);
-            lib.assert(has_nulls == 0 or @typeInfo(T) == .optional);
-
-            // const oid = std.mem.readInt(i32, data[8..12][0..4], .big);
-            const l = std.mem.readInt(i32, data[12..16][0..4], .big);
-            // const lower_bound = std.mem.readInt(i32, data[16..20][0..4], .big);
-
-            return .{
-                .is_null = false,
-                .len = @intCast(l),
-                .pos = 0,
-                .data = data[20..],
-                .decoder = decoder,
-            };
-        }
-
-        pub fn pgzMoveOwner(self: *@This(), allocator: mem.Allocator) !Self {
-            return .{
-                .is_null = false,
-                .len = self.len,
-                .pos = self.pos,
-                .data = try allocator.dupe(u8, self.data),
-                .decoder = self.decoder,
-            };
-        }
-
-        // Should only be called if the Iterator was created with row.to(...)
-        // or a result mapper AND an explicit allocator was given
-        pub fn deinit(self: *@This(), allocator: mem.Allocator) void {
-            allocator.free(self.data);
-        }
-
-        pub fn next(self: *@This()) ?T {
-            const pos = self.pos;
-            const data = self.data;
-            if (pos == data.len) {
-                return null;
-            }
-
-            // TODO: for fixed length types, we don't need to decode the length
-            const len_end = pos + 4;
-            const value_len = std.mem.readInt(i32, data[pos..len_end][0..4], .big);
-
-            const data_end = len_end + @as(usize, @intCast(value_len));
-            lib.assert(data.len >= data_end);
-
-            self.pos = data_end;
-            return self.decoder(data[len_end..data_end]);
-        }
-
-        pub fn alloc(self: *@This(), allocator: mem.Allocator) ![]T {
-            const into = try allocator.alloc(T, self.len);
-            try self.fillAlloc(true, into, allocator);
-            return into;
-        }
-
-        pub fn fill(self: *@This(), into: []T) void {
-            self.fillAlloc(false, into, undefined) catch unreachable;
-        }
-
-        fn fillAlloc(self: *@This(), comptime should_dupe: bool, into: []T, allocator: mem.Allocator) !void {
-            const data = self.data;
-            const decoder = self.decoder;
-
-            var pos: usize = 0;
-            const limit = @min(into.len, self.len);
-            for (0..limit) |i| {
-                // TODO: for fixed length types, we don't need to decode the length
-                const len_end = pos + 4;
-                const data_len = std.mem.readInt(i32, data[pos..len_end][0..4], .big);
-
-                if ((comptime @typeInfo(T) == .optional) and data_len == -1) {
-                    pos = len_end;
-                    into[i] = null;
-                } else {
-                    pos = len_end + @as(usize, @intCast(data_len));
-                    if (comptime should_dupe and (T == []u8 or T == []const u8)) {
-                        into[i] = try allocator.dupe(u8, decoder(data[len_end..pos]));
-                    } else {
-                        into[i] = decoder(data[len_end..pos]);
-                    }
-                }
-            }
-        }
-    };
-}
-
-fn EnumDecoder(comptime T: type) type {
-    return struct {
-        pub fn decodeKnown(data: []const u8) T {
-            return std.meta.stringToEnum(T, data).?;
-        }
-    };
-}
-
-fn compileHaltGetError(comptime T: type) noreturn {
-    @compileError("cannot get value of type " ++ @typeName(T));
-}
-
-pub const Record = RecordT(.safe);
-pub const RecordUnsafe = RecordT(.unsafe);
-
-pub fn RecordT(comptime fail_mode: lib.FailMode) type {
-    return struct {
-        data: []const u8,
-        number_of_columns: usize,
-
-        const Self = @This();
-
-        pub fn next(self: *@This(), comptime T: type) if (fail_mode == .safe) lib.TypeError!T else T {
-            var data = self.data;
-
-            // at least 4 bytes for the type and 4 bytes for the lenght
-            lib.assert(data.len >= 8);
-
-            const oid = std.mem.readInt(i32, data[0..4], .big);
-
-            data = data[4..];
-            const len = std.mem.readInt(i32, data[0..4], .big);
-
-            const TT = switch (@typeInfo(T)) {
-                .optional => |opt| blk: {
-                    if (len == -1) return null;
-                    break :blk opt.child;
-                },
-                else => T,
-            };
-
-            // end of the data for this "column"
-            const end = @as(usize, @intCast(len)) + 4;
-
-            // the rest of the data
-            self.data = data[end..];
-
-            // start at 4 to skip the length which we already read
-            return types.decodeScalar(fail_mode, TT, data[4..end], oid);
-        }
-    };
-}
+// pub const Record = RecordT(.safe);
+// pub const RecordUnsafe = RecordT(.unsafe);
+//
+// pub fn RecordT(comptime fail_mode: lib.FailMode) type {
+//     return struct {
+//         data: []const u8,
+//         number_of_columns: usize,
+//
+//         const Self = @This();
+//
+//         pub fn next(self: *@This(), comptime T: type) if (fail_mode == .safe) lib.TypeError!T else T {
+//             var data = self.data;
+//
+//             // at least 4 bytes for the type and 4 bytes for the lenght
+//             lib.assert(data.len >= 8);
+//
+//             const oid = std.mem.readInt(i32, data[0..4], .big);
+//
+//             data = data[4..];
+//             const len = std.mem.readInt(i32, data[0..4], .big);
+//
+//             const TT = switch (@typeInfo(T)) {
+//                 .optional => |opt| blk: {
+//                     if (len == -1) return null;
+//                     break :blk opt.child;
+//                 },
+//                 else => T,
+//             };
+//
+//             // end of the data for this "column"
+//             const end = @as(usize, @intCast(len)) + 4;
+//
+//             // the rest of the data
+//             self.data = data[end..];
+//
+//             // start at 4 to skip the length which we already read
+//             return types.decodeScalar(fail_mode, TT, data[4..end], oid);
+//         }
+//     };
+// }
 
 const t = lib.testing;
 
