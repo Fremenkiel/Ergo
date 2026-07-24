@@ -1,6 +1,6 @@
 # Makefile
 
-phony: ch-create, dev-up, dev-down
+phony: ch-create, dev-up, dev-down, test
 
 CH_ADDR ?= localhost
 CH_PORT ?= 9000
@@ -23,3 +23,8 @@ dev-up:
 
 dev-down:
 	docker-compose -f ./infra/compose.yml down -v
+
+test:
+	zig build test -Dopenssl=true \
+  -Dopenssl_lib_path=/opt/homebrew/opt/openssl@3/lib \
+  -Dopenssl_include_path=/opt/homebrew/opt/openssl@3/include
