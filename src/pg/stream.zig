@@ -18,7 +18,6 @@ pub const Stream = struct {
     valid: bool,
     ssl: ?*openssl.SSL,
     stream: Io.net.Stream,
-    cancel_pipe: [2]posix.fd_t,
     io: Io,
 
     pub fn connect(io: Io, allocator: Allocator, opts: Conn.Opts, ctx_: ?*openssl.SSL_CTX) !Stream {
@@ -103,7 +102,6 @@ pub const Stream = struct {
             .ssl = ssl,
             .valid = true,
             .stream = stream,
-            .cancel_pipe = try Io.Threaded.pipe2(.{ .CLOEXEC = true }),
             .io = io,
         };
     }
@@ -117,16 +115,6 @@ pub const Stream = struct {
             openssl.SSL_free(ssl);
         }
         self.stream.close(self.io);
-    }
-
-    pub fn cancel(self: *@This()) !void {
-        var buf: [1]u8 = undefined;
-        const write_file = std.Io.File{ .handle = self.cancel_pipe[0] };
-
-        var writer = write_file.writer(self.io, &buf);
-        var w = &writer.interface;
-
-        try w.writeAll(&[_]u8{1});
     }
 
     pub fn shutdown(self: *const @This(), how: ShutdownHow) !void {
@@ -162,20 +150,12 @@ pub const Stream = struct {
     pub fn readWithTimeout(self: *@This(), buffer: []u8, timeout_ms: i32) !usize {
         var fds = [_]std.posix.pollfd{
             .{ .fd = self.stream.socket.handle, .events = std.posix.POLL.IN, .revents = 0 },
-            .{ .fd = self.cancel_pipe[0], .events = std.posix.POLL.IN, .revents = 0 },
         };
 
         const ready_count = try posix.poll(&fds, timeout_ms);
 
         if (ready_count == 0) {
             return error.Timeout;
-        }
-
-        if ((fds[1].revents & posix.POLL.IN) != 0) {
-            var dummy: [1]u8 = undefined;
-            _ = try posix.read(self.cancel_pipe[0], &dummy);
-
-            return error.Cancelled;
         }
 
         if ((fds[0].revents & posix.POLL.IN) != 0) {

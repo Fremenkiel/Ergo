@@ -17,7 +17,8 @@ UnableToSendCopyDone,
 InvalidReadyForQueryMessage,
 InvalidCopyDoneMessage,
 TransactionErrorState,
-TransactionStateUnknown
+TransactionStateUnknown,
+WalConnectionUnableToStop,
 };
 
 pub const ReadResponse = struct {
@@ -108,13 +109,8 @@ pub const PgClient = struct {
         };
     }
 
-    pub fn cancel(self: *@This()) void {
-        if (self.wal_conn) |conn| conn.cancel();
-    }
-
     pub fn deinit(self: *@This()) void {
         if (self.wal_conn) |wal_conn| {
-            self.endFlow() catch {};
             wal_conn.deinit();
             self.allocator.destroy(wal_conn);
         }
@@ -140,6 +136,10 @@ pub const PgClient = struct {
         if (self.context.ip_address.len > 0) self.allocator.free(self.context.ip_address);
     }
 
+    pub fn cancel(self: *@This()) void {
+        if (self.wal_conn) |conn| conn.cancel();
+    }
+
     fn resetContext(self: *@This()) void {
         self.context.xid = 0;
         if (self.context.user_id.len > 0) self.allocator.free(self.context.user_id);
@@ -151,7 +151,9 @@ pub const PgClient = struct {
     }
 
     pub fn startWALReader(self: *@This(), timeout_ms: i32) !void {
-        const query = try std.fmt.allocPrint(self.allocator, "START_REPLICATION SLOT {s} LOGICAL 0/0 (proto_version '1', publication_names 'db_pub', messages 'true')", .{self.conn_opts.connect.wal});
+        if (self.wal_conn == null) return PgClientError.WalConnectionNotInitialized;
+
+        const query = try std.fmt.allocPrint(self.allocator, "START_REPLICATION SLOT {s} LOGICAL 0/0 (proto_version '1', publication_names 'db_pub', messages 'true');", .{self.conn_opts.connect.wal});
 
         const msg_len: u32 = @as(u32, @intCast(query.len)) + 4 + 1;
         var len_buf: [4]u8 = undefined;
@@ -166,26 +168,34 @@ pub const PgClient = struct {
             return PgClientError.WalConnectionNotInitialized;
         }
 
-        try self.startFlow(timeout_ms);
+        try self.wal_conn.?.reader.startFlow(timeout_ms);
     }
 
-    pub fn sendCopyDone(self: *@This()) !void {
+    pub fn endWALReader(self: *@This()) !void {
+        if (self.wal_conn == null) return PgClientError.WalConnectionNotInitialized;
+
+        const query = try std.fmt.allocPrint(self.allocator, "DROP_REPLICATION SLOT {s};", .{self.conn_opts.connect.wal});
+
+        const msg_len: u32 = @as(u32, @intCast(query.len)) + 4 + 1;
         var len_buf: [4]u8 = undefined;
-        mem.writeInt(i32, &len_buf, 4, .big);
+        mem.writeInt(u32, &len_buf, msg_len, .big);
 
         if (self.wal_conn) |wal_conn| {
-            try wal_conn.write("c");
+            try wal_conn.write("Q");
             try wal_conn.write(&len_buf);
+            try wal_conn.write(query);
+            try wal_conn.write(&[_]u8{0});
         } else {
-            return PgClientError.UnableToSendCopyDone;
+            return PgClientError.WalConnectionUnableToStop;
         }
+
+        try self.wal_conn.?.reader.endFlow();
     }
 
     pub fn readWAL(self: *@This()) !?ReadResponse {
         if (self.wal_conn == null) return PgClientError.WalConnectionNotInitialized;
 
         const msg = try self.wal_conn.?.reader.next();
-
         switch (msg.type) {
             'W' => {
                 // Server entered COPY BOTH mode,
@@ -200,6 +210,8 @@ pub const PgClient = struct {
                 };
 
                 const data_type = msg.data[0];
+                std.debug.print("read wal: {x}\n", .{data_type});
+
                 switch (data_type) {
                     'w' => {
                         response.message = pg.packet.ServerPacket.XLogData;
@@ -236,7 +248,7 @@ pub const PgClient = struct {
                     'k' => {
                         response.message = pg.packet.ServerPacket.Keepalive;
 
-                        assert(msg.data.len >= 19);
+                        assert(msg.data.len >= 18);
 
                         const current_lsn = mem.readInt(u64, msg.data[1..9][0..8], .big);
                         const server_timestamp = mem.readInt(i64, msg.data[9..17][0..8], .big);
@@ -309,6 +321,19 @@ pub const PgClient = struct {
             }
         }
         return null;
+    }
+
+    pub fn sendCopyDone(self: *@This()) !void {
+        var len_buf: [4]u8 = undefined;
+        mem.writeInt(i32, &len_buf, 4, .big);
+
+        if (self.wal_conn) |wal_conn| {
+            try wal_conn.write("c");
+            try wal_conn.write(&len_buf);
+        } else {
+            return PgClientError.UnableToSendCopyDone;
+        }
+        std.debug.print("sent copy done\n", .{});
     }
 
     pub fn parsePgOutput(self: *@This(), payload: []const u8) !ParseResponse {
@@ -632,29 +657,6 @@ pub const PgClient = struct {
         return columns;
     }
 
-    pub fn pgWalToClickHouseMs(pg_wal_us: u64) i64 {
-        const seconds_between_epochs: u64 = 946_684_800;
-        const us_between_epochs: u64 = seconds_between_epochs * 1_000_000;
-
-        const unix_us: u64 = pg_wal_us + us_between_epochs;
-
-        const unix_ms: u64 = unix_us / 1000;
-
-        return @intCast(unix_ms);
-    }
-
-    pub fn startFlow(self: *@This(), timeout_ms: i32) !void {
-        if (self.wal_conn == null) return PgClientError.WalConnectionNotInitialized;
-
-        try self.wal_conn.?.reader.startFlow(timeout_ms);
-    }
-
-    pub fn endFlow(self: *@This()) !void {
-        if (self.wal_conn == null) return PgClientError.WalConnectionNotInitialized;
-
-        try self.wal_conn.?.reader.endFlow();
-    }
-
     pub fn createWalConn(allocator: mem.Allocator, io:  Io, opts: pg.Conn.ConnOpts) !*pg.Conn {
         var conn = try allocator.create(pg.Conn);
         conn.* = pg.Conn.open(io, allocator, opts.connect) catch |err| {
@@ -684,6 +686,17 @@ pub const PgClient = struct {
 
     pub fn createConnPool(allocator: mem.Allocator, io: Io, opts: pg.Conn.ConnOpts) !*pg.Pool {
         return try pg.Pool.init(io, allocator, .{ .size = 1, .connect = opts.connect, .auth = opts.auth});
+    }
+
+    pub fn pgWalToClickHouseMs(pg_wal_us: u64) i64 {
+        const seconds_between_epochs: u64 = 946_684_800;
+        const us_between_epochs: u64 = seconds_between_epochs * 1_000_000;
+
+        const unix_us: u64 = pg_wal_us + us_between_epochs;
+
+        const unix_ms: u64 = unix_us / 1000;
+
+        return @intCast(unix_ms);
     }
 };
 

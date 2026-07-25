@@ -3,6 +3,7 @@ const Io = std.Io;
 const mem = std.mem;
 const testing = std.testing;
 
+const posix = std.posix;
 const assert = std.debug.assert;
 
 const pg = @import("pg");
@@ -12,6 +13,18 @@ const pg_client = @import("pg_client.zig");
 
 pub const sync_marker_str = "SYNC_MARKER_REACHED";
 pub const submit_marker_str = "CH_DATA_SUBMITTED_MARKER";
+const read_timeout_ms = 5;
+
+pub const WalProcessorError = error{
+FailedWhileShutdown,
+};
+
+const ProcessorStatus = enum(u8) {
+    Idle = 0,
+    CopyData = 1,
+    CopyDone = 2,
+    Failed = 3,
+};
 
 pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
     return struct {
@@ -21,6 +34,8 @@ pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
         transaction_array: std.ArrayList(types.AuditEntry) = .empty,
 
         is_test: bool = false,
+
+        status: std.atomic.Value(ProcessorStatus) = .init(.Idle),
 
         allocator: mem.Allocator,
         io: Io,
@@ -36,24 +51,47 @@ pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
             self.transaction_array.deinit(self.allocator);
         }
 
-        pub fn startStreaming(self: *@This(), flag: *std.atomic.Value(bool)) !void {
-            self.pg_client.startWALReader(5 * std.time.ms_per_s) catch |err| switch (err) {
+        pub fn startStreaming(self: *@This()) !void {
+            self.pg_client.startWALReader(read_timeout_ms) catch |err| switch (err) {
                 pg_client.PgClientError.WalConnectionNotInitialized => {
                     self.pg_client.*.wal_conn = try PgClient.createWalConn(self.allocator, self.io, self.pg_client.*.conn_opts);
 
-                    try self.pg_client.startWALReader(5 * std.time.ms_per_s);
+                    try self.pg_client.startWALReader(read_timeout_ms);
                 },
                 else => return err,
             };
+        }
 
+        pub fn endStreaming(self: *@This()) !void {
+            return self.pg_client.endWALReader();
+        }
+
+        pub fn stream(self: *@This(), flag: *std.atomic.Value(bool)) !void {
             // TODO: check lengts, time elapsed, transaction_array to make sure nothing is missing.
             while (true) {
-                if (flag.load(.seq_cst)) {
-                    try self.pg_client.sendCopyDone();
+                const is_shutting_down = flag.load(.seq_cst);
+                const processor_status = self.status.load(.seq_cst);
+                
+                if (is_shutting_down) {
+                    switch (processor_status) {
+                        .Idle => {
+                            try self.flush();
+                            return;
+                        },
+                        .CopyData => {
+                            try self.pg_client.sendCopyDone();
+                            self.status.store(.CopyDone, .seq_cst);
+                        },
+                        .Failed => {
+                            return WalProcessorError.FailedWhileShutdown;
+                        },
+                        .CopyDone => {},
+                    }
                 }
 
                 var wal_response = self.pg_client.readWAL() catch |err| switch (err) {
                     error.WouldBlock, error.Timeout => {
+                        std.debug.print("timeout\n", .{});
                         continue; 
                     },
                     else => return err,
@@ -62,6 +100,8 @@ pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
                 if (wal_response) |*response| {
                     switch (response.message) {
                         pg.packet.ServerPacket.XLogData => {
+                            if (self.status.load(.seq_cst) != .CopyData) self.status.store(.CopyData, .seq_cst);
+
                             if (response.data) |entry| {
                                 try self.transaction_array.append(self.allocator, entry);
                                 // remove linking
@@ -101,25 +141,30 @@ pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
                         pg.packet.ServerPacket.CopyDone => {},
                         pg.packet.ServerPacket.CommandComplete => {},
                         pg.packet.ServerPacket.ReadyForQuery => {
-                            return;
+                            self.status.store(.Idle, .seq_cst);
                         },
                     }
 
                     const duration_passed = self.last_write_timestamp.addDuration(self.duration).toMilliseconds() < Io.Clock.real.now(self.io).toMilliseconds();
-
-                    if (duration_passed and self.log_array.items.len > 0) {
-                        try self.ch_client.writeLog(self.log_array.items);
-                        for (self.log_array.items) |*entry| entry.deinit(self.allocator);
-                        self.log_array.clearRetainingCapacity();
-
-                        self.last_write_timestamp = Io.Clock.real.now(self.io);
-
-                        if (self.is_test) {
-                            try std.Io.File.stdout().writeStreamingAll(self.io, submit_marker_str);
-                            try Io.File.stdout().writeStreamingAll(self.io, "\n");
-                        }
+                    if ((is_shutting_down or duration_passed) and self.log_array.items.len > 0) {
+                        try self.flush();
                     }
                 }
+            }
+        }
+
+        pub fn flush(self: *@This()) !void {
+            if (self.log_array.items.len == 0) return;
+
+            try self.ch_client.writeLog(self.log_array.items);
+            for (self.log_array.items) |*entry| entry.deinit(self.allocator);
+            self.log_array.clearRetainingCapacity();
+
+            self.last_write_timestamp = Io.Clock.real.now(self.io);
+
+            if (self.is_test) {
+                try std.Io.File.stdout().writeStreamingAll(self.io, submit_marker_str);
+                try Io.File.stdout().writeStreamingAll(self.io, "\n");
             }
         }
     };

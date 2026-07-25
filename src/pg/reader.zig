@@ -9,14 +9,14 @@ const Allocator = std.mem.Allocator;
 // to everyone else, this is our reader
 pub const Reader = ReaderT(lib.Stream);
 
-const default_timeout_val: i32 = 10_000;
+const default_timeout_ms: i32 = 5;
 
 // generic just for testing within this file
 fn ReaderT(comptime T: type) type {
     return struct {
         // Whether or not we've put a timeout on the request. This helps avoid
         // system calls when no timeout is set.
-        timeout_ms: i32 = default_timeout_val,
+        timeout_ms: i32 = default_timeout_ms,
 
         // Current active allocator. This will normally reference `default_allocator`
         // but a query can provide a specific allocator to use for the processing
@@ -113,7 +113,7 @@ fn ReaderT(comptime T: type) type {
             self.pos = extra;
             self.start = 0;
             self.buf = new_buf;
-            self.timeout_ms = default_timeout_val;
+            self.timeout_ms = default_timeout_ms;
         }
 
         // If you execute "select * from invalid_table", PostgreSQL will return
