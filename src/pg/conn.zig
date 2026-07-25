@@ -79,6 +79,7 @@ pub const Conn = struct {
     pub const Opts = struct {
         host: ?[]const u8 = null,
         port: ?u16 = null,
+        wal: []const u8,
         write_buffer: ?u16 = null,
         read_buffer: ?u16 = null,
         result_state_size: u16 = 32,
@@ -108,8 +109,8 @@ pub const Conn = struct {
     };
 
     pub const ConnOpts = struct {
-        auth: AuthOpts = .{},
-        connect: Opts = .{},
+        auth: AuthOpts,
+        connect: Opts,
     };
 
     pub const QueryOpts = struct {

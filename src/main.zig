@@ -20,44 +20,71 @@ const ready_str = "Service ready";
 const shutdown_str = "Shutdown signal caught. Exiting cleanly.";
 
 const Options = struct {
-    ch_host: []const u8,
-    ch_port: u16,
-    ch_user: []const u8,
-    ch_pass: []const u8,
-    ch_db: []const u8,
+    ch_host: []const u8 = "localhost",
+    ch_port: u16 = 9000,
+    ch_user: []const u8 = "default",
+    ch_pass: []const u8 = "clickhouse",
+    ch_db: []const u8 = "audit_log",
 
-    pg_host: []const u8,
-    pg_port: u16,
-    pg_user: []const u8,
-    pg_pass: []const u8,
-    pg_db: []const u8,
+    pg_host: []const u8 = "localhost",
+    pg_port: u16 = 5432,
+    pg_user: []const u8 = "db_rp",
+    pg_pass: []const u8 = "12345678",
+    pg_db: []const u8 = "db",
+    pg_wal: []const u8 = "wal_slot",
 
-    fn init(allocator: mem.Allocator, map: std.StringHashMap([]const u8)) !Options {
-        const ch_host_value = map.get("--ch-host");
-        const ch_port_value = map.get("--ch-port");
-        const ch_user_value = map.get("--ch-user");
-        const ch_pass_value = map.get("--ch-pass");
-        const ch_db_value = map.get("--ch-db");
+    is_test: bool = false,
+    user: []const u8,
 
-        const pg_host_value = map.get("--pg-host");
-        const pg_port_value = map.get("--pg-port");
-        const pg_user_value = map.get("--pg-user");
-        const pg_pass_value = map.get("--pg-pass");
-        const pg_db_value = map.get("--pg-db");
+    fn init(allocator: mem.Allocator, environ_map: *std.process.Environ.Map) !Options {
+        const os_user = environ_map.get("USER");
 
-        return .{
-            .ch_host = try allocator.dupe(u8, if (ch_host_value != null) ch_host_value.? else "localhost"),
-            .ch_port = if (ch_port_value != null) try std.fmt.parseInt(u16, ch_port_value.?, 10) else 9000,
-            .ch_user = try allocator.dupe(u8, if (ch_user_value != null) ch_user_value.? else "default"),
-            .ch_pass = try allocator.dupe(u8, if (ch_pass_value != null) ch_pass_value.? else "clickhouse"),
-            .ch_db = try allocator.dupe(u8, if (ch_db_value != null) ch_db_value.? else "audit_log"),
+        assert(os_user != null);
 
-            .pg_host = try allocator.dupe(u8, if (pg_host_value != null) pg_host_value.? else "localhost"),
-            .pg_port = if (pg_port_value != null) try std.fmt.parseInt(u16, pg_port_value.?, 10) else 5432,
-            .pg_user = try allocator.dupe(u8, if (pg_user_value != null) pg_user_value.? else "db_rp"),
-            .pg_pass = try allocator.dupe(u8, if (pg_pass_value != null) pg_pass_value.? else "12345678"),
-            .pg_db = try allocator.dupe(u8, if (pg_db_value != null) pg_db_value.? else "db"),
+        var options: Options = .{
+            .user = try allocator.dupe(u8, os_user.?)
         };
+
+        if (environ_map.get("ERGO_TEST")) |is_test| {
+            options.is_test = mem.eql(u8, "1", is_test);
+        }
+
+        if (environ_map.get("CH_HOST")) |ch_host| {
+            options.ch_host = try allocator.dupe(u8, ch_host);
+        }
+        if (environ_map.get("CH_PORT")) |ch_port| {
+            options.ch_port = try std.fmt.parseInt(u16, ch_port, 10);
+        }
+        if (environ_map.get("CH_USER")) |ch_user| {
+            options.ch_user = try allocator.dupe(u8, ch_user);
+        }
+        if (environ_map.get("CH_PASS")) |ch_pass| {
+            options.ch_pass = try allocator.dupe(u8, ch_pass);
+        }
+        if (environ_map.get("CH_DB")) |ch_db| {
+            options.ch_db = try allocator.dupe(u8, ch_db);
+        }
+
+        if (environ_map.get("PG_HOST")) |pg_host| {
+            options.pg_host = try allocator.dupe(u8, pg_host);
+        }
+        if (environ_map.get("PG_PORT")) |pg_port| {
+            options.pg_port = try std.fmt.parseInt(u16, pg_port, 10);
+        }
+        if (environ_map.get("PG_USER")) |pg_user| {
+            options.pg_user = try allocator.dupe(u8, pg_user);
+        }
+        if (environ_map.get("PG_PASS")) |pg_pass| {
+            options.pg_pass = try allocator.dupe(u8, pg_pass);
+        }
+        if (environ_map.get("PG_DB")) |pg_db| {
+            options.pg_db = try allocator.dupe(u8, pg_db);
+        }
+        if (environ_map.get("PG_WAL")) |pg_wal| {
+            options.pg_wal = try allocator.dupe(u8, pg_wal);
+        }
+
+        return options;
     }
 
     fn deinit(self: *@This(), allocator: mem.Allocator) void {
@@ -70,6 +97,8 @@ const Options = struct {
         allocator.free(self.pg_user);
         allocator.free(self.pg_pass);
         allocator.free(self.pg_db);
+
+        allocator.free(self.user);
     }
 };
 
@@ -79,38 +108,6 @@ fn handleSignel(sig: std.posix.SIG) callconv(.c) void {
     _ = sig;
 
     is_shutting_down.store(true, .seq_cst);
-}
-
-fn parseArgs(allocator: mem.Allocator, args: []const []const u8) !Options {
-    var args_map = std.StringHashMap([]const u8).init(allocator);
-    defer args_map.deinit();
-
-    if (args.len % 2 != 0) {
-        std.debug.print("Error: expedted equal args pairs, got {d}\n", .{args.len});
-        return error.ArgumentCountMismatchError;
-    }
-
-    try args_map.ensureUnusedCapacity(@as(u32, @truncate(args.len / 2)));
-
-    var i: u8 = 0;
-    while (i < args.len) : (i += 2) {
-        const key = args[i];
-        const value = args[i + 1];
-
-        if (!mem.startsWith(u8, key, "--")) {
-            std.debug.print("Error: expedted key format '--[]', got: {s}\n", .{key});
-            return error.InvalidArgsKeyFormatError;
-        }
-
-        if (mem.startsWith(u8, value, "--")) {
-            std.debug.print("Error: expedted value after key, got: {s}\n", .{value});
-            return error.InvalidArgsValueFormatError;
-        }
-
-        args_map.putAssumeCapacity(key, value);
-    }
-
-    return try Options.init(allocator, args_map);
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -125,15 +122,8 @@ pub fn main(init: std.process.Init) !void {
     std.posix.sigaction(std.posix.SIG.INT, &act, null);
     std.posix.sigaction(std.posix.SIG.TERM, &act, null);
 
-    const args = try init.minimal.args.toSlice(allocator);
-    var options = try parseArgs(allocator, args[1..]);
+    var options: Options = try .init(allocator, init.environ_map);
     defer options.deinit(allocator);
-
-    const user_env_key = "USER";
-    const os_user = init.environ_map.get(user_env_key);
-
-    // used for running test in child process
-    const is_test = init.environ_map.get("ERGO_TEST");
 
     try Io.File.stdout().writeStreamingAll(io, ready_str);
     try Io.File.stdout().writeStreamingAll(io, "\n");
@@ -142,12 +132,13 @@ pub fn main(init: std.process.Init) !void {
         .connect = .{  
             .port = 5432,
             .host = options.pg_host,
+            .wal = options.pg_wal,
         },
         .auth = .{
             .username = options.pg_user,
             .password = options.pg_pass,
             .database = options.pg_db,
-            .application_name = "Ergo",
+            .application_name = application_name,
             .timeout_ms = 10_000,
         } 
     });
@@ -160,7 +151,7 @@ pub fn main(init: std.process.Init) !void {
         .password = options.ch_pass,
         .database = options.ch_db,
         .application_name = application_name,
-    }, os_user.?);
+    }, options.user);
     defer ch_client.deinit();
 
     try ch_client.connect();
@@ -172,7 +163,7 @@ pub fn main(init: std.process.Init) !void {
         .last_write_timestamp = std.Io.Clock.real.now(io),
         .allocator = allocator,
         .io = io,
-        .is_test = is_test != null,
+        .is_test = options.is_test,
     };
     defer processor.deinit();
 
@@ -185,8 +176,63 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn createTestDb(allocator: mem.Allocator, io: Io, db_name: []const u8) !void {
-    const query = try std.fmt.allocPrint(allocator, "CREATE DATABASE IF NOT EXISTS {s}", .{db_name});
-    defer allocator.free(query);
+    // PG
+    const pg_query = try std.fmt.allocPrint(allocator, "CREATE DATABASE {s}", .{db_name});
+    defer allocator.free(pg_query);
+
+    var pg_env = try std.process.Environ.createMap(std.testing.environ, allocator);
+    defer pg_env.deinit();
+    try pg_env.put("PGPASSWORD", "postgres");
+
+    var pg_create_argv = [_][]const u8{
+        "psql",
+        "-h", "127.0.0.1",
+        "-p", "5432",
+        "-U", "postgres",
+        "-d", "postgres",
+        "-q", "-t", "-A", // Formatting
+        "-c", pg_query,
+    };
+    const pg_create_result = try std.process.run(allocator, io, .{ 
+        .argv = &pg_create_argv,
+        .environ_map = &pg_env, 
+    });
+    defer {
+        allocator.free(pg_create_result.stdout);
+        allocator.free(pg_create_result.stderr);
+    }
+
+    if (pg_create_result.term != .exited or pg_create_result.term.exited != 0 or pg_create_result.stderr.len > 0) {
+        std.debug.print("Error: PSQL create failed: {s}\n", .{pg_create_result.stderr});
+        return error.PsqlExecutionFailed;
+    }
+
+    var pg_init_argv = [_][]const u8{
+        "psql",
+        "-h", "127.0.0.1",
+        "-p", "5432",
+        "-U", "postgres",
+        "-d", db_name,
+        "-a",
+        "-f", "./test_fixtures/create-schema.sql"
+    };
+    const pg_init_result = try std.process.run(allocator, io, .{ 
+        .argv = &pg_init_argv,
+        .environ_map = &pg_env, 
+    });
+    defer {
+        allocator.free(pg_init_result.stdout);
+        allocator.free(pg_init_result.stderr);
+    }
+
+    if (pg_init_result.term != .exited or pg_init_result.term.exited != 0 or pg_init_result.stderr.len > 0) {
+        std.debug.print("Error: PSQL init failed: {s}\n", .{pg_init_result.stderr});
+        return error.PsqlExecutionFailed;
+    }
+
+    // CH
+    const ch_query = try std.fmt.allocPrint(allocator, "CREATE DATABASE IF NOT EXISTS {s}", .{db_name});
+    defer allocator.free(ch_query);
 
     var ch_create_argv = [_][]const u8{ 
         "clickhouse-client", 
@@ -194,7 +240,7 @@ fn createTestDb(allocator: mem.Allocator, io: Io, db_name: []const u8) !void {
         "--port", "9000",
         "--user", "default",
         "--password", "clickhouse",
-        "--query", query
+        "--query", ch_query
     };
     const ch_create_result = try std.process.run(allocator, io, .{ 
         .argv = &ch_create_argv,
@@ -235,11 +281,17 @@ fn createTestDb(allocator: mem.Allocator, io: Io, db_name: []const u8) !void {
 fn setupChildProcess(allocator: mem.Allocator, io: Io, db_name: []const u8) !std.process.Child {
     var env = try std.process.Environ.createMap(std.testing.environ, allocator);
     defer env.deinit();
+
+    const wal_name = try std.fmt.allocPrint(allocator, "wal_slot_{s}", .{db_name});
+    defer allocator.free(wal_name);
+
     try env.put("ERGO_TEST", "1");
+    try env.put("CH_DB", db_name);
+    try env.put("PG_DB", db_name);
+    try env.put("PG_WAL", wal_name);
 
     const argv = &[_][]const u8{
         "./zig-out/bin/ergo",
-        "--ch-db", db_name
     };
     var child = try std.process.spawn(io, .{
         .argv = argv,
@@ -290,7 +342,7 @@ fn monitorStderr(stderr: std.posix.fd_t, child_pid: std.posix.pid_t, has_error: 
 
 
 test "test:main:beforeAll" {
-    std.testing.refAllDecls(@This());
+    // std.testing.refAllDecls(@This());
 }
 
 test "main ensure full transaction sync on interupt" {
@@ -301,10 +353,6 @@ test "main ensure full transaction sync on interupt" {
 
     const db_name = try std.fmt.allocPrint(allocator, "test_db_{d}", .{std.Io.Clock.real.now(io).toNanoseconds()});
     defer allocator.free(db_name);
-
-    var pg_env = try std.process.Environ.createMap(std.testing.environ, allocator);
-    defer pg_env.deinit();
-    try pg_env.put("PGPASSWORD", "12345678");
 
     try createTestDb(allocator, io, db_name);
     var child = try setupChildProcess(allocator, io, db_name);
@@ -321,12 +369,16 @@ test "main ensure full transaction sync on interupt" {
     });
     stderr_thread.detach();
 
+    var pg_env = try std.process.Environ.createMap(std.testing.environ, allocator);
+    defer pg_env.deinit();
+    try pg_env.put("PGPASSWORD", "12345678");
+
     var pg_argv = [_][]const u8{
         "psql",
         "-h", "127.0.0.1",
         "-p", "5432",
         "-U", "db_rw",
-        "-d", "db",
+        "-d", db_name,
         "-a",
         "-f", "./test_fixtures/shutdown_query.sql"
     };
@@ -407,7 +459,7 @@ test "main ensure full transaction sync on interupt" {
         "-h", "127.0.0.1",
         "-p", "5432",
         "-U", "db_rw",
-        "-d", "db",
+        "-d", db_name,
         "-q", "-t", "-A", // Formatting
         "-c", "SELECT active FROM pg_replication_slots WHERE slot_name = 'wal_slot' AND plugin = 'pgoutput' ORDER BY active LIMIT 1;",
     };
@@ -462,7 +514,7 @@ test "making sure full commits are logged without interupt" {
         "-h", "127.0.0.1",
         "-p", "5432",
         "-U", "db_rw",
-        "-d", "db",
+        "-d", db_name,
         "-a",
         "-f", "./test_fixtures/standard_query.sql"
     };

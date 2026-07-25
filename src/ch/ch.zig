@@ -32,7 +32,7 @@ pub const ClickHouseConfig = struct {
     username: []const u8 = "default",
     password: []const u8 = "",
     database: []const u8 = "default",
-    application_name: ?[]const u8 = null,
+    application_name: []const u8 = "Ergo",
     settings: settings.Settings = .{},
 };
 

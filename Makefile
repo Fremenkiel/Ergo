@@ -1,6 +1,6 @@
 # Makefile
 
-phony: ch-create, dev-up, dev-down, test
+phony: ch-create, dev-up, dev-down, test, build
 
 CH_ADDR ?= localhost
 CH_PORT ?= 9000
@@ -26,5 +26,11 @@ dev-down:
 
 test:
 	zig build test -Dopenssl=true \
+  -Dopenssl_lib_path=/opt/homebrew/opt/openssl@3/lib \
+  -Dopenssl_include_path=/opt/homebrew/opt/openssl@3/include
+
+
+build:
+	zig build -Dopenssl=true \
   -Dopenssl_lib_path=/opt/homebrew/opt/openssl@3/lib \
   -Dopenssl_include_path=/opt/homebrew/opt/openssl@3/include

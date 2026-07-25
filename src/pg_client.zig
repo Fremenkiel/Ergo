@@ -159,7 +159,7 @@ pub const PgClient = struct {
     }
 
     pub fn startWALReader(self: *@This()) !void {
-        const query = "START_REPLICATION SLOT wal_slot LOGICAL 0/0 (proto_version '1', publication_names 'db_pub', messages 'true')";
+        const query = try std.fmt.allocPrint(self.allocator, "START_REPLICATION SLOT {s} LOGICAL 0/0 (proto_version '1', publication_names 'db_pub', messages 'true')", .{self.conn_opts.connect.wal});
 
         const msg_len: u32 = @as(u32, @intCast(query.len)) + 4 + 1;
         var len_buf: [4]u8 = undefined;
@@ -180,11 +180,11 @@ pub const PgClient = struct {
     pub fn readWAL(self: *@This()) !ReadResponse {
         if (self.wal_conn == null) return PgClientError.WalConnectionNotInitialized;
 
-        const reader = &self.wal_conn.?._reader;
+        const reader = &self.wal_conn.?.reader;
 
         if (reader.start == reader.pos) {
             if (self.read_timeout_ms) |read_timeout_ms| {
-                const fd = self.wal_conn.?._stream.stream.socket.handle;
+                const fd = self.wal_conn.?.stream.stream.socket.handle;
 
                 var fds = [_]std.posix.pollfd{
                     .{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 },
@@ -197,7 +197,7 @@ pub const PgClient = struct {
             }
         }
 
-        const msg = try self.wal_conn.?._reader.next();
+        const msg = try self.wal_conn.?.reader.next();
 
         var response = ReadResponse{
             .entry = null,
@@ -578,7 +578,7 @@ pub const PgClient = struct {
         \\ WHERE a.attrelid = $1::regclass AND a.attnum > 0 AND NOT a.attisdropped
         \\ ORDER BY a.attnum;
         , .{table_name}, .{ .column_names = true });
-        defer result.deinit();
+        defer result.deinit(self.allocator);
 
         var columns = std.ArrayList(ColumnDef).empty;
         const column_name_index = result.columnIndex("column_name").?;
@@ -607,13 +607,13 @@ pub const PgClient = struct {
     pub fn startFlow(self: *@This()) !void {
         if (self.wal_conn == null) return PgClientError.WalConnectionNotInitialized;
 
-        try self.wal_conn.?.reader.startFlow(null, 250);
+        try self.wal_conn.?.reader.startFlow(250);
     }
 
     pub fn endFlow(self: *@This()) !void {
         if (self.wal_conn == null) return PgClientError.WalConnectionNotInitialized;
 
-        try self.wal_conn.?._reader.endFlow();
+        try self.wal_conn.?.reader.endFlow();
     }
 
     pub fn createWalConn(allocator: mem.Allocator, io:  Io, opts: pg.Conn.ConnOpts) !*pg.Conn {
@@ -765,6 +765,7 @@ test "parsePgOutput maps RELATION correctly" {
             .connect = .{  
                 .port = 5432,
                 .host = "localhost",
+                .wal = "wal_slot",
             },
             .auth = .{
                 .username = "db_rp",
@@ -1071,6 +1072,7 @@ test "readSchemaKeys" {
             .connect = .{  
                 .port = 5432,
                 .host = "localhost",
+                .wal = "wal_slot",
             },
             .auth = .{
                 .username = "db_rp",

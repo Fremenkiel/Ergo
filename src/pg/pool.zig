@@ -27,7 +27,7 @@ pub const Pool = struct {
     pub const Opts = struct {
         size: u16 = 10,
         auth: Conn.AuthOpts = .{},
-        connect: Conn.Opts = .{},
+        connect: Conn.Opts,
         timeout_ms: i32 = 10 * std.time.ms_per_s,
         connect_on_init_count: ?u16 = null,
     };

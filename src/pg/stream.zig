@@ -160,31 +160,29 @@ pub const Stream = struct {
     }
 
     pub fn readWithTimeout(self: *@This(), buffer: []u8, timeout_ms: i32) !usize {
-        _ = timeout_ms;
-        return self.read(buffer);
-        // var fds = [_]std.posix.pollfd{
-        //     .{ .fd = self.stream.socket.handle, .events = std.posix.POLL.IN, .revents = 0 },
-        //     .{ .fd = self.cancel_pipe[0], .events = std.posix.POLL.IN, .revents = 0 },
-        // };
-        //
-        // const ready_count = try posix.poll(&fds, timeout_ms);
-        //
-        // if (ready_count == 0) {
-        //     return error.Timeout;
-        // }
-        //
-        // if ((fds[1].revents & posix.POLL.IN) != 0) {
-        //     var dummy: [1]u8 = undefined;
-        //     _ = try posix.read(self.cancel_pipe[0], &dummy);
-        //
-        //     return error.Cancelled;
-        // }
-        //
-        // if ((fds[0].revents & posix.POLL.IN) != 0) {
-        //     return self.read(buffer);
-        // }
-        //
-        // return error.UnexpectedPollEvent;
+        var fds = [_]std.posix.pollfd{
+            .{ .fd = self.stream.socket.handle, .events = std.posix.POLL.IN, .revents = 0 },
+            .{ .fd = self.cancel_pipe[0], .events = std.posix.POLL.IN, .revents = 0 },
+        };
+
+        const ready_count = try posix.poll(&fds, timeout_ms);
+
+        if (ready_count == 0) {
+            return error.Timeout;
+        }
+
+        if ((fds[1].revents & posix.POLL.IN) != 0) {
+            var dummy: [1]u8 = undefined;
+            _ = try posix.read(self.cancel_pipe[0], &dummy);
+
+            return error.Cancelled;
+        }
+
+        if ((fds[0].revents & posix.POLL.IN) != 0) {
+            return self.read(buffer);
+        }
+
+        return error.UnexpectedPollEvent;
     }
 };
 
@@ -285,19 +283,19 @@ fn isHostName(host: []const u8) bool {
     }
     return std.mem.findNone(u8, host, "0123456789.") != null;
 }
-//
-// test "cancel stream while read" {
-//     const allocator = std.testing.allocator;
-//     const io = std.testing.io;
-//
-//     var stream = try Stream.connect(io, allocator, .{ .port = 5432, .host = "localhost" }, null);
-//     errdefer stream.close();
-//
-//     const buf = try Buffer.init(allocator, 2048);
-//     errdefer buf.deinit();
-//
-//     var reader = try Reader.init(allocator, 4096, stream);
-//     errdefer reader.deinit();
-//
-//     std.testing.expectError(error.Cancelled, try reader.readWithTimeout(250));
-// }
+
+test "cancel stream while read" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var stream = try Stream.connect(io, allocator, .{ .port = 5432, .host = "localhost" }, null);
+    errdefer stream.close();
+
+    const buf = try Buffer.init(allocator, 2048);
+    errdefer buf.deinit();
+
+    var reader = try Reader.init(allocator, 4096, stream);
+    errdefer reader.deinit();
+
+    std.testing.expectError(error.Cancelled, try reader.readWithTimeout(250));
+}

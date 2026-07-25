@@ -614,7 +614,7 @@ test "sendHello ensure correct encoding" {
     try std.testing.expectEqual(@intFromEnum(ch.packet.ClientPacket.Hello), packet_type);
 
     const name = try ch.protocol.readString(client.reader.?);
-    try std.testing.expectEqualStrings(ch.protocol.CLIENT_NAME, name);
+    try std.testing.expectEqualStrings(client.config.application_name, name);
 
     const major_version = try ch.protocol.readVarInt(client.reader.?);
     try std.testing.expectEqual(ch.protocol.CLIENT_VERSION_MAJOR, major_version);
@@ -696,6 +696,7 @@ test "startInsert ensure correct query info" {
         .username = "default",
         .password = "clickhouse",
         .database = "audit_log",
+        .application_name = "Ergo test",
     }, os_user);
     defer client.deinit();
 
@@ -871,6 +872,7 @@ test "writeLog" {
         .username = "default",
         .password = "clickhouse",
         .database = "audit_log",
+        .application_name = "Ergo test",
     }, os_user);
     defer client.deinit();
 
@@ -996,6 +998,7 @@ test "insertRow ensure correct insertion" {
         .username = "default",
         .password = "clickhouse",
         .database = "audit_log",
+        .application_name = "Ergo test",
     }, os_user);
     defer client.deinit();
 
