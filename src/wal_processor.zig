@@ -19,7 +19,6 @@ pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
         last_write_timestamp: Io.Timestamp,
         log_array: std.ArrayList(types.AuditEntry) = .empty,
         transaction_array: std.ArrayList(types.AuditEntry) = .empty,
-        in_flight_transaction: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
         is_test: bool = false,
 
@@ -38,90 +37,87 @@ pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
         }
 
         pub fn startStreaming(self: *@This(), flag: *std.atomic.Value(bool)) !void {
-            try self.pg_client.setReadTimeoutMs(250);
-
-            self.pg_client.startWALReader() catch |err| switch (err) {
+            self.pg_client.startWALReader(5 * std.time.ms_per_s) catch |err| switch (err) {
                 pg_client.PgClientError.WalConnectionNotInitialized => {
                     self.pg_client.*.wal_conn = try PgClient.createWalConn(self.allocator, self.io, self.pg_client.*.conn_opts);
 
-                    try self.pg_client.startWALReader();
+                    try self.pg_client.startWALReader(5 * std.time.ms_per_s);
                 },
                 else => return err,
             };
 
             // TODO: check lengts, time elapsed, transaction_array to make sure nothing is missing.
-            while (!(flag.load(.seq_cst) and self.log_array.items.len == 0)) {
-                if (flag.load(.seq_cst) and !self.in_flight_transaction.load(.seq_cst)) {
-                    self.pg_client.cancel(); 
-                    return;
+            while (true) {
+                if (flag.load(.seq_cst)) {
+                    try self.pg_client.sendCopyDone();
                 }
 
-                var response = self.pg_client.readWAL() catch |err| switch (err) {
+                var wal_response = self.pg_client.readWAL() catch |err| switch (err) {
                     error.WouldBlock, error.Timeout => {
                         continue; 
                     },
                     else => return err,
                 };
 
-                if (response.eof) {
-                    try self.ch_client.writeLog(self.log_array.items);
-                    return;
-                }
-
-                if (response.entry) |entry| {
-                    if (self.transaction_array.items.len == 0) {
-                        self.in_flight_transaction.store(true, .seq_cst);
-                    }
-
-                    try self.transaction_array.append(self.allocator, entry);
-                    // remove linking
-                    response.entry = null;
-                }
-
-                if (response.commit_timestamp != null) {
-                    for (self.transaction_array.items) |*row| {
-                        row.event_time = response.commit_timestamp.?;
-                    }
-                    try self.log_array.appendSlice(self.allocator, self.transaction_array.items);
-                    self.transaction_array.clearRetainingCapacity();
-
-                    self.in_flight_transaction.store(false, .seq_cst);
-
-                    // Test hook
-                    if (self.log_array.items.len > 0 and self.is_test) {
-                        var marker_idx: ?usize = null;
-                        for (self.log_array.items, 0..) |*item, i| {
-                            if (std.mem.eql(u8, "public.test_sync_marker", item.table_name)) {
-                                marker_idx = i;
-                                break;
+                if (wal_response) |*response| {
+                    switch (response.message) {
+                        pg.packet.ServerPacket.XLogData => {
+                            if (response.data) |entry| {
+                                try self.transaction_array.append(self.allocator, entry);
+                                // remove linking
+                                response.data = null;
                             }
-                        }
 
-                        if (marker_idx) |idx| {
-                            _ = self.log_array.orderedRemove(idx);
-                            try std.Io.File.stdout().writeStreamingAll(self.io, sync_marker_str);
+                            if (response.timestamp != null) {
+                                for (self.transaction_array.items) |*row| {
+                                    row.event_time = response.timestamp.?;
+                                }
+                                try self.log_array.appendSlice(self.allocator, self.transaction_array.items);
+                                self.transaction_array.clearRetainingCapacity();
+
+                            }
+                            // Test hook
+                            if (self.transaction_array.items.len > 0 and self.is_test) {
+                                var marker_idx: ?usize = null;
+                                for (self.transaction_array.items, 0..) |*item, i| {
+                                    if (std.mem.eql(u8, "public.test_sync_marker", item.table_name)) {
+                                        marker_idx = i;
+                                        break;
+                                    }
+                                }
+
+                                if (marker_idx) |idx| {
+                                    _ = self.transaction_array.orderedRemove(idx);
+                                    try std.Io.File.stdout().writeStreamingAll(self.io, sync_marker_str);
+                                    try Io.File.stdout().writeStreamingAll(self.io, "\n");
+
+                                    while (!flag.load(.seq_cst)) {
+                                        try Io.sleep(self.io, Io.Duration{ .nanoseconds = 10 * std.time.ns_per_ms }, .real);
+                                    }
+                                }
+                            }
+                        },
+                        pg.packet.ServerPacket.Keepalive => {},
+                        pg.packet.ServerPacket.CopyDone => {},
+                        pg.packet.ServerPacket.CommandComplete => {},
+                        pg.packet.ServerPacket.ReadyForQuery => {
+                            return;
+                        },
+                    }
+
+                    const duration_passed = self.last_write_timestamp.addDuration(self.duration).toMilliseconds() < Io.Clock.real.now(self.io).toMilliseconds();
+
+                    if (duration_passed and self.log_array.items.len > 0) {
+                        try self.ch_client.writeLog(self.log_array.items);
+                        for (self.log_array.items) |*entry| entry.deinit(self.allocator);
+                        self.log_array.clearRetainingCapacity();
+
+                        self.last_write_timestamp = Io.Clock.real.now(self.io);
+
+                        if (self.is_test) {
+                            try std.Io.File.stdout().writeStreamingAll(self.io, submit_marker_str);
                             try Io.File.stdout().writeStreamingAll(self.io, "\n");
-
-                            while (!flag.load(.seq_cst)) {
-                                try Io.sleep(self.io, Io.Duration{ .nanoseconds = 10 * std.time.ns_per_ms }, .real);
-                            }
                         }
-                    }
-                }
-
-                const is_shutting_down = flag.load(.seq_cst);
-                const duration_passed = self.last_write_timestamp.addDuration(self.duration).toMilliseconds() < Io.Clock.real.now(self.io).toMilliseconds();
-
-                if ((is_shutting_down or duration_passed) and self.log_array.items.len > 0) {
-                    try self.ch_client.writeLog(self.log_array.items);
-                    for (self.log_array.items) |*entry| entry.deinit(self.allocator);
-                    self.log_array.clearRetainingCapacity();
-
-                    self.last_write_timestamp = Io.Clock.real.now(self.io);
-
-                    if (self.is_test) {
-                        try std.Io.File.stdout().writeStreamingAll(self.io, submit_marker_str);
-                        try Io.File.stdout().writeStreamingAll(self.io, "\n");
                     }
                 }
             }
@@ -151,11 +147,6 @@ const MockPgClient = struct {
         };
     }
 
-    pub fn setReadTimeoutMs(self: *@This(), timeout_ms: u32) !void {
-        _ = self;
-        _ = timeout_ms;
-    }
-
     pub fn cancel(self: *@This()) void {
         self.wal_conn.* = false;
     }
@@ -164,11 +155,16 @@ const MockPgClient = struct {
         self.allocator.destroy(self.wal_conn);
     }
 
-    pub fn startWALReader(self: *@This()) !void {
+    pub fn startWALReader(self: *@This(), timeout_ms: i32) !void {
+        _ = timeout_ms;
         if (!self.wal_conn.*) return pg_client.PgClientError.WalConnectionNotInitialized;
     }
 
-    pub fn readWAL(self: *@This()) !pg_client.ReadResponse {
+    pub fn sendCopyDone(self: *@This()) !void {
+        _ = self;
+    }
+
+    pub fn readWAL(self: *@This()) !?pg_client.ReadResponse {
         if (self.read_response_index == null) {
             self.read_response_index = 0;
         } else {
@@ -176,7 +172,11 @@ const MockPgClient = struct {
         }
 
         if (self.read_response_index.? == self.responses.len) {
-            return pg_client.EOFReadResponse;
+            return .{
+                .data = null,
+                .timestamp = null,
+                .message = pg.packet.ServerPacket.ReadyForQuery,
+            };
         }
 
         return self.responses[self.read_response_index.?];
@@ -274,7 +274,7 @@ test "startStreaming read and parse correctly" {
 
     var res = [_]pg_client.ReadResponse{
         .{ 
-            .entry = .{
+            .data = .{
                 .event_time = undefined,
                 .table_name = try allocator.dupe(u8, "test.addresses"),
                 .new_values = new_values,
@@ -286,7 +286,8 @@ test "startStreaming read and parse correctly" {
                 .ip_address = try allocator.dupe(u8, "192.168.1.50"),
                 .primary_key = try allocator.dupe(u8, "1"),
             },
-            .commit_timestamp = 10
+            .timestamp = 10,
+            .message = pg.packet.ServerPacket.XLogData,
         },
     };
 

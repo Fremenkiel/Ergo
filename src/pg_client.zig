@@ -13,33 +13,32 @@ pub const PgClientError = error{
 PostgresReplicationError,
 WalConnectionNotInitialized,
 ConnectionPoolNotInitialized,
+UnableToSendCopyDone,
+InvalidReadyForQueryMessage,
+InvalidCopyDoneMessage,
+TransactionErrorState,
+TransactionStateUnknown
 };
 
 pub const ReadResponse = struct {
-    entry: ?types.AuditEntry,
-    commit_timestamp: ?i64,
-    eof: bool = false,
+    data: ?types.AuditEntry,
+    timestamp: ?i64,
+    message: pg.packet.ServerPacket,
 
     pub fn deinit(self: *@This(), allocator: mem.Allocator) void {
-        if (self.entry) |*entry| {
+        if (self.data) |*entry| {
             entry.deinit(allocator);
         }
     }
 };
 
-pub const EOFReadResponse: ReadResponse = .{
-    .entry = null,
-    .commit_timestamp = null,
-    .eof = true,
-};
-
 pub const ParseResponse = struct {
-    entry: ?types.AuditEntry,
+    data: ?types.AuditEntry,
     last_lsn: ?u64,
-    commit_timestamp: ?u64,
+    timestamp: ?u64,
 
     pub fn deinit(self: *@This(), allocator: mem.Allocator) void {
-        if (self.entry) |*entry| {
+        if (self.data) |*entry| {
             entry.deinit(allocator);
         }
     }
@@ -80,8 +79,6 @@ pub const PgClient = struct {
     pool: ?*pg.Pool,
     wal_conn: ?*pg.Conn,
 
-    read_timeout_ms: ?i32,
-
     pub fn init(io: Io, allocator: mem.Allocator, opts: pg.Conn.ConnOpts) !PgClient{
         var pool = try createConnPool(allocator, io, opts);
         errdefer pool.deinit();
@@ -108,12 +105,7 @@ pub const PgClient = struct {
             .table_reg = std.AutoHashMap(u32, TableDef).init(allocator),
             .wal_conn = conn,
             .pool = pool,
-            .read_timeout_ms = null,
         };
-    }
-
-    pub fn setReadTimeoutMs(self: *@This(), timeout_ms: u32) !void {
-        self.read_timeout_ms = @intCast((timeout_ms % 1000) * 1000);
     }
 
     pub fn cancel(self: *@This()) void {
@@ -158,7 +150,7 @@ pub const PgClient = struct {
         self.context.changed_columns.clearRetainingCapacity();
     }
 
-    pub fn startWALReader(self: *@This()) !void {
+    pub fn startWALReader(self: *@This(), timeout_ms: i32) !void {
         const query = try std.fmt.allocPrint(self.allocator, "START_REPLICATION SLOT {s} LOGICAL 0/0 (proto_version '1', publication_names 'db_pub', messages 'true')", .{self.conn_opts.connect.wal});
 
         const msg_len: u32 = @as(u32, @intCast(query.len)) + 4 + 1;
@@ -174,91 +166,138 @@ pub const PgClient = struct {
             return PgClientError.WalConnectionNotInitialized;
         }
 
-        try self.startFlow();
+        try self.startFlow(timeout_ms);
     }
 
-    pub fn readWAL(self: *@This()) !ReadResponse {
+    pub fn sendCopyDone(self: *@This()) !void {
+        var len_buf: [4]u8 = undefined;
+        mem.writeInt(i32, &len_buf, 4, .big);
+
+        if (self.wal_conn) |wal_conn| {
+            try wal_conn.write("c");
+            try wal_conn.write(&len_buf);
+        } else {
+            return PgClientError.UnableToSendCopyDone;
+        }
+    }
+
+    pub fn readWAL(self: *@This()) !?ReadResponse {
         if (self.wal_conn == null) return PgClientError.WalConnectionNotInitialized;
 
-        const reader = &self.wal_conn.?.reader;
-
-        if (reader.start == reader.pos) {
-            if (self.read_timeout_ms) |read_timeout_ms| {
-                const fd = self.wal_conn.?.stream.stream.socket.handle;
-
-                var fds = [_]std.posix.pollfd{
-                    .{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 },
-                };
-
-                const n = try std.posix.poll(&fds, read_timeout_ms);
-                if (n == 0) {
-                    return error.Timeout;
-                }
-            }
-        }
-
         const msg = try self.wal_conn.?.reader.next();
-
-        var response = ReadResponse{
-            .entry = null,
-            .commit_timestamp = null,
-        };
 
         switch (msg.type) {
             'W' => {
                 // Server entered COPY BOTH mode,
             },
             'd' => {
-                if (msg.data.len == 0) return response;
+                if (msg.data.len == 0) return null;
+
+                var response = ReadResponse{
+                    .data = null,
+                    .timestamp = null,
+                    .message = undefined,
+                };
 
                 const data_type = msg.data[0];
-                if (data_type == 'w') {
-                    if (msg.data.len < 25) return response;
+                switch (data_type) {
+                    'w' => {
+                        response.message = pg.packet.ServerPacket.XLogData;
 
-                    const start_lsn = mem.readInt(u64, msg.data[1..9][0..8], .big);
-                    const server_timestamp = mem.readInt(i64, msg.data[17..25][0..8], .big);
+                        assert(msg.data.len >= 25);
 
-                    self.last_timestamp = server_timestamp;
+                        const start_lsn = mem.readInt(u64, msg.data[1..9][0..8], .big);
+                        const server_timestamp = mem.readInt(i64, msg.data[17..25][0..8], .big);
 
-                    const payload = msg.data[25..];
-
-                    const parse_response = try self.parsePgOutput(payload);
-
-                    if (parse_response.last_lsn) |lsn| {
-                        response.commit_timestamp = pgWalToClickHouseMs(parse_response.commit_timestamp.?);
-                        if (lsn > self.last_lsn) {
-                            self.last_lsn = lsn;
-                        }
-                    } else {
-                        if (start_lsn > self.last_lsn) {
-                            self.last_lsn = start_lsn;
-                        }
-                    }
-
-                    if (parse_response.entry) |entry| {
-                        response.entry = entry;
-                    }
-
-                    // Proactively acknowledge this processed WAL chunk
-                    try self.wal_conn.?.sendStandbyStatusUpdate(self.last_lsn, self.last_timestamp);
-                } else if (data_type == 'k') {
-                    if (msg.data.len < 18) return response;
-
-                    const current_lsn = mem.readInt(u64, msg.data[1..9][0..8], .big);
-                    const server_timestamp = mem.readInt(i64, msg.data[9..17][0..8], .big);
-                    const reply_requested = msg.data[17];
-
-                    if (current_lsn > self.last_lsn) {
-                        self.last_lsn = current_lsn;
-                    }
-                    if (server_timestamp > self.last_timestamp) {
                         self.last_timestamp = server_timestamp;
-                    }
 
-                    if (reply_requested == 1) {
+                        const payload = msg.data[25..];
+
+                        const parse_response = try self.parsePgOutput(payload);
+
+                        if (parse_response.last_lsn) |lsn| {
+                            response.timestamp = pgWalToClickHouseMs(parse_response.timestamp.?);
+                            if (lsn > self.last_lsn) {
+                                self.last_lsn = lsn;
+                            }
+                        } else {
+                            if (start_lsn > self.last_lsn) {
+                                self.last_lsn = start_lsn;
+                            }
+                        }
+
+                        if (parse_response.data) |entry| {
+                            response.data = entry;
+                        }
+
+                        // Proactively acknowledge this processed WAL chunk
                         try self.wal_conn.?.sendStandbyStatusUpdate(self.last_lsn, self.last_timestamp);
-                    }
+                    },
+                    'k' => {
+                        response.message = pg.packet.ServerPacket.Keepalive;
+
+                        assert(msg.data.len >= 19);
+
+                        const current_lsn = mem.readInt(u64, msg.data[1..9][0..8], .big);
+                        const server_timestamp = mem.readInt(i64, msg.data[9..17][0..8], .big);
+                        const reply_requested = msg.data[17];
+
+                        if (current_lsn > self.last_lsn) {
+                            self.last_lsn = current_lsn;
+                        }
+                        if (server_timestamp > self.last_timestamp) {
+                            self.last_timestamp = server_timestamp;
+                        }
+
+                        if (reply_requested == 1) {
+                            try self.wal_conn.?.sendStandbyStatusUpdate(self.last_lsn, self.last_timestamp);
+                        }
+                    },
+                    'c' => {
+                        response.message = pg.packet.ServerPacket.CopyDone;
+
+                        assert(msg.data.len >= 5);
+
+                        const copy_done_message = mem.readInt(i32, msg.data[1..5][0..4], .big);
+                        if (copy_done_message != 4) {
+                            return PgClientError.InvalidCopyDoneMessage;
+                        }
+                    },
+                    'C' => {
+                        response.message = pg.packet.ServerPacket.CommandComplete;
+
+                        const command_tag_len = mem.readInt(i32, msg.data[1..5][0..4], .big);
+
+                        // command tag
+                        // COPY 0\0
+                        // START_REPLICATION\0
+                        // DROP_REPLICATION_SLOT\0
+                        _ = msg.data[6..@as(u32, @intCast(command_tag_len)) + 6];
+                    },
+                    'Z' => {
+                        response.message = pg.packet.ServerPacket.ReadyForQuery;
+
+                        const ready_message = mem.readInt(i32, msg.data[1..5][0..4], .big);
+                        if (ready_message != 5) {
+                            return PgClientError.InvalidReadyForQueryMessage;
+                        }
+
+                        const transaction_status = msg.data[6..7][0];
+
+                        switch (transaction_status) {
+                            'I' => {
+                                // Idle
+                            },
+                            'T' => {
+                                // In Transaction
+                            },
+                            'E' => return PgClientError.TransactionErrorState,
+                            else => return PgClientError.TransactionStateUnknown,
+                        }
+                    },
+                    else => {}
                 }
+                return response;
             },
             'E' => {
                 const err_msg = pg.Error.parse(msg.data);
@@ -269,14 +308,14 @@ pub const PgClient = struct {
                 // Ignore other messages
             }
         }
-        return response;
+        return null;
     }
 
     pub fn parsePgOutput(self: *@This(), payload: []const u8) !ParseResponse {
         var response = ParseResponse{
             .last_lsn = null,
-            .commit_timestamp = null,
-            .entry = null,
+            .timestamp = null,
+            .data = null,
         };
 
         if (payload.len == 0) return response;
@@ -289,11 +328,11 @@ pub const PgClient = struct {
             'B' => {
                 // final lsn
                 _ = try reader.takeInt(u64, .big);
-                const commit_timestamp = try reader.takeInt(u64, .big);
+                const timestamp = try reader.takeInt(u64, .big);
                 const xid = try reader.takeInt(u32, .big);
                 self.context.xid = xid;
 
-                _ = commit_timestamp;
+                _ = timestamp;
             },
             'C' => {
                 // flags
@@ -301,7 +340,7 @@ pub const PgClient = struct {
                 // lsn of commit
                 _ = try reader.takeInt(u64, .big);
                 response.last_lsn = try reader.takeInt(u64, .big);
-                response.commit_timestamp = try reader.takeInt(u64, .big);
+                response.timestamp = try reader.takeInt(u64, .big);
 
                 self.resetContext();
 
@@ -368,7 +407,7 @@ pub const PgClient = struct {
                 if (self.table_reg.get(rel_id)) |table| {
                     const new_values = try self.parseTupleData(&reader, table);
 
-                        response.entry = types.AuditEntry{
+                        response.data = types.AuditEntry{
                             .event_time = undefined,
                             .table_name = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{table.namespace, table.name}),
                             .new_values = new_values,
@@ -400,7 +439,7 @@ pub const PgClient = struct {
 
                     if (tuple_type == 'N') {
                         const new_values = try self.parseTupleData(&reader, table);
-                        response.entry = types.AuditEntry{
+                        response.data = types.AuditEntry{
                             .event_time = undefined,
                             .table_name = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{table.namespace, table.name}),
                             .new_values = new_values,
@@ -429,7 +468,7 @@ pub const PgClient = struct {
                 if (self.table_reg.get(rel_id)) |table| {
                     if (tuple_type == 'O' or tuple_type == 'K') {
                         const old_values = try self.parseTupleData(&reader, table);
-                        response.entry = types.AuditEntry{
+                        response.data = types.AuditEntry{
                             .event_time = undefined,
                             .table_name = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{table.namespace, table.name}),
                             .new_values = .empty,
@@ -604,10 +643,10 @@ pub const PgClient = struct {
         return @intCast(unix_ms);
     }
 
-    pub fn startFlow(self: *@This()) !void {
+    pub fn startFlow(self: *@This(), timeout_ms: i32) !void {
         if (self.wal_conn == null) return PgClientError.WalConnectionNotInitialized;
 
-        try self.wal_conn.?.reader.startFlow(250);
+        try self.wal_conn.?.reader.startFlow(timeout_ms);
     }
 
     pub fn endFlow(self: *@This()) !void {
@@ -684,7 +723,6 @@ fn setupMockClient(allocator: mem.Allocator, io: Io) !PgClient {
         .table_reg = table_reg,
         .wal_conn = null,
         .pool = null,
-        .read_timeout_ms = null
     };
 }
 
@@ -708,9 +746,9 @@ test "parsePgOutput maps BEGIN correctly" {
     try testing.expectEqual(xid, client.context.xid);
     try testing.expectEqualStrings("", client.context.ip_address);
     try testing.expectEqualStrings("", client.context.user_id);
-    try testing.expectEqual(null, result.entry);
+    try testing.expectEqual(null, result.data);
     try testing.expectEqual(null, result.last_lsn);
-    try testing.expectEqual(null, result.commit_timestamp);
+    try testing.expectEqual(null, result.timestamp);
 }
 
 test "parsePgOutput maps METADATA correctly" {
@@ -737,9 +775,9 @@ test "parsePgOutput maps METADATA correctly" {
     try testing.expectEqualStrings("42", client.context.user_id);
     try testing.expectEqualStrings("192.168.1.50", client.context.ip_address);
 
-    try testing.expectEqual(null, result.entry);
+    try testing.expectEqual(null, result.data);
     try testing.expectEqual(null, result.last_lsn);
-    try testing.expectEqual(null, result.commit_timestamp);
+    try testing.expectEqual(null, result.timestamp);
 }
 
 test "parsePgOutput maps RELATION correctly" {
@@ -774,7 +812,6 @@ test "parsePgOutput maps RELATION correctly" {
                 .timeout_ms = 10_000,
             } 
         }),
-        .read_timeout_ms = null
     };
     defer client.deinit();
 
@@ -810,43 +847,43 @@ test "parsePgOutput maps INSERT correctly" {
     var result = try client.parsePgOutput(insert_bytes);
     defer result.deinit(allocator);
 
-    try testing.expectEqual(1, result.entry.?.action);
-    try testing.expectEqualStrings("public.addresses", result.entry.?.table_name);
+    try testing.expectEqual(1, result.data.?.action);
+    try testing.expectEqualStrings("public.addresses", result.data.?.table_name);
 
     // Changed columns
-    try testing.expectEqual(true, result.entry.?.changed_columns.get("id").?.has_changes);
-    try testing.expectEqualStrings("1", result.entry.?.changed_columns.get("id").?.value);
+    try testing.expectEqual(true, result.data.?.changed_columns.get("id").?.has_changes);
+    try testing.expectEqualStrings("1", result.data.?.changed_columns.get("id").?.value);
 
-    try testing.expectEqual(true, result.entry.?.changed_columns.get("address_line_1").?.has_changes);
-    try testing.expectEqualStrings("1 Apple Park Way", result.entry.?.changed_columns.get("address_line_1").?.value);
+    try testing.expectEqual(true, result.data.?.changed_columns.get("address_line_1").?.has_changes);
+    try testing.expectEqualStrings("1 Apple Park Way", result.data.?.changed_columns.get("address_line_1").?.value);
 
-    try testing.expectEqual(null, result.entry.?.changed_columns.get("address_line_2"));
+    try testing.expectEqual(null, result.data.?.changed_columns.get("address_line_2"));
 
-    try testing.expectEqual(true, result.entry.?.changed_columns.get("postal_code").?.has_changes);
-    try testing.expectEqualStrings("95014", result.entry.?.changed_columns.get("postal_code").?.value);
+    try testing.expectEqual(true, result.data.?.changed_columns.get("postal_code").?.has_changes);
+    try testing.expectEqualStrings("95014", result.data.?.changed_columns.get("postal_code").?.value);
 
-    try testing.expectEqual(true, result.entry.?.changed_columns.get("city").?.has_changes);
-    try testing.expectEqualStrings("Cupertino", result.entry.?.changed_columns.get("city").?.value);
+    try testing.expectEqual(true, result.data.?.changed_columns.get("city").?.has_changes);
+    try testing.expectEqualStrings("Cupertino", result.data.?.changed_columns.get("city").?.value);
 
-    try testing.expectEqual(true, result.entry.?.changed_columns.get("country").?.has_changes);
-    try testing.expectEqualStrings("US", result.entry.?.changed_columns.get("country").?.value);
+    try testing.expectEqual(true, result.data.?.changed_columns.get("country").?.has_changes);
+    try testing.expectEqualStrings("US", result.data.?.changed_columns.get("country").?.value);
 
     // Old values
-    try testing.expectEqual(0, result.entry.?.old_values.capacity());
+    try testing.expectEqual(0, result.data.?.old_values.capacity());
 
     // New values
-    try testing.expectEqualStrings("1", result.entry.?.new_values.get("id").?);
-    try testing.expectEqualStrings("1 Apple Park Way", result.entry.?.new_values.get("address_line_1").?);
-    try testing.expectEqual(null, result.entry.?.new_values.get("address_line_2"));
-    try testing.expectEqualStrings("95014", result.entry.?.new_values.get("postal_code").?);
-    try testing.expectEqualStrings("Cupertino", result.entry.?.new_values.get("city").?);
-    try testing.expectEqualStrings("US", result.entry.?.new_values.get("country").?);
+    try testing.expectEqualStrings("1", result.data.?.new_values.get("id").?);
+    try testing.expectEqualStrings("1 Apple Park Way", result.data.?.new_values.get("address_line_1").?);
+    try testing.expectEqual(null, result.data.?.new_values.get("address_line_2"));
+    try testing.expectEqualStrings("95014", result.data.?.new_values.get("postal_code").?);
+    try testing.expectEqualStrings("Cupertino", result.data.?.new_values.get("city").?);
+    try testing.expectEqualStrings("US", result.data.?.new_values.get("country").?);
 
     try testing.expectEqual(0, client.context.xid);
     try testing.expectEqualStrings("", client.context.ip_address);
     try testing.expectEqualStrings("", client.context.user_id);
     try testing.expectEqual(null, result.last_lsn);
-    try testing.expectEqual(null, result.commit_timestamp);
+    try testing.expectEqual(null, result.timestamp);
 }
 
 test "parsePgOutput maps UPDATE correctly" {
@@ -870,46 +907,46 @@ test "parsePgOutput maps UPDATE correctly" {
     var result = try client.parsePgOutput(update_bytes);
     defer result.deinit(allocator);
 
-    try testing.expectEqual(2, result.entry.?.action);
-    try testing.expectEqualStrings("public.addresses", result.entry.?.table_name);
+    try testing.expectEqual(2, result.data.?.action);
+    try testing.expectEqualStrings("public.addresses", result.data.?.table_name);
 
     // Changed columns
-    try testing.expectEqual(false, result.entry.?.changed_columns.get("id").?.has_changes);
-    try testing.expectEqualStrings("1", result.entry.?.changed_columns.get("id").?.value);
+    try testing.expectEqual(false, result.data.?.changed_columns.get("id").?.has_changes);
+    try testing.expectEqualStrings("1", result.data.?.changed_columns.get("id").?.value);
 
-    try testing.expectEqual(true, result.entry.?.changed_columns.get("address_line_1").?.has_changes);
-    try testing.expectEqualStrings("1 Apple Park Way", result.entry.?.changed_columns.get("address_line_1").?.value);
+    try testing.expectEqual(true, result.data.?.changed_columns.get("address_line_1").?.has_changes);
+    try testing.expectEqualStrings("1 Apple Park Way", result.data.?.changed_columns.get("address_line_1").?.value);
 
-    try testing.expectEqual(null, result.entry.?.changed_columns.get("address_line_2"));
+    try testing.expectEqual(null, result.data.?.changed_columns.get("address_line_2"));
 
-    try testing.expectEqual(true, result.entry.?.changed_columns.get("postal_code").?.has_changes);
-    try testing.expectEqualStrings("95014", result.entry.?.changed_columns.get("postal_code").?.value);
+    try testing.expectEqual(true, result.data.?.changed_columns.get("postal_code").?.has_changes);
+    try testing.expectEqualStrings("95014", result.data.?.changed_columns.get("postal_code").?.value);
 
-    try testing.expectEqual(true, result.entry.?.changed_columns.get("city").?.has_changes);
-    try testing.expectEqualStrings("Cupertino", result.entry.?.changed_columns.get("city").?.value);
+    try testing.expectEqual(true, result.data.?.changed_columns.get("city").?.has_changes);
+    try testing.expectEqualStrings("Cupertino", result.data.?.changed_columns.get("city").?.value);
 
-    try testing.expectEqual(false, result.entry.?.changed_columns.get("country").?.has_changes);
-    try testing.expectEqualStrings("US", result.entry.?.changed_columns.get("country").?.value);
+    try testing.expectEqual(false, result.data.?.changed_columns.get("country").?.has_changes);
+    try testing.expectEqualStrings("US", result.data.?.changed_columns.get("country").?.value);
 
     // Old values
-    try testing.expectEqualStrings("1 Apple Park Way", result.entry.?.old_values.get("address_line_1").?);
-    try testing.expectEqual(null, result.entry.?.old_values.get("address_line_2"));
-    try testing.expectEqualStrings("95014", result.entry.?.old_values.get("postal_code").?);
-    try testing.expectEqualStrings("Cupertino", result.entry.?.old_values.get("city").?);
-    try testing.expectEqualStrings("US", result.entry.?.old_values.get("country").?);
+    try testing.expectEqualStrings("1 Apple Park Way", result.data.?.old_values.get("address_line_1").?);
+    try testing.expectEqual(null, result.data.?.old_values.get("address_line_2"));
+    try testing.expectEqualStrings("95014", result.data.?.old_values.get("postal_code").?);
+    try testing.expectEqualStrings("Cupertino", result.data.?.old_values.get("city").?);
+    try testing.expectEqualStrings("US", result.data.?.old_values.get("country").?);
 
     // New values
-    try testing.expectEqualStrings("Googleplex", result.entry.?.new_values.get("address_line_1").?);
-    try testing.expectEqual(null, result.entry.?.new_values.get("address_line_2"));
-    try testing.expectEqualStrings("94043", result.entry.?.new_values.get("postal_code").?);
-    try testing.expectEqualStrings("Mountain View", result.entry.?.new_values.get("city").?);
-    try testing.expectEqualStrings("US", result.entry.?.new_values.get("country").?);
+    try testing.expectEqualStrings("Googleplex", result.data.?.new_values.get("address_line_1").?);
+    try testing.expectEqual(null, result.data.?.new_values.get("address_line_2"));
+    try testing.expectEqualStrings("94043", result.data.?.new_values.get("postal_code").?);
+    try testing.expectEqualStrings("Mountain View", result.data.?.new_values.get("city").?);
+    try testing.expectEqualStrings("US", result.data.?.new_values.get("country").?);
 
     try testing.expectEqual(0, client.context.xid);
     try testing.expectEqualStrings("", client.context.ip_address);
     try testing.expectEqualStrings("", client.context.user_id);
     try testing.expectEqual(null, result.last_lsn);
-    try testing.expectEqual(null, result.commit_timestamp);
+    try testing.expectEqual(null, result.timestamp);
 }
 
 test "parsePgOutput maps DELETE correctly" {
@@ -929,43 +966,43 @@ test "parsePgOutput maps DELETE correctly" {
     var result = try client.parsePgOutput(delete_bytes);
     defer result.deinit(allocator);
 
-    try testing.expectEqual(3, result.entry.?.action);
-    try testing.expectEqualStrings("public.addresses", result.entry.?.table_name);
+    try testing.expectEqual(3, result.data.?.action);
+    try testing.expectEqualStrings("public.addresses", result.data.?.table_name);
 
     // Changed columns
-    try testing.expectEqual(true, result.entry.?.changed_columns.get("id").?.has_changes);
-    try testing.expectEqualStrings("1", result.entry.?.changed_columns.get("id").?.value);
+    try testing.expectEqual(true, result.data.?.changed_columns.get("id").?.has_changes);
+    try testing.expectEqualStrings("1", result.data.?.changed_columns.get("id").?.value);
 
-    try testing.expectEqual(true, result.entry.?.changed_columns.get("address_line_1").?.has_changes);
-    try testing.expectEqualStrings("Googleplex", result.entry.?.changed_columns.get("address_line_1").?.value);
+    try testing.expectEqual(true, result.data.?.changed_columns.get("address_line_1").?.has_changes);
+    try testing.expectEqualStrings("Googleplex", result.data.?.changed_columns.get("address_line_1").?.value);
 
-    try testing.expectEqual(null, result.entry.?.changed_columns.get("address_line_2"));
+    try testing.expectEqual(null, result.data.?.changed_columns.get("address_line_2"));
 
-    try testing.expectEqual(true, result.entry.?.changed_columns.get("postal_code").?.has_changes);
-    try testing.expectEqualStrings("94043", result.entry.?.changed_columns.get("postal_code").?.value);
+    try testing.expectEqual(true, result.data.?.changed_columns.get("postal_code").?.has_changes);
+    try testing.expectEqualStrings("94043", result.data.?.changed_columns.get("postal_code").?.value);
 
-    try testing.expectEqual(true, result.entry.?.changed_columns.get("city").?.has_changes);
-    try testing.expectEqualStrings("Mountain View", result.entry.?.changed_columns.get("city").?.value);
+    try testing.expectEqual(true, result.data.?.changed_columns.get("city").?.has_changes);
+    try testing.expectEqualStrings("Mountain View", result.data.?.changed_columns.get("city").?.value);
 
-    try testing.expectEqual(true, result.entry.?.changed_columns.get("country").?.has_changes);
-    try testing.expectEqualStrings("US", result.entry.?.changed_columns.get("country").?.value);
+    try testing.expectEqual(true, result.data.?.changed_columns.get("country").?.has_changes);
+    try testing.expectEqualStrings("US", result.data.?.changed_columns.get("country").?.value);
 
     // Old values
-    try testing.expectEqualStrings("1", result.entry.?.old_values.get("id").?);
-    try testing.expectEqualStrings("Googleplex", result.entry.?.old_values.get("address_line_1").?);
-    try testing.expectEqual(null, result.entry.?.old_values.get("address_line_2"));
-    try testing.expectEqualStrings("94043", result.entry.?.old_values.get("postal_code").?);
-    try testing.expectEqualStrings("Mountain View", result.entry.?.old_values.get("city").?);
-    try testing.expectEqualStrings("US", result.entry.?.old_values.get("country").?);
+    try testing.expectEqualStrings("1", result.data.?.old_values.get("id").?);
+    try testing.expectEqualStrings("Googleplex", result.data.?.old_values.get("address_line_1").?);
+    try testing.expectEqual(null, result.data.?.old_values.get("address_line_2"));
+    try testing.expectEqualStrings("94043", result.data.?.old_values.get("postal_code").?);
+    try testing.expectEqualStrings("Mountain View", result.data.?.old_values.get("city").?);
+    try testing.expectEqualStrings("US", result.data.?.old_values.get("country").?);
 
     // New values
-    try testing.expectEqual(0, result.entry.?.new_values.capacity());
+    try testing.expectEqual(0, result.data.?.new_values.capacity());
 
     try testing.expectEqual(0, client.context.xid);
     try testing.expectEqualStrings("", client.context.ip_address);
     try testing.expectEqualStrings("", client.context.user_id);
     try testing.expectEqual(null, result.last_lsn);
-    try testing.expectEqual(null, result.commit_timestamp);
+    try testing.expectEqual(null, result.timestamp);
 }
 
 test "parsePgOutput maps COMMIT correctly" {
@@ -989,9 +1026,9 @@ test "parsePgOutput maps COMMIT correctly" {
     try testing.expectEqual(0, client.context.xid);
     try testing.expectEqualStrings("", client.context.ip_address);
     try testing.expectEqualStrings("", client.context.user_id);
-    try testing.expectEqual(null, result.entry);
+    try testing.expectEqual(null, result.data);
     try testing.expectEqual(last_lsn, result.last_lsn);
-    try testing.expectEqual(commit_timestamp, result.commit_timestamp);
+    try testing.expectEqual(commit_timestamp, result.timestamp);
 }
 
 test "resetContext clears context correctly" {
@@ -1014,7 +1051,7 @@ test "resetContext clears context correctly" {
     var result = try client.parsePgOutput(commit_bytes);
     result.deinit(allocator);
 
-    try testing.expectEqual(null, result.entry);
+    try testing.expectEqual(null, result.data);
 
     try testing.expectEqual(0, client.context.xid);
     try testing.expectEqualStrings("", client.context.ip_address);
@@ -1083,7 +1120,6 @@ test "readSchemaKeys" {
         }),
         .table_reg = undefined,
         .wal_conn = null,
-        .read_timeout_ms = null,
     };
     defer client.deinit();
 

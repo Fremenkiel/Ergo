@@ -8,6 +8,7 @@ pub const Pool = lib.Pool;
 pub const Stmt = lib.Stmt;
 pub const Result = lib.Result;
 pub const Binary = lib.Binary;
+pub const packet = @import("packet.zig");
 
 pub const types = lib.types;
 pub const Cidr = types.Cidr;

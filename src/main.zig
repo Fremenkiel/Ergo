@@ -273,17 +273,98 @@ fn createTestDb(allocator: mem.Allocator, io: Io, db_name: []const u8) !void {
     }
 
     if (ch_init_result.stderr.len > 0) {
-        std.debug.print("Error: unable to init new ch db: {s}\n", .{ch_init_result.stderr});
+        std.debug.print("Error: CH create db failed: {s}\n", .{ch_init_result.stderr});
         return error.CreateTestDbFailedInitError;
     }
 }
 
-fn setupChildProcess(allocator: mem.Allocator, io: Io, db_name: []const u8) !std.process.Child {
+fn teardownTestDb(allocator: mem.Allocator, io: Io, db_name: []const u8, wal_name: []const u8) !void {
+    // PG
+    const pg_rep_query = try std.fmt.allocPrint(allocator, "SELECT pg_drop_replication_slot('{s}');", .{wal_name});
+    defer allocator.free(pg_rep_query);
+    
+    const pg_db_query = try std.fmt.allocPrint(allocator, "DROP DATABASE {s}", .{db_name});
+    defer allocator.free(pg_db_query);
+
+    var pg_env = try std.process.Environ.createMap(std.testing.environ, allocator);
+    defer pg_env.deinit();
+    try pg_env.put("PGPASSWORD", "postgres");
+
+    var pg_rep_argv = [_][]const u8{
+        "psql",
+        "-h", "127.0.0.1",
+        "-p", "5432",
+        "-U", "postgres",
+        "-d", "postgres",
+        "-q", "-t", "-A", // Formatting
+        "-c", pg_rep_query,
+    };
+    const pg_rep_result = try std.process.run(allocator, io, .{ 
+        .argv = &pg_rep_argv,
+        .environ_map = &pg_env, 
+    });
+    defer {
+        allocator.free(pg_rep_result.stdout);
+        allocator.free(pg_rep_result.stderr);
+    }
+
+    if (pg_rep_result.term != .exited or pg_rep_result.term.exited != 0 or pg_rep_result.stderr.len > 0) {
+        std.debug.print("Error: PSQL drop replication failed: {s}\n", .{pg_rep_result.stderr});
+        return error.PsqlExecutionFailed;
+    }
+
+    var pg_db_argv = [_][]const u8{
+        "psql",
+        "-h", "127.0.0.1",
+        "-p", "5432",
+        "-U", "postgres",
+        "-d", "postgres",
+        "-q", "-t", "-A", // Formatting
+        "-c", pg_db_query,
+    };
+    const pg_db_result = try std.process.run(allocator, io, .{ 
+        .argv = &pg_db_argv,
+        .environ_map = &pg_env, 
+    });
+    defer {
+        allocator.free(pg_db_result.stdout);
+        allocator.free(pg_db_result.stderr);
+    }
+
+    if (pg_db_result.term != .exited or pg_db_result.term.exited != 0 or pg_db_result.stderr.len > 0) {
+        std.debug.print("Error: PSQL drop db failed: {s}\n", .{pg_db_result.stderr});
+        return error.PsqlExecutionFailed;
+    }
+
+    // CH
+    const ch_query = try std.fmt.allocPrint(allocator, "DROP DATABASE {s}", .{db_name});
+    defer allocator.free(ch_query);
+
+    var ch_db_argv = [_][]const u8{ 
+        "clickhouse-client", 
+        "--host", "127.0.0.1",
+        "--port", "9000",
+        "--user", "default",
+        "--password", "clickhouse",
+        "--query", ch_query
+    };
+    const ch_db_result = try std.process.run(allocator, io, .{ 
+        .argv = &ch_db_argv,
+    });
+    defer {
+        allocator.free(ch_db_result.stdout);
+        allocator.free(ch_db_result.stderr);
+    }
+
+    if (ch_db_result.stderr.len > 0) {
+        std.debug.print("Error: CH drop db failed: {s}\n", .{ch_db_result.stderr});
+        return error.CreateTestDbFailedError;
+    }
+}
+
+fn setupChildProcess(allocator: mem.Allocator, io: Io, db_name: []const u8, wal_name: []const u8) !std.process.Child {
     var env = try std.process.Environ.createMap(std.testing.environ, allocator);
     defer env.deinit();
-
-    const wal_name = try std.fmt.allocPrint(allocator, "wal_slot_{s}", .{db_name});
-    defer allocator.free(wal_name);
 
     try env.put("ERGO_TEST", "1");
     try env.put("CH_DB", db_name);
@@ -354,8 +435,13 @@ test "main ensure full transaction sync on interupt" {
     const db_name = try std.fmt.allocPrint(allocator, "test_db_{d}", .{std.Io.Clock.real.now(io).toNanoseconds()});
     defer allocator.free(db_name);
 
+    const wal_name = try std.fmt.allocPrint(allocator, "wal_slot_{s}", .{db_name});
+    defer allocator.free(wal_name);
+
     try createTestDb(allocator, io, db_name);
-    var child = try setupChildProcess(allocator, io, db_name);
+    defer teardownTestDb(allocator, io, db_name, wal_name) catch {};
+
+    var child = try setupChildProcess(allocator, io, db_name, wal_name);
     errdefer {
         if (child.id) |pid| {
             std.posix.kill(pid, std.posix.SIG.TERM) catch {};
@@ -454,6 +540,8 @@ test "main ensure full transaction sync on interupt" {
         ch_assert_result.stdout,
     );
 
+    const pg_assert_query = try std.fmt.allocPrint(allocator, "SELECT active FROM pg_replication_slots WHERE slot_name = '{s}' AND plugin = 'pgoutput' ORDER BY active LIMIT 1;", .{wal_name});
+
     var pg_assert_argv = [_][]const u8{ 
         "psql",
         "-h", "127.0.0.1",
@@ -461,7 +549,7 @@ test "main ensure full transaction sync on interupt" {
         "-U", "db_rw",
         "-d", db_name,
         "-q", "-t", "-A", // Formatting
-        "-c", "SELECT active FROM pg_replication_slots WHERE slot_name = 'wal_slot' AND plugin = 'pgoutput' ORDER BY active LIMIT 1;",
+        "-c", pg_assert_query,
     };
     const pg_assert_result = try std.process.run(allocator, io, .{ 
         .argv = &pg_assert_argv,
@@ -490,12 +578,17 @@ test "making sure full commits are logged without interupt" {
     const db_name = try std.fmt.allocPrint(allocator, "test_db_{d}", .{std.Io.Clock.real.now(io).toNanoseconds()});
     defer allocator.free(db_name);
 
+    const wal_name = try std.fmt.allocPrint(allocator, "wal_slot_{s}", .{db_name});
+    defer allocator.free(wal_name);
+
     var pg_env = try std.process.Environ.createMap(std.testing.environ, allocator);
     defer pg_env.deinit();
     try pg_env.put("PGPASSWORD", "12345678");
 
     try createTestDb(allocator, io, db_name);
-    var child = try setupChildProcess(allocator, io, db_name);
+    defer teardownTestDb(allocator, io, db_name, wal_name) catch {};
+
+    var child = try setupChildProcess(allocator, io, db_name, wal_name);
     errdefer {
         if (child.id) |pid| {
             std.posix.kill(pid, std.posix.SIG.TERM) catch {};
