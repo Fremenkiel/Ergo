@@ -1,46 +1,34 @@
 const std = @import("std");
 
-pub const Buffer = @import("buffer").Buffer;
+const Io = std.Io;
+const testing = std.testing;
 
 const proto = @import("proto.zig");
 
-//Client sends this based on getting a request.sasl
-const SASLInitialResponse = @This();
-
-response: []const u8,
-mechanism: []const u8,
-
-pub fn write(self: SASLInitialResponse, buf: *Buffer) !void {
+pub fn writeSASLInitialResponse(io: Io, stream: Io.net.Stream, response: []const u8, mechanism: []const u8) !void {
     // 4 +   M          + 1 + 4             + R
     // len + $mechanism + 0 + $response.len + $response
-    const payload_len = 9 + self.mechanism.len + self.response.len;
+    const payload_len = 9 + mechanism.len + response.len;
 
-    // + 1 for the leading 'p'
-    const total_length = payload_len + 1;
-    try buf.ensureTotalCapacity(total_length);
+    var buf: [payload_len * 2]u8 = undefined;
+    var writer = stream.writer(io, &buf);
+    const w = &writer.interface;
 
-    // this nonsense is to skip the buffers bound checking, since we've already
-    // ensured the available capacity
-    var view = buf.skip(total_length) catch unreachable;
-    view.writeByte('p');
-    view.writeIntBig(u32, @intCast(payload_len));
-    view.write(self.mechanism);
-    view.writeByte(0);
-    view.writeIntBig(u32, @intCast(self.response.len));
-    view.write(self.response);
+    try w.writeByte('p');
+    try w.writeInt(u32, @intCast(payload_len));
+    try w.writeAll(mechanism);
+    try w.writeByte(0);
+    try w.writeInt(u32, @intCast(response.len));
+    try w.writeAll(response);
+
+    try w.flush();
 }
 
-const t = proto.testing;
 const Reader = proto.Reader;
 test "SASLInitialResponse: write" {
-    var buf = try proto.Buffer.init(t.allocator, 128);
-    defer buf.deinit();
+    const io = testing.io;
 
-    const s = SASLInitialResponse{
-        .mechanism = "SCRAM-SHA-256",
-        .response = "a sasl response",
-    };
-    try s.write(&buf);
+    const s = writeSASLInitialResponse(io, stream, "a sasl response", "SCRAM-SHA-256");
 
     var reader = Reader.init(buf.string());
     try t.expectEqual('p', try reader.byte());

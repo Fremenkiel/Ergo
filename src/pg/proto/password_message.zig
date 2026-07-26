@@ -1,6 +1,8 @@
 const std = @import("std");
 
-const Buffer = @import("buffer").Buffer;
+const Io = std.Io;
+const mem = std.mem;
+const testing = std.testing;
 
 const proto = @import("proto.zig");
 
@@ -8,21 +10,25 @@ const PasswordMessage = @This();
 
 password: []const u8,
 
-pub fn write(self: PasswordMessage, buf: *Buffer) !void {
+pub fn writePasswordMessage(allocator: mem.Allocator, io: Io, stream: Io.net.Stream, password: []const u8) !void {
     // +4 since the payload length includes the length itself
     // +1 for null terminated string
-    const payload_len = self.password.len + 5;
+    const payload_len = password.len + 5;
 
     // +1 for the type field, 'p'
     const total_length = payload_len + 1;
+    var buf = try allocator.alloc(u8, total_length);
+    defer allocator.free(buf);
 
-    try buf.ensureTotalCapacity(total_length);
+    var writer = stream.writer(io, &buf);
+    var w = &writer.interface;
 
-    var view = buf.skip(total_length) catch unreachable;
-    view.writeByte('p');
-    view.writeIntBig(u32, @intCast(payload_len));
-    view.write(self.password);
-    view.writeByte(0);
+    try w.writeByte('p');
+    try w.writeInt(u32, @intCast(payload_len), .big);
+    try w.writeAll(password);
+    try w.writeByte(0);
+
+    try w.flush();
 }
 
 const t = proto.testing;

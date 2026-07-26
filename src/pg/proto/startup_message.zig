@@ -1,77 +1,81 @@
 const std = @import("std");
 
+const Io = std.Io;
+const mem = std.mem;
+const testing = std.testing;
+
 const proto = @import("proto.zig");
+const conn = @import("../conn.zig");
 
-pub const Buffer = @import("buffer").Buffer;
+const protocol: []const u8 = &[_]u8{ 0, 3, 0, 0 };
 
-protocol: []const u8 = &[_]u8{ 0, 3, 0, 0 },
-username: []const u8,
-database: []const u8,
-application_name: ?[]const u8 = null,
-params: ?std.StringHashMap([]const u8) = null,
-
-pub fn write(self: @This(), buf: *Buffer) !void {
+pub fn writeStartupMessage(allocator: mem.Allocator, io: Io, stream: Io.net.Stream, opts: conn.Opts) !void {
     // 4 +   4        + 4      + 1 + N         + 1 + 8        + 1 + M         + 1 + 1 = 25 + N + M
     // len + protocol + "user" + 0 + $username + 0 "database" + 0 + $database + 0 + 0 + 0
-    var payload_len = 25 + self.username.len + self.database.len;
-    if (self.params) |p| {
-        var it = p.iterator();
-        while (it.next()) |kv| {
-            // +2 because both key and value are null-terminated
-            payload_len += kv.key_ptr.len + kv.value_ptr.len + 2;
-        }
+    var payload_len = 25 + opts.username.len + opts.database.len;
+    var it = opts.startup_parameters.iterator();
+    while (it.next()) |kv| {
+        // +2 because both key and value are null-terminated
+        payload_len += kv.key_ptr.len + kv.value_ptr.len + 2;
     }
-    if (self.application_name) |an| {
+
+    if (opts.application_name) |an| {
         // +2 because both key and value are null-terminated
         payload_len += "application_name".len + an.len + 2;
     }
 
-    try buf.ensureTotalCapacity(payload_len);
+    var buf = allocator.alloc(u8, payload_len);
+    defer allocator.free(buf);
 
-    // this nonsense is to skip the buffers bound checking, since we've already
-    // ensured the available capacity
-    var view = buf.skip(payload_len) catch unreachable;
-    view.writeIntBig(u32, @intCast(payload_len));
-    view.write(self.protocol);
-    view.write(&[_]u8{ 'u', 's', 'e', 'r', 0 });
-    view.write(self.username);
-    view.writeByte(0);
-    view.write(&[_]u8{ 'd', 'a', 't', 'a', 'b', 'a', 's', 'e', 0 });
-    view.write(self.database);
-    view.writeByte(0);
-    if (self.application_name) |an| {
-        view.write("application_name");
-        view.writeByte(0);
-        view.write(an);
-        view.writeByte(0);
+    var writer = stream.writer(io, &buf);
+    const w = &writer.interface;
+
+    try w.writeInt(u32, @intCast(payload_len), .big);
+    try w.writeAll(protocol);
+
+    try w.writeAll("user");
+    try w.writeByte(0);
+    try w.writeAll(opts.username);
+    try w.writeByte(0);
+    
+    try w.writeAll("database");
+    try w.writeByte(0);
+    try w.writeAll(opts.database);
+    try w.writeByte(0);
+
+    try w.write("application_name");
+    try w.writeByte(0);
+    try w.write(opts.application_name);
+    try w.writeByte(0);
+
+    it = opts.startup_parameters.iterator();
+    while (it.next()) |kv| {
+        try w.writeAll(kv.key_ptr.*);
+        try w.writeByte(0);
+        try w.writeAll(kv.value_ptr.*);
+        try w.writeByte(0);
     }
-    if (self.params) |p| {
-        var it = p.iterator();
-        while (it.next()) |kv| {
-            view.write(kv.key_ptr.*);
-            view.writeByte(0);
-            view.write(kv.value_ptr.*);
-            view.writeByte(0);
-        }
-    }
-    view.writeByte(0);
+    try w.writeByte(0);
+
+    try w.flush();
 }
 
 const t = proto.testing;
 const Reader = proto.Reader;
 test "StartupMessage: write" {
-    var buf = try proto.Buffer.init(t.allocator, 128);
-    defer buf.deinit();
+    const allocator = testing.allocator;
+    var buf = allocator.alloc(u8, 128);
+    defer allocator.free(buf);
 
     const s = @This(){ .username = "leto", .database = "ghanima" };
-    try s.write(&buf);
+    try s.write(allocator, &buf);
 
     var reader = Reader.init(buf.string());
-    try t.expectEqual(36, try reader.int32()); // payload length
-    try t.expectEqual(196608, try reader.int32()); // protocol version
-    try t.expectString("user", try reader.string());
-    try t.expectString("leto", try reader.string());
-    try t.expectString("database", try reader.string());
-    try t.expectString("ghanima", try reader.string());
-    try t.expectSlice(u8, &.{0}, reader.rest());
+    try testing.expectEqual(36, try reader.int32()); // payload length
+    try testing.expectEqual(196608, try reader.int32()); // protocol version
+    try testing.expectEqualStrings("user", try reader.string());
+    try testing.expectEqualStrings("leto", try reader.string());
+    try testing.expectEqualStrings("database", try reader.string());
+    try testing.expectEqualStrings("ghanima", try reader.string());
+    try testing.expectEqualSlices(u8, &.{0}, reader.rest());
 }

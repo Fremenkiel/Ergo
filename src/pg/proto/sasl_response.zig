@@ -1,45 +1,40 @@
 const std = @import("std");
 
-pub const Buffer = @import("buffer").Buffer;
+const Io = std.Io;
+const mem = std.mem;
+const testing = std.testing;
 
 const proto = @import("proto.zig");
 
 const Reader = proto.Reader;
 
-// #3 - Client finalizes with this
-const SASLResponse = @This();
-
-data: []const u8,
-
-pub fn write(self: SASLResponse, buf: *Buffer) !void {
+pub fn writeSASLResponse(allocator: mem.Allocator, io: Io, stream: Io.net.Stream, data: []const u8) !void {
     // 4 +   N
     // len + $data
-    const payload_len = 4 + self.data.len;
+    const payload_len = 4 + data.len;
 
-    // + 1 for the leading 'p'
     const total_length = payload_len + 1;
-    try buf.ensureTotalCapacity(total_length);
+    var buf = allocator.alloc(u8, total_length);
+    allocator.free(buf);
 
-    // this nonsense is to skip the buffers bound checking, since we've already
-    // ensured the available capacity
-    var view = buf.skip(total_length) catch unreachable;
-    view.writeByte('p');
-    view.writeIntBig(u32, @intCast(payload_len));
-    view.write(self.data);
+    var writer = stream.writer(io, &buf);
+    const w = &writer.interface;
+
+    try w.writeByte('p');
+    try w.writeInt(u32, @intCast(payload_len), .big);
+    try w.writeAll(data);
+
+    try w.flush();
 }
 
 const t = proto.testing;
 test "SASLResponse: write" {
-    var buf = try proto.Buffer.init(t.allocator, 128);
-    defer buf.deinit();
+    const io = testing.io;
 
-    const s = SASLResponse{
-        .data = "the response",
-    };
-    try s.write(&buf);
+    const s = writeSASLResponse(io, stream, "the response");
 
     var reader = Reader.init(buf.string());
-    try t.expectEqual('p', try reader.byte());
-    try t.expectEqual(16, try reader.int32()); // payload length
-    try t.expectString("the response", reader.rest());
+    try testing.expectEqual('p', try reader.byte());
+    try testing.expectEqual(16, try reader.int32()); // payload length
+    try testing.expectEqualStrings("the response", reader.rest());
 }

@@ -68,7 +68,8 @@ pub const PgClient = struct {
     allocator: mem.Allocator,
     io: Io,
 
-    conn_opts: pg.conn.Opts,
+    pool_opts: pg.conn.Opts,
+    wal_opts: pg.conn.Opts,
 
     last_lsn: u64,
     last_timestamp: i64,
@@ -80,10 +81,22 @@ pub const PgClient = struct {
     wal_conn: ?*pg.Conn,
 
     pub fn init(io: Io, allocator: mem.Allocator, opts: pg.conn.Opts) !PgClient{
+        var wal_opts = opts;
+
+        wal_opts.startup_parameters = .init(allocator);
+        try wal_opts.startup_parameters.ensureUnusedCapacity(opts.startup_parameters.count() + 1);
+
+        var it = opts.startup_parameters.iterator();
+        while (it.next()) |entry| {
+            wal_opts.startup_parameters.putAssumeCapacity(entry.key_ptr.*, entry.value_ptr.*);
+        }
+
+        wal_opts.startup_parameters.putAssumeCapacity("replication", "database");
+
         var pool = try createConnPool(allocator, io, opts);
         errdefer pool.deinit();
 
-        var conn = try createWalConn(allocator, io, opts);
+        var conn = try createWalConn(allocator, io, wal_opts);
         errdefer conn.deinit();
 
         var changed_columns = std.StringHashMap(types.ChangedColumns).init(allocator);
@@ -92,7 +105,8 @@ pub const PgClient = struct {
         return .{
             .allocator = allocator,
             .io = io,
-            .conn_opts = opts,
+            .pool_opts = opts,
+            .wal_opts = wal_opts,
             .last_lsn = 0,
             .last_timestamp = 0,
             .context = .{
@@ -152,7 +166,7 @@ pub const PgClient = struct {
     pub fn startWALReader(self: *@This(), timeout_ms: i32) !void {
         if (self.wal_conn == null) return PgClientError.WalConnectionNotInitialized;
 
-        const query = try std.fmt.allocPrint(self.allocator, "START_REPLICATION SLOT {s} LOGICAL 0/0 (proto_version '1', publication_names 'db_pub', messages 'true');", .{self.conn_opts.wal});
+        const query = try std.fmt.allocPrint(self.allocator, "START_REPLICATION SLOT {s} LOGICAL 0/0 (proto_version '1', publication_names 'db_pub', messages 'true');", .{self.wal_opts.wal});
 
         const msg_len: u32 = @as(u32, @intCast(query.len)) + 4 + 1;
         var len_buf: [4]u8 = undefined;
@@ -173,7 +187,7 @@ pub const PgClient = struct {
     pub fn endWALReader(self: *@This()) !void {
         if (self.wal_conn == null) return PgClientError.WalConnectionNotInitialized;
 
-        const query = try std.fmt.allocPrint(self.allocator, "DROP_REPLICATION SLOT {s};", .{self.conn_opts.wal});
+        const query = try std.fmt.allocPrint(self.allocator, "DROP_REPLICATION SLOT {s};", .{self.wal_opts.wal});
 
         const msg_len: u32 = @as(u32, @intCast(query.len)) + 4 + 1;
         var len_buf: [4]u8 = undefined;
@@ -382,7 +396,7 @@ pub const PgClient = struct {
 
                 const columns = self.readSchemaKeys(table_name) catch |err| switch (err) {
                     PgClientError.ConnectionPoolNotInitialized => blk: {
-                        self.pool = try createConnPool(self.allocator, self.io, self.conn_opts);
+                        self.pool = try createConnPool(self.allocator, self.io, self.pool_opts);
 
                         break :blk try self.readSchemaKeys(table_name);
                     },
@@ -657,19 +671,7 @@ pub const PgClient = struct {
         };
         errdefer allocator.destroy(conn);
 
-        var wal_opts = opts;
-
-        wal_opts.startup_parameters = .init(allocator);
-        try wal_opts.startup_parameters.ensureUnusedCapacity(opts.startup_parameters.count() + 1);
-
-        var it = opts.startup_parameters.iterator();
-        while (it.next()) |entry| {
-            wal_opts.startup_parameters.putAssumeCapacity(entry.key_ptr.*, entry.value_ptr.*);
-        }
-
-        wal_opts.startup_parameters.putAssumeCapacity("replication", "database");
-
-        conn.auth(wal_opts) catch |err| {
+        conn.auth(opts) catch |err| {
             if (conn.err) |pg_err| {
                 std.debug.print("Failed to auth: {} {s}: {s}\n", .{err, pg_err.code, pg_err.message});
             } else {
@@ -720,7 +722,8 @@ fn setupMockClient(allocator: mem.Allocator, io: Io) !PgClient {
     return .{
         .allocator = allocator,
         .io = io,
-        .conn_opts = undefined,
+        .pool_opts = undefined,
+        .wal_opts = undefined,
         .last_lsn = 0,
         .last_timestamp = 0,
         .context = .{
@@ -800,7 +803,8 @@ test "parsePgOutput maps RELATION correctly" {
     var client = PgClient{
         .allocator = allocator,
         .io = io,
-        .conn_opts = undefined,
+        .pool_opts = undefined,
+        .wal_opts = undefined,
         .last_lsn = 0,
         .last_timestamp = 0,
         .context = .{
@@ -1115,7 +1119,8 @@ test "readSchemaKeys" {
         .allocator = allocator,
         .io = undefined,
         .context = undefined,
-        .conn_opts = undefined,
+        .pool_opts = undefined,
+        .wal_opts = undefined,
         .last_lsn = undefined,
         .last_timestamp = undefined,
         .pool = try PgClient.createConnPool(allocator, io, .{

@@ -1,5 +1,4 @@
 const std = @import("std");
-const Buffer = @import("buffer").Buffer;
 
 const mem = std.mem;
 const Io = std.Io;
@@ -19,7 +18,7 @@ const Stream = @import("stream.zig").Stream;
 //   - is only valid until the next call to reader.read()
 //     (we expect our caller to clone the value)
 // a normal zig error on any other error
-pub fn auth(io: Io, stream: *Stream, buf: *Buffer, reader: *Reader, opts: conn.Opts) !?[]const u8 {
+pub fn auth(io: Io, stream: *Stream, reader: *Reader, opts: conn.Opts) !?[]const u8 {
     try reader.startFlow(opts.timeout_ms);
 
     // ignore errors on endFlow, because it's troublesome to handle, and only
@@ -29,16 +28,7 @@ pub fn auth(io: Io, stream: *Stream, buf: *Buffer, reader: *Reader, opts: conn.O
 
     {
         // write our startup message
-        const startup_message = proto.StartupMessage{
-            .username = opts.username,
-            .application_name = opts.application_name,
-            .database = opts.database orelse opts.username,
-            .params = opts.startup_parameters,
-        };
-
-        buf.resetRetainingCapacity();
-        try startup_message.write(buf);
-        try stream.writeAll(buf.string());
+        try proto.StartupMessage.write(io, stream, opts);
     }
 
     // read the server's response
@@ -52,11 +42,11 @@ pub fn auth(io: Io, stream: *Stream, buf: *Buffer, reader: *Reader, opts: conn.O
 
         switch (try proto.AuthenticationRequest.parse(msg.data)) {
             .ok => return null,
-            .sasl => |sasl| if (try saslAuth(io, sasl, stream, buf, reader, opts)) |raw_pg_err| {
+            .sasl => |sasl| if (try saslAuth(io, sasl, stream, reader, opts)) |raw_pg_err| {
                 return raw_pg_err;
             },
-            .md5 => |salt| try md5PasswordAuth(salt, stream, buf, opts),
-            .password => try passwordAuth(opts.password orelse "", stream, buf),
+            .md5 => |salt| try md5PasswordAuth(salt, stream, opts),
+            .password => try passwordAuth(opts.password orelse "", stream),
         }
     }
 
@@ -77,7 +67,7 @@ pub fn auth(io: Io, stream: *Stream, buf: *Buffer, reader: *Reader, opts: conn.O
     }
 }
 
-fn saslAuth(io: Io, req: proto.AuthenticationRequest.SASL, stream: *Stream, buf: *Buffer, reader: *Reader, opts: conn.Opts) !?[]const u8 {
+fn saslAuth(io: Io, req: proto.AuthenticationRequest.SASL, stream: *Stream, reader: *Reader, opts: conn.Opts) !?[]const u8 {
     if (!req.scram_sha_256) {
         return error.UnexpectedDBMessage;
     }
@@ -87,13 +77,7 @@ fn saslAuth(io: Io, req: proto.AuthenticationRequest.SASL, stream: *Stream, buf:
 
     {
         // send the client initial response
-        const msg = proto.SASLInitialResponse{
-            .response = sasl.client_first_message,
-            .mechanism = "SCRAM-SHA-256",
-        };
-        buf.resetRetainingCapacity();
-        try msg.write(buf);
-        try stream.writeAll(buf.string());
+        try proto.writeSASLInitialResponse(stream, sasl.client_first_message, "SCRAM-SHA-256");
     }
 
     {
@@ -110,12 +94,8 @@ fn saslAuth(io: Io, req: proto.AuthenticationRequest.SASL, stream: *Stream, buf:
 
     {
         // send the client final response
-        const msg = proto.SASLResponse{
-            .data = try sasl.clientFinalMessage(opts.password orelse ""),
-        };
-        buf.resetRetainingCapacity();
-        try msg.write(buf);
-        try stream.writeAll(buf.string());
+        const client_final_message = try sasl.clientFinalMessage(opts.password orelse "");
+        try proto.writeSASLResponse(stream, client_final_message);
     }
 
     {
@@ -132,7 +112,7 @@ fn saslAuth(io: Io, req: proto.AuthenticationRequest.SASL, stream: *Stream, buf:
     return null;
 }
 
-fn md5PasswordAuth(salt: []const u8, stream: *Stream, buf: *Buffer, opts: conn.Opts) !void {
+fn md5PasswordAuth(salt: []const u8, stream: *Stream, opts: conn.Opts) !void {
     var hash: [16]u8 = undefined;
     {
         var hasher = std.crypto.hash.Md5.init(.{});
@@ -150,14 +130,11 @@ fn md5PasswordAuth(salt: []const u8, stream: *Stream, buf: *Buffer, opts: conn.O
     }
     var hashed_password: [35]u8 = undefined;
     const password = try std.fmt.bufPrint(&hashed_password, "md5{s}", .{&std.fmt.bytesToHex(&hash, .lower)});
-    try passwordAuth(password, stream, buf);
+    try passwordAuth(password, stream);
 }
 
-fn passwordAuth(password: []const u8, stream: *Stream, buf: *Buffer) !void {
-    buf.resetRetainingCapacity();
-    const pw = proto.PasswordMessage{ .password = password };
-    try pw.write(buf);
-    try stream.writeAll(buf.string());
+fn passwordAuth(password: []const u8, stream: *Stream) !void {
+    try proto.writePasswordMessage(stream, password);
 }
 
 const SASL = struct {

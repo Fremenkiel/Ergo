@@ -1,38 +1,45 @@
 const std = @import("std");
-const proto = @import("proto.zig");
 
-const Query = @This();
+const Io = std.Io;
+const mem = std.mem;
+const testing = std.testing;
+
+const proto = @import("proto.zig");
 
 sql: []const u8,
 
-pub fn write(self: Query, buf: *proto.Buffer) !void {
+pub fn writeQuery(allocator: mem.Allocator, io: Io, stream: Io.net.Stream, sql: []const u8) !void {
     // 4   + S    + 1
     // len + $sql + 0
-    const payload_len = 5 + self.sql.len;
+    const payload_len = 5 + sql.len;
 
     // +1 for the type field, 'Q'
     const total_length = payload_len + 1;
 
-    try buf.ensureTotalCapacity(total_length);
+    var buf = try allocator.alloc(u8, total_length);
+    defer allocator.free(buf);
 
-    var view = buf.skip(total_length) catch unreachable;
-    view.writeByte('Q');
-    view.writeIntBig(u32, @intCast(payload_len));
-    view.write(self.sql);
-    view.writeByte(0);
+    var writer = stream.writer(io, &buf);
+    var w = &writer.interface;
+
+    try w.writeByte('Q');
+    try w.writeInt(u32, @intCast(payload_len), .big);
+    try w.writeAll(sql);
+    try w.writeByte(0);
+
+    try w.flush();
 }
 
 const t = proto.testing;
 const Reader = proto.Reader;
 test "Query: write" {
-    var buf = try proto.Buffer.init(t.allocator, 128);
-    defer buf.deinit();
+    const allocator = testing.allocator;
+    const io = testing.io;
 
-    const q = Query{ .sql = "select 1" };
-    try q.write(&buf);
+    const q = writeQuery(allocator, io, stream, "select 1");
 
     var reader = Reader.init(buf.string());
-    try t.expectEqual('Q', try reader.byte());
-    try t.expectEqual(13, try reader.int32()); // payload length
-    try t.expectString("select 1", try reader.restAsString());
+    try testing.expectEqual('Q', try reader.byte());
+    try testing.expectEqual(13, try reader.int32()); // payload length
+    try testing.expectEqualStrings("select 1", try reader.restAsString());
 }

@@ -1,5 +1,4 @@
 const std = @import("std");
-const Buffer = @import("buffer").Buffer;
 
 const config = @import("config.zig");
 const metrics = @import("metrics.zig");
@@ -14,7 +13,6 @@ const Reader = @import("reader.zig").Reader;
 const Result = @import("result.zig").Result;
 const Stream = @import("stream.zig").Stream;
 const Stmt = @import("stmt.zig").Stmt;
-// const Timeout = @import("");
 
 const os = std.os;
 const mem = std.mem;
@@ -24,7 +22,7 @@ const testing = std.testing;
 const sendTerminate = @import("stream.zig").sendTerminate;
 
 pub const Opts = struct {
-    host: ?[]const u8 = null,
+    host: []const u8,
     port: ?u16 = null,
     wal: []const u8 = "wal_slot",
     write_buffer: ?u16 = null,
@@ -42,9 +40,9 @@ pub const Opts = struct {
     // auth
     username: []const u8 = "postgres",
     password: ?[]const u8 = null,
-    database: ?[]const u8 = null,
+    database: []const u8,
     timeout_ms: i32 = 500,
-    application_name: ?[]const u8 = null,
+    application_name: []const u8,
     startup_parameters: std.hash_map.StringHashMap([]const u8),
 
     pub const TLS = union(enum) {
@@ -74,7 +72,7 @@ pub const Conn = struct {
     state: State,
 
     // A buffer used for writing to PG. This can grow dynamically as needed.
-    buf: Buffer,
+    buf: []u8,
 
     // Used to read data from PG. Has its own buffer which can grow dynamically
     reader: Reader,
@@ -152,8 +150,8 @@ pub const Conn = struct {
         var stream = try Stream.connect(io, allocator, opts, ssl_ctx);
         errdefer stream.close();
 
-        const buf = try Buffer.init(allocator, @max(opts.write_buffer orelse 2048, 128));
-        errdefer buf.deinit();
+        const buf = try allocator.alloc(u8, @max(opts.write_buffer orelse 2048, 128));
+        errdefer allocator.free(buf);
 
         const reader = try Reader.init(allocator, opts.read_buffer orelse 4096, stream);
         errdefer reader.deinit();
@@ -189,7 +187,7 @@ pub const Conn = struct {
         if (self.err_data) |err_data| {
             allocator.free(err_data);
         }
-        self.buf.deinit();
+        self.allocator.free(self.buf);
         self.reader.deinit();
         allocator.free(self.param_oids);
         self.result_state.deinit(allocator);
@@ -211,7 +209,7 @@ pub const Conn = struct {
     }
 
     pub fn auth(self: *Conn, opts: Opts) !void {
-        if (try config.auth(self.io, &self.stream, &self.buf, &self.reader, opts)) |raw_pg_err| {
+        if (try config.auth(self.allocator, self.io, &self.stream, &self.buf, &self.reader, opts)) |raw_pg_err| {
             return self.setErr(raw_pg_err);
         }
 
@@ -259,7 +257,6 @@ pub const Conn = struct {
                 try self.reader.startFlow(opts.timeout_ms);
                 // Send a "SYNC" command
                 try self.write(&.{ 'S', 0, 0, 0, 4 });
-                stmt.buf.reset();
                 try stmt.prepareForBind(@intCast(describe.param_oids.len));
             }
         }
@@ -319,7 +316,7 @@ pub const Conn = struct {
             return error.ConnectionBusy;
         }
         var buf = &self.buf;
-        buf.reset();
+        buf.pos = 0;
 
         if (values.len == 0) {
             try self.reader.startFlow(opts.timeout_ms);

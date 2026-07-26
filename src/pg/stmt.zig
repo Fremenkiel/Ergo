@@ -1,5 +1,4 @@
 const std = @import("std");
-const Buffer = @import("buffer").Buffer;
 
 const mem = std.mem;
 
@@ -13,7 +12,7 @@ const Result = @import("result.zig").Result;
 
 pub const Stmt = struct {
     allocator: mem.Allocator,
-    buf: *Buffer,
+    buf: *[]u8,
 
     opts: Conn.QueryOpts,
 
@@ -114,7 +113,10 @@ pub const Stmt = struct {
             // the +3 for the initial byte message for each of the 3 messages
             const total_length = 3 + bind_payload_len + describe_payload_len + sync_payload_len;
 
-            try buf.ensureTotalCapacity(total_length);
+            if (buf.len < total_length) {
+                self.allocator.free(buf);
+                self.buf.* = try self.allocator.alloc(u8, total_length);
+            }
             var view = buf.skip(total_length) catch unreachable;
 
             // PARSE
@@ -227,7 +229,6 @@ pub const Stmt = struct {
         try self.conn.readyForQuery();
 
         var buf = self.buf;
-        buf.resetRetainingCapacity();
 
         const name = self.name;
 
@@ -235,7 +236,11 @@ pub const Stmt = struct {
         // 4 byte length placeholder - 0, 0, 0, 0
         // portal name (empty string, length 0) - 0
         // prepared statement name  + null terminator
-        try buf.ensureTotalCapacity(1 + 4 + 1 + name.len + 1 + 2);
+        const capacity = 1 + 4 + 1 + name.len + 1 + 2;
+        if (buf.len < capacity) {
+            self.allocator.free(buf);
+            self.buf.* = try self.allocator.alloc(u8, capacity);
+        }
 
         // length of buffer is guaranteed to be 128, so it's safe to use
         // writeAssumeCapacity (4 byte length placeholder, 1 byte empty portal)
