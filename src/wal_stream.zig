@@ -15,27 +15,27 @@ pub const sync_marker_str = "SYNC_MARKER_REACHED";
 pub const submit_marker_str = "CH_DATA_SUBMITTED_MARKER";
 const read_timeout_ms = 5;
 
-pub const WalProcessorError = error{
+pub const WalStreamError = error{
 FailedWhileShutdown,
 };
 
-const ProcessorStatus = enum(u8) {
+const StreamStatus = enum(u8) {
     Idle = 0,
     CopyData = 1,
     CopyDone = 2,
     Failed = 3,
 };
 
-pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
+pub fn WalStream(comptime PgClient: type, comptime ChClient: type) type {
     return struct {
-        duration: Io.Duration = Io.Duration.fromSeconds(1),
+        duration: Io.Duration,
         last_write_timestamp: Io.Timestamp,
         log_array: std.ArrayList(types.AuditEntry) = .empty,
         transaction_array: std.ArrayList(types.AuditEntry) = .empty,
 
         is_test: bool = false,
 
-        status: std.atomic.Value(ProcessorStatus) = .init(.Idle),
+        status: StreamStatus = .Idle,
 
         allocator: mem.Allocator,
         io: Io,
@@ -67,23 +67,24 @@ pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
         }
 
         pub fn stream(self: *@This(), flag: *std.atomic.Value(bool)) !void {
-            // TODO: check lengts, time elapsed, transaction_array to make sure nothing is missing.
             while (true) {
                 const is_shutting_down = flag.load(.seq_cst);
-                const processor_status = self.status.load(.seq_cst);
-                
+                const duration_passed = self.last_write_timestamp.addDuration(self.duration).toMilliseconds() < Io.Clock.real.now(self.io).toMilliseconds();
+                if ((is_shutting_down or duration_passed) and self.log_array.items.len > 0) {
+                    try self.flush();
+                }
+
                 if (is_shutting_down) {
-                    switch (processor_status) {
+                    switch (self.status) {
                         .Idle => {
-                            try self.flush();
                             return;
                         },
                         .CopyData => {
                             try self.pg_client.sendCopyDone();
-                            self.status.store(.CopyDone, .seq_cst);
+                            self.status = .CopyDone;
                         },
                         .Failed => {
-                            return WalProcessorError.FailedWhileShutdown;
+                            return WalStreamError.FailedWhileShutdown;
                         },
                         .CopyDone => {},
                     }
@@ -91,7 +92,6 @@ pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
 
                 var wal_response = self.pg_client.readWAL() catch |err| switch (err) {
                     error.WouldBlock, error.Timeout => {
-                        std.debug.print("timeout\n", .{});
                         continue; 
                     },
                     else => return err,
@@ -100,7 +100,7 @@ pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
                 if (wal_response) |*response| {
                     switch (response.message) {
                         pg.packet.ServerPacket.XLogData => {
-                            if (self.status.load(.seq_cst) != .CopyData) self.status.store(.CopyData, .seq_cst);
+                            if (self.status != .CopyData) self.status = .CopyData;
 
                             if (response.data) |entry| {
                                 try self.transaction_array.append(self.allocator, entry);
@@ -141,13 +141,8 @@ pub fn WalProcessor(comptime PgClient: type, comptime ChClient: type) type {
                         pg.packet.ServerPacket.CopyDone => {},
                         pg.packet.ServerPacket.CommandComplete => {},
                         pg.packet.ServerPacket.ReadyForQuery => {
-                            self.status.store(.Idle, .seq_cst);
+                            self.status = .Idle;
                         },
-                    }
-
-                    const duration_passed = self.last_write_timestamp.addDuration(self.duration).toMilliseconds() < Io.Clock.real.now(self.io).toMilliseconds();
-                    if ((is_shutting_down or duration_passed) and self.log_array.items.len > 0) {
-                        try self.flush();
                     }
                 }
             }
@@ -174,17 +169,20 @@ var mock_is_shutting_down = std.atomic.Value(bool).init(false);
 
 const MockPgClient = struct {
     allocator: mem.Allocator,
+    io: Io,
+
     responses: []pg_client.ReadResponse,
     read_response_index: ?u8,
 
     conn_opts: void,
     wal_conn: *bool,
 
-    pub fn init(allocator: mem.Allocator, responses: []pg_client.ReadResponse) !MockPgClient {
+    pub fn init(allocator: mem.Allocator, io: Io, responses: []pg_client.ReadResponse) !MockPgClient {
         const conn = try allocator.create(bool);
         conn.* = true;
         return .{
             .allocator = allocator,
+            .io = io,
             .responses = responses,
             .read_response_index = null,
             .conn_opts = {},
@@ -205,14 +203,22 @@ const MockPgClient = struct {
         if (!self.wal_conn.*) return pg_client.PgClientError.WalConnectionNotInitialized;
     }
 
+    pub fn endWALReader(self: *@This()) !void {
+        if (!self.wal_conn.*) return pg_client.PgClientError.WalConnectionNotInitialized;
+    }
+
     pub fn sendCopyDone(self: *@This()) !void {
         _ = self;
     }
 
-    pub fn readWAL(self: *@This()) !?pg_client.ReadResponse {
+    pub fn readWAL(self: *@This()) error{Timeout,WouldBlock,Canceled}!?pg_client.ReadResponse {
         if (self.read_response_index == null) {
             self.read_response_index = 0;
         } else {
+            if (self.read_response_index.? > self.responses.len) {
+                try Io.sleep(self.io, Io.Duration{ .nanoseconds = 500 * std.time.ns_per_ms }, .real);
+                return error.Timeout;
+            }
             self.read_response_index.? += 1;
         }
 
@@ -336,24 +342,31 @@ test "startStreaming read and parse correctly" {
         },
     };
 
-    var mock_pg_client = try MockPgClient.init(allocator, &res);
+    var mock_pg_client = try MockPgClient.init(allocator, io, &res);
     defer mock_pg_client.deinit();
 
     var mock_ch_client = MockChClient.init(allocator);
     defer mock_ch_client.deinit();
 
-    var processor = WalProcessor(MockPgClient, MockChClient){ 
+    var processor = WalStream(MockPgClient, MockChClient){ 
         .pg_client = &mock_pg_client, 
         .ch_client = &mock_ch_client,
+        .duration = Io.Duration.fromMilliseconds(500),
         .last_write_timestamp = Io.Clock.real.now(io).subDuration(
-        Io.Duration.fromSeconds(2)
+        Io.Duration.fromSeconds(2),
     ),
         .allocator = allocator,
         .io = io,
+        .status = .CopyData,
     };
     defer processor.deinit();
 
-    try processor.startStreaming(&mock_is_shutting_down);
+    try processor.startStreaming();
+
+    mock_is_shutting_down.store(true, .seq_cst);
+
+    try processor.stream(&mock_is_shutting_down);
+    try processor.endStreaming();
 
     try testing.expectEqual(1, mock_ch_client.written_logs.items.len);
     try testing.expectEqual(1, mock_ch_client.written_logs.items[0].action);

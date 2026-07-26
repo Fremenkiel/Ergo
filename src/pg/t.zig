@@ -1,10 +1,9 @@
 const std = @import("std");
 
-const Allocator = std.mem.Allocator;
-const Conn = @import("conn.zig").Conn;
+const Io = std.Io;
+const mem = std.mem;
 
-pub const allocator = std.testing.allocator;
-pub const io = std.testing.io;
+const Conn = @import("conn.zig").Conn;
 
 const test_opts: Conn.ConnOpts = .{
         .connect = .{  
@@ -20,39 +19,21 @@ const test_opts: Conn.ConnOpts = .{
         } 
 };
 
-pub var arena = std.heap.ArenaAllocator.init(allocator);
-
-pub fn reset() void {
-    _ = arena.reset(.free_all);
-}
-
 // std.testing.expectEqual won't coerce expected to actual, which is a problem
 // when expected is frequently a comptime.
 // https://github.com/ziglang/zig/issues/4437
-pub fn expectEqual(expected: anytype, actual: anytype) !void {
-    try std.testing.expectEqual(@as(@TypeOf(actual), expected), actual);
-}
 pub fn expectDelta(expected: anytype, actual: anytype, delta: anytype) !void {
-    expectEqual(true, expected - delta <= actual) catch |err| {
+    std.testing.expectEqual(true, expected - delta <= actual) catch |err| {
         std.debug.print("{d} !~ {d}", .{ expected, actual });
         return err;
     };
-    expectEqual(true, expected + delta >= actual) catch |err| {
+    std.testing.expectEqual(true, expected + delta >= actual) catch |err| {
         std.debug.print("{d} !~ {d}", .{ expected, actual });
         return err;
     };
-}
-pub const expectError = std.testing.expectError;
-pub const expectSlice = std.testing.expectEqualSlices;
-pub const expectString = std.testing.expectEqualStrings;
-pub fn expectStringSlice(expected: []const []const u8, actual: [][]const u8) !void {
-    try expectEqual(expected.len, actual.len);
-    for (expected, actual) |e, a| {
-        try expectString(e, a);
-    }
 }
 
-pub fn getRandom() std.Random.DefaultPrng {
+pub fn getRandom(io: Io) std.Random.DefaultPrng {
     var seed: u64 = undefined;
     std.Io.random(io, std.mem.asBytes(&seed));
     return std.Random.DefaultPrng.init(seed);
@@ -134,13 +115,14 @@ pub fn setup() !void {
 
 // Dummy net.Stream, lets us setup data to be read and capture data that is written.
 pub const Stream = struct {
+    allocator: mem.Allocator,
     closed: bool,
     read_index: usize,
     socket: c_int = 0,
     to_read: std.ArrayList(u8),
     received_array: std.ArrayList(u8),
 
-    pub fn init() *Stream {
+    pub fn init(allocator: mem.Allocator) *Stream {
         const s = allocator.create(Stream) catch unreachable;
         s.* = .{
             .closed = false,
@@ -152,9 +134,9 @@ pub const Stream = struct {
     }
 
     pub fn deinit(self: *Stream) void {
-        self.to_read.deinit(allocator);
-        self.received_array.deinit(allocator);
-        allocator.destroy(self);
+        self.to_read.deinit(self.allocator);
+        self.received_array.deinit(self.allocator);
+        self.allocator.destroy(self);
     }
 
     pub fn reset(self: *Stream) void {
@@ -168,7 +150,7 @@ pub const Stream = struct {
     }
 
     pub fn add(self: *Stream, value: []const u8) void {
-        self.to_read.appendSlice(allocator, value) catch unreachable;
+        self.to_read.appendSlice(self.allocator, value) catch unreachable;
     }
 
     pub fn readWithTimeout(self: *@This(), buf: []u8, timeout_ms: i32) !usize {
@@ -208,7 +190,7 @@ pub const Stream = struct {
 
     // store messages that are written to the stream
     pub fn writeAll(self: *Stream, data: []const u8) !void {
-        self.received_array.appendSlice(allocator, data) catch unreachable;
+        self.received_array.appendSlice(self.allocator, data) catch unreachable;
     }
 
     pub fn close(self: *Stream) void {
@@ -216,7 +198,7 @@ pub const Stream = struct {
     }
 };
 
-pub fn connect(opts: anytype) !Conn {
+pub fn connect(allocator: mem.Allocator, io: Io, opts: anytype) !Conn {
     const T = @TypeOf(opts);
 
     var c = try Conn.open(io, allocator, .{

@@ -10,3 +10,6 @@ tests
 Clean up wal on eof
 wal processor currently block and hold a connection after term is sent.
 Add time limit on main test to make them fail and not halt
+
+Research decimal support
+Remove buffer lib

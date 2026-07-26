@@ -1,4 +1,7 @@
 const std = @import("std");
+
+pub const Buffer = @import("buffer").Buffer;
+
 const proto = @import("proto.zig");
 
 //Client sends this based on getting a request.sasl
@@ -7,7 +10,7 @@ const SASLInitialResponse = @This();
 response: []const u8,
 mechanism: []const u8,
 
-pub fn write(self: SASLInitialResponse, buf: *proto.Buffer) !void {
+pub fn write(self: SASLInitialResponse, buf: *Buffer) !void {
     // 4 +   M          + 1 + 4             + R
     // len + $mechanism + 0 + $response.len + $response
     const payload_len = 9 + self.mechanism.len + self.response.len;

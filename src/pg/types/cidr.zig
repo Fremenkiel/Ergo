@@ -1,7 +1,8 @@
 const std = @import("std");
 const buffer = @import("buffer");
-const lib = @import("../lib.zig");
 const types = @import("../types.zig");
+
+const assert = std.debug.assert;
 
 pub const Cidr = struct {
     pub const encoding = &types.binary_encoding;
@@ -17,13 +18,12 @@ pub const Cidr = struct {
         v6,
     };
 
-    pub fn decode(comptime fail_mode: lib.FailMode, data: []const u8, data_oid: i32) if (fail_mode == .unsafe) Cidr else lib.TypeError!Cidr {
-        lib.verifyDecodeType(fail_mode, Cidr, &.{ Cidr.oid.decimal, Cidr.inet_oid.decimal }, data_oid) catch |err| {
-            if (fail_mode == .unsafe) unreachable;
+    pub fn decode(data: []const u8, data_oid: i32) types.TypeError!Cidr {
+        types.verifyDecodeType(&.{ Cidr.oid.decimal, Cidr.inet_oid.decimal }, data_oid) catch |err| {
             return err;
         };
 
-        lib.assert(data.len == 8 or data.len == 20);
+        assert(data.len == 8 or data.len == 20);
         return decodeKnown(data);
     }
 

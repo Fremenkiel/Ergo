@@ -1,7 +1,8 @@
 const std = @import("std");
+
 const proto = @import("proto.zig");
 
-const StartupMessage = @This();
+pub const Buffer = @import("buffer").Buffer;
 
 protocol: []const u8 = &[_]u8{ 0, 3, 0, 0 },
 username: []const u8,
@@ -9,7 +10,7 @@ database: []const u8,
 application_name: ?[]const u8 = null,
 params: ?std.StringHashMap([]const u8) = null,
 
-pub fn write(self: StartupMessage, buf: *proto.Buffer) !void {
+pub fn write(self: @This(), buf: *Buffer) !void {
     // 4 +   4        + 4      + 1 + N         + 1 + 8        + 1 + M         + 1 + 1 = 25 + N + M
     // len + protocol + "user" + 0 + $username + 0 "database" + 0 + $database + 0 + 0 + 0
     var payload_len = 25 + self.username.len + self.database.len;
@@ -62,7 +63,7 @@ test "StartupMessage: write" {
     var buf = try proto.Buffer.init(t.allocator, 128);
     defer buf.deinit();
 
-    const s = StartupMessage{ .username = "leto", .database = "ghanima" };
+    const s = @This(){ .username = "leto", .database = "ghanima" };
     try s.write(&buf);
 
     var reader = Reader.init(buf.string());

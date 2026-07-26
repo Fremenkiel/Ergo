@@ -1,6 +1,13 @@
 const std = @import("std");
-const lib = @import("lib.zig");
 const buffer = @import("buffer");
+
+const testing = std.testing;
+
+pub const TypeError = error{
+    InvalidType,
+    UnexpectedNull,
+    UnknownColumnName,
+};
 
 // These are nested inside the the Types structure so that we can generate an
 // oid => encoding maping. See the oidEncoding function.
@@ -16,6 +23,10 @@ pub const OID = struct {
             .encoded = encoded,
         };
     }
+};
+
+pub const Binary = struct {
+    data: []const u8,
 };
 
 pub const text_encoding = [2]u8{ 0, 0 };
@@ -42,9 +53,8 @@ pub const Char = struct {
         return buf.writeByte(value);
     }
 
-    pub fn decode(comptime fail_mode: lib.FailMode, data: []const u8, data_oid: i32) if (fail_mode == .unsafe) u8 else lib.TypeError!u8 {
-        lib.verifyDecodeType(fail_mode, u8, &.{Char.oid.decimal}, data_oid) catch |err| {
-            if (comptime fail_mode == .unsafe) unreachable;
+    pub fn decode(data: []const u8, data_oid: i32) TypeError!u8 {
+        verifyDecodeType(&.{Char.oid.decimal}, data_oid) catch |err| {
             return err;
         };
         return data[0];
@@ -70,9 +80,8 @@ pub const Int16 = struct {
         return Int16.encode(@intCast(value), buf, format_pos);
     }
 
-    pub fn decode(comptime fail_mode: lib.FailMode, data: []const u8, data_oid: i32) if (fail_mode == .unsafe) i16 else lib.TypeError!i16 {
-        lib.verifyDecodeType(fail_mode, i16, &.{Int16.oid.decimal}, data_oid) catch |err| {
-            if (comptime fail_mode == .unsafe) unreachable;
+    pub fn decode(data: []const u8, data_oid: i32) TypeError!i16 {
+        verifyDecodeType(&.{Int16.oid.decimal}, data_oid) catch |err| {
             return err;
         };
         return Int16.decodeKnown(data);
@@ -98,9 +107,8 @@ pub const Int32 = struct {
         return Int32.encode(@intCast(value), buf, format_pos);
     }
 
-    pub fn decode(comptime fail_mode: lib.FailMode, data: []const u8, data_oid: i32) if (fail_mode == .unsafe) i32 else lib.TypeError!i32 {
-        lib.verifyDecodeType(fail_mode, i32, &.{ Int32.oid.decimal, Xid.oid.decimal }, data_oid) catch |err| {
-            if (comptime fail_mode == .unsafe) unreachable;
+    pub fn decode(data: []const u8, data_oid: i32) TypeError!i32 {
+        verifyDecodeType(&.{ Int32.oid.decimal, Xid.oid.decimal }, data_oid) catch |err| {
             return err;
         };
         return Int32.decodeKnown(data);
@@ -126,12 +134,11 @@ pub const Int64 = struct {
         return Int64.encode(@intCast(value), buf, format_pos);
     }
 
-    pub fn decode(comptime fail_mode: lib.FailMode, data: []const u8, data_oid: i32) if (fail_mode == .unsafe) i64 else lib.TypeError!i64 {
+    pub fn decode(data: []const u8, data_oid: i32) TypeError!i64 {
         switch (data_oid) {
             Timestamp.oid.decimal, TimestampTz.oid.decimal => return Timestamp.decodeKnown(data),
             else => {
-                lib.verifyDecodeType(fail_mode, i64, &.{ Int64.oid.decimal, PgLSN.oid.decimal, Xid8.oid.decimal }, data_oid) catch |err| {
-                    if (comptime fail_mode == .unsafe) unreachable;
+                verifyDecodeType(&.{ Int64.oid.decimal, PgLSN.oid.decimal, Xid8.oid.decimal }, data_oid) catch |err| {
                     return err;
                 };
                 return Int64.decodeKnown(data);
@@ -155,9 +162,8 @@ pub const Timestamp = struct {
         return buf.writeIntBig(i64, value - us_from_epoch_to_y2k);
     }
 
-    pub fn decode(comptime fail_mode: lib.FailMode, data: []const u8, data_oid: i32) if (fail_mode == .unsafe) i64 else lib.TypeError!i64 {
-        lib.verifyDecodeType(fail_mode, i64, &.{ Timestamp.oid.decimal, TimestampTz.oid.decimal }, data_oid) catch |err| {
-            if (comptime fail_mode == .unsafe) unreachable;
+    pub fn decode(data: []const u8, data_oid: i32) TypeError!i64 {
+        verifyDecodeType(&.{ Timestamp.oid.decimal, TimestampTz.oid.decimal }, data_oid) catch |err| {
             return err;
         };
         return std.mem.readInt(i64, data[0..8], .big) + us_from_epoch_to_y2k;
@@ -184,9 +190,8 @@ pub const Float32 = struct {
         return buf.writeIntBig(i32, tmp.*);
     }
 
-    pub fn decode(comptime fail_mode: lib.FailMode, data: []const u8, data_oid: i32) if (fail_mode == .unsafe) f32 else lib.TypeError!f32 {
-        lib.verifyDecodeType(fail_mode, f32, &.{Float32.oid.decimal}, data_oid) catch |err| {
-            if (comptime fail_mode == .unsafe) unreachable;
+    pub fn decode(data: []const u8, data_oid: i32) TypeError!f32 {
+        verifyDecodeType(&.{Float32.oid.decimal}, data_oid) catch |err| {
             return err;
         };
         return Float32.decodeKnown(data);
@@ -212,18 +217,14 @@ pub const Float64 = struct {
         return buf.writeIntBig(i64, tmp.*);
     }
 
-    pub fn decode(comptime fail_mode: lib.FailMode, data: []const u8, data_oid: i32) if (fail_mode == .unsafe) f64 else lib.TypeError!f64 {
+    pub fn decode(data: []const u8, data_oid: i32) TypeError!f64 {
         switch (data_oid) {
             Numeric.oid.decimal => {
-                const numeric = Numeric.decode(fail_mode, data, data_oid);
-                if (comptime fail_mode == .unsafe) {
-                    return numeric.toFloat();
-                }
+                const numeric = Numeric.decode(data, data_oid);
                 return (try numeric).toFloat();
             },
             else => {
-                lib.verifyDecodeType(fail_mode, f64, &.{Float64.oid.decimal}, data_oid) catch |err| {
-                    if (comptime fail_mode == .unsafe) unreachable;
+                verifyDecodeType(&.{Float64.oid.decimal}, data_oid) catch |err| {
                     return err;
                 };
                 return Float64.decodeKnown(data);
@@ -248,9 +249,8 @@ pub const Bool = struct {
         return buf.writeByte(if (value) 1 else 0);
     }
 
-    pub fn decode(comptime fail_mode: lib.FailMode, data: []const u8, data_oid: i32) if (fail_mode == .unsafe) bool else lib.TypeError!bool {
-        lib.verifyDecodeType(fail_mode, bool, &.{Bool.oid.decimal}, data_oid) catch |err| {
-            if (comptime fail_mode == .unsafe) unreachable;
+    pub fn decode(data: []const u8, data_oid: i32) TypeError!bool {
+        verifyDecodeType(&.{Bool.oid.decimal}, data_oid) catch |err| {
             return err;
         };
         return decodeKnown(data);
@@ -320,9 +320,8 @@ pub const UUID = struct {
         }
     }
 
-    pub fn decode(comptime fail_mode: lib.FailMode, data: []const u8, data_oid: i32) if (fail_mode == .unsafe) []const u8 else lib.TypeError![]const u8 {
-        lib.verifyDecodeType(fail_mode, []const u8, &.{UUID.oid.decimal}, data_oid) catch |err| {
-            if (comptime fail_mode == .unsafe) unreachable;
+    pub fn decode(data: []const u8, data_oid: i32) TypeError![]const u8 {
+        verifyDecodeType(&.{UUID.oid.decimal}, data_oid) catch |err| {
             return err;
         };
         return data;
@@ -488,9 +487,8 @@ pub const JSONB = struct {
         Encode.variableLengthFill(buf, state);
     }
 
-    fn decode(comptime fail_mode: lib.FailMode, data: []const u8, data_oid: i32) if (fail_mode == .unsafe) []const u8 else lib.TypeError![]const u8 {
-        lib.verifyDecodeType(fail_mode, []const u8, &.{JSONB.oid.decimal}, data_oid) catch |err| {
-            if (comptime fail_mode == .unsafe) unreachable;
+    fn decode(data: []const u8, data_oid: i32) TypeError![]const u8 {
+        verifyDecodeType(&.{JSONB.oid.decimal}, data_oid) catch |err| {
             return err;
         };
         return JSONB.decodeKnown(data);
@@ -713,19 +711,6 @@ pub const MacAddrArray = struct {
     const encoding = &binary_encoding;
 
     fn encode(values: []const []const u8, buf: *buffer.Buffer, format_pos: usize) !void {
-        // This has challenges. Do we have a binary representation or a text representation?
-        // Or maybe we have a mix (maybe we shouldn't support that)?
-        // We handle this with UUID by converting the text representation to binary
-        // but it's harder wit MacAddr because it supports 7 different text representations
-        // and I don't really want this library to become a text parsing library which attempts
-        // to mimic what PostgreSQL does.
-        // So we're going to send a text-encoded array with text values, which emans
-        // we need to convert any binary representation to text (which is a lot easier).
-
-        // The worst-case scenario is that each value takes 17 bytes. This is the
-        // most verbose text-encoded value. When we encode a binary value as text
-        // we'll use the most compact (12 bytes), but we might be given a 17-byte
-        // text-encoded value, which we'll write as-is
         var l: usize = 0;
         for (values) |v| {
             // binary values will be encoded in a 12-byte text representation
@@ -923,16 +908,10 @@ pub const CharArray = struct {
 
 // Return the encoding we want PG to use for a particular OID
 fn resultEncodingFor(oid: i32) *const [2]u8 {
-    inline for (@typeInfo(@This()).@"struct".decls) |decl| {
-        const S = @field(@This(), decl.name);
-        if (@typeInfo(@TypeOf(S)) == .type and @hasField(S, "oid")) {
-            if (oid == S.oid.decimal) {
-                return S.encoding;
-            }
-        }
-    }
-    // default to text encoding
-    return &binary_encoding;
+    return switch (oid) {
+        String.oid.decimal => &text_encoding,
+        else => &binary_encoding,
+    };
 }
 
 pub const Encode = struct {
@@ -1376,7 +1355,7 @@ pub fn bindValue(comptime T: type, oid: i32, value: anytype, buf: *buffer.Buffer
                     JSON.oid.decimal => return JSON.encode(value, buf, format_pos),
                     JSONB.oid.decimal => return JSONB.encode(value, buf, format_pos),
                     else => {
-                        if (ptr.child != lib.Binary) {
+                        if (ptr.child != Binary) {
                             return error.CannotBindStruct;
                         }
                         buf.writeAt(&binary_encoding, format_pos);
@@ -1559,19 +1538,19 @@ pub fn resultEncoding(oids: []i32, buf: *buffer.Buffer) !void {
     }
 }
 
-pub fn decodeScalar(comptime fail_mode: lib.FailMode, comptime T: type, data: []const u8, oid: i32) if (fail_mode == .safe) lib.TypeError!T else T {
+pub fn decodeScalar(comptime T: type, data: []const u8, oid: i32) TypeError!T {
     switch (T) {
-        u8 => return Char.decode(fail_mode, data, oid),
-        i16 => return Int16.decode(fail_mode, data, oid),
-        i32 => return Int32.decode(fail_mode, data, oid),
-        i64 => return Int64.decode(fail_mode, data, oid),
-        f32 => return Float32.decode(fail_mode, data, oid),
-        f64 => return Float64.decode(fail_mode, data, oid),
-        bool => return Bool.decode(fail_mode, data, oid),
+        u8 => return Char.decode(data, oid),
+        i16 => return Int16.decode(data, oid),
+        i32 => return Int32.decode(data, oid),
+        i64 => return Int64.decode(data, oid),
+        f32 => return Float32.decode(data, oid),
+        f64 => return Float64.decode(data, oid),
+        bool => return Bool.decode(data, oid),
         []const u8 => return Bytea.decode(data, oid),
         []u8 => return @constCast(Bytea.decode(data, oid)),
-        Numeric => return Numeric.decode(fail_mode, data, oid),
-        Cidr => return Cidr.decode(fail_mode, data, oid),
+        Numeric => return Numeric.decode(data, oid),
+        Cidr => return Cidr.decode(data, oid),
         else => switch (@typeInfo(T)) {
             .@"enum" => {
                 const str = Bytea.decode(data, oid);
@@ -1586,24 +1565,40 @@ fn compileHaltBindError(comptime T: type) noreturn {
     @compileError("cannot bind value of type " ++ @typeName(T));
 }
 
-const t = lib.testing;
+pub fn verifyDecodeType(comptime expected_oids: []const i32, actual: i32) !void {
+    if (isExpectedId(expected_oids, actual)) {
+        return;
+    }
+    return error.InvalidType;
+}
+
+fn isExpectedId(comptime expected_oids: []const i32, actual: i32) bool {
+    inline for (expected_oids) |expected_oid| {
+        if (expected_oid == actual) {
+            return true;
+        }
+    }
+    return false;
+}
+
+
 test "UUID: toString" {
-    try t.expectError(error.InvalidUUID, UUID.toString(&.{ 73, 190, 142, 9, 170, 250, 176, 16, 73, 21 }));
+    try testing.expectError(error.InvalidUUID, UUID.toString(&.{ 73, 190, 142, 9, 170, 250, 176, 16, 73, 21 }));
 
     const s = try UUID.toString(&.{ 183, 204, 40, 47, 236, 67, 73, 190, 142, 9, 170, 250, 176, 16, 73, 21 });
-    try t.expectString("b7cc282f-ec43-49be-8e09-aafab0104915", &s);
+    try testing.expectEqualStrings("b7cc282f-ec43-49be-8e09-aafab0104915", &s);
 }
 
 test "UUID: toBytes" {
-    try t.expectError(error.InvalidUUID, UUID.toBytes(""));
+    try testing.expectError(error.InvalidUUID, UUID.toBytes(""));
 
     {
         const s = try UUID.toBytes("166B4751-D702-4FB9-9A2A-CD6B69ED18D6");
-        try t.expectSlice(u8, &.{ 22, 107, 71, 81, 215, 2, 79, 185, 154, 42, 205, 107, 105, 237, 24, 214 }, &s);
+        try testing.expectEqualStrings(u8, &.{ 22, 107, 71, 81, 215, 2, 79, 185, 154, 42, 205, 107, 105, 237, 24, 214 }, &s);
     }
 
     {
         const s = try UUID.toBytes("166b4751-d702-4fb9-9a2a-cd6b69ed18d7");
-        try t.expectSlice(u8, &.{ 22, 107, 71, 81, 215, 2, 79, 185, 154, 42, 205, 107, 105, 237, 24, 215 }, &s);
+        try testing.expectEqualStrings(u8, &.{ 22, 107, 71, 81, 215, 2, 79, 185, 154, 42, 205, 107, 105, 237, 24, 215 }, &s);
     }
 }

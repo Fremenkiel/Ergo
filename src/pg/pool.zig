@@ -1,15 +1,17 @@
 const std = @import("std");
-const lib = @import("lib.zig");
+const openssl = @import("openssl");
 
-const log = lib.log;
-const Conn = lib.Conn;
-const Result = lib.Result;
-const SSLCtx = lib.SSLCtx;
+const conn = @import("conn.zig");
+const metrics = @import("metrics.zig");
+const ssl = @import("ssl.zig");
+
+const Conn = conn.Conn;
+const Result = @import("result.zig").Result;
 
 const Thread = std.Thread;
-const Allocator = std.mem.Allocator;
-
+const mem = std.mem;
 const Io = std.Io;
+const testing = std.testing;
 
 pub const Pool = struct {
     io: Io,
@@ -18,16 +20,15 @@ pub const Pool = struct {
     conns: []*Conn,
     available: usize,
     missing: usize,
-    allocator: Allocator,
+    allocator: mem.Allocator,
     mutex: Io.Mutex,
     cond: Io.Condition,
-    ssl_ctx: ?*lib.SSLCtx,
+    ssl_ctx: ?*openssl.SSL_CTX,
     reconnector: Reconnector,
 
     pub const Opts = struct {
         size: u16 = 10,
-        auth: Conn.AuthOpts = .{},
-        connect: Conn.Opts,
+        connect: conn.Opts,
         timeout_ms: i32 = 10 * std.time.ms_per_s,
         connect_on_init_count: ?u16 = null,
     };
@@ -39,7 +40,7 @@ pub const Pool = struct {
         in_use: usize,
     };
 
-    pub fn init(io: Io, allocator: Allocator, opts: Opts) !*Pool {
+    pub fn init(io: Io, allocator: mem.Allocator, opts: Opts) !*Pool {
         const pool = try allocator.create(Pool);
         const size = opts.size;
         const conns = try allocator.alloc(*Conn, size);
@@ -48,17 +49,16 @@ pub const Pool = struct {
         // outright. Callers (including initUri) don't need to keep `opts`'s strings
         // alive past this call.
         var opts_copy = opts;
-        opts_copy.auth.username = try allocator.dupe(u8, opts.auth.username);
-        if (opts.auth.password) |v| opts_copy.auth.password = try allocator.dupe(u8, v);
-        if (opts.auth.database) |v| opts_copy.auth.database = try allocator.dupe(u8, v);
-        if (opts.auth.application_name) |v| opts_copy.auth.application_name = try allocator.dupe(u8, v);
+        opts_copy.connect.username = try allocator.dupe(u8, opts.connect.username);
+        if (opts.connect.password) |v| opts_copy.connect.password = try allocator.dupe(u8, v);
+        if (opts.connect.database) |v| opts_copy.connect.database = try allocator.dupe(u8, v);
+        if (opts.connect.application_name) |v| opts_copy.connect.application_name = try allocator.dupe(u8, v);
         if (opts.connect.host) |v| opts_copy.connect.host = try allocator.dupe(u8, v);
         // Note: auth.startup_parameters (a StringHashMap) is not deep-copied; it is
         // currently unused, but if it ever gets wired up it must be owned here too.
 
-        var ssl_ctx: ?*SSLCtx = null;
-        if (comptime lib.has_openssl) {
-            switch (opts.connect.tls) {
+        var ssl_ctx: ?*openssl.SSL_CTX = null;
+            switch (opts_copy.connect.tls) {
                 .off => {},
                 else => |tls_config| {
                     if (opts_copy.connect.host) |h| {
@@ -71,12 +71,11 @@ pub const Pool = struct {
                         },
                         else => {},
                     }
-                    ssl_ctx = try lib.initializeSSLContext(tls_config);
+                    ssl_ctx = try ssl.initializeSSLContext(tls_config);
                 },
-            }
         }
-        errdefer lib.freeSSLContext(ssl_ctx);
-        const connect_on_init_count = opts.connect_on_init_count orelse size;
+        errdefer ssl.freeSSLContext(ssl_ctx);
+        const connect_on_init_count = opts_copy.connect_on_init_count orelse size;
 
         pool.* = .{
             .io = io,
@@ -89,7 +88,7 @@ pub const Pool = struct {
             .allocator = allocator,
             .available = connect_on_init_count,
             .reconnector = Reconnector.init(pool),
-            .timeout_ms = opts.timeout_ms,
+            .timeout_ms = opts_copy.timeout_ms,
         };
 
         var opened_connections: usize = 0;
@@ -100,7 +99,7 @@ pub const Pool = struct {
         }
 
         for (0..connect_on_init_count) |i| {
-            pool.conns[i] = try newConnection(pool, true);
+            pool.conns[i] = try newConnection(pool);
             opened_connections += 1;
         }
 
@@ -116,9 +115,9 @@ pub const Pool = struct {
     pub fn deinit(self: *Pool) void {
         self.reconnector.stop();
         const allocator = self.allocator;
-        for (self.conns) |conn| {
-            conn.deinit();
-            allocator.destroy(conn);
+        for (self.conns) |connection| {
+            connection.deinit();
+            allocator.destroy(connection);
         }
         allocator.free(self.conns);
 
@@ -126,16 +125,16 @@ pub const Pool = struct {
             self.allocator.free(host);
         }
 
-        if (self.opts.auth.database) |database| {
+        if (self.opts.connect.database) |database| {
             self.allocator.free(database);
         }
-        if (self.opts.auth.password) |password| {
+        if (self.opts.connect.password) |password| {
             self.allocator.free(password);
         }
-        self.allocator.free(self.opts.auth.username);
+        self.allocator.free(self.opts.connect.username);
 
 
-        lib.freeSSLContext(self.ssl_ctx);
+        ssl.freeSSLContext(self.ssl_ctx);
         self.allocator.destroy(self);
     }
 
@@ -162,7 +161,7 @@ pub const Pool = struct {
                     return error.PoolExhausted;
                 }
 
-                lib.metrics.poolEmpty();
+                metrics.poolEmpty();
 
                 // Calculate remaining timeout
                 const now = std.Io.Timestamp.now(io, .awake);
@@ -183,47 +182,49 @@ pub const Pool = struct {
             }
 
             const index = available - 1;
-            const conn = conns[index];
+            const connnection = conns[index];
             self.available = index;
             self.mutex.unlock(io);
-            return conn;
+            return connnection;
         }
     }
 
-    pub fn release(self: *Pool, conn: *Conn) void {
-        var conn_to_add = conn;
-        const io = self.io;
+    pub fn release(self: *Pool, connection: *Conn) void {
+        var conn_to_add = connection;
 
-        if (conn.state != .idle) {
-            lib.metrics.poolDirty();
+        if (connection.state != .idle) {
+            metrics.poolDirty();
             // conn should always be idle when being released. It's possible we can
             // recover from this (e.g. maybe we just need to read until we get a
             // ReadyForQuery), but we wouldn't want to block for too long. For now,
             // we'll just replace the connection.
-            conn.deinit();
-            self.allocator.destroy(conn);
+            connection.deinit();
+            self.allocator.destroy(connection);
 
-            conn_to_add = newConnection(self, true) catch |err1| {
+            conn_to_add = newConnection(self) catch |err1| {
                 // we failed to create the connection, track it as missing and let
                 // the background reconnector try
-                self.mutex.lockUncancelable(io);
+                self.mutex.lockUncancelable(self.io);
                 self.missing += 1;
-                self.mutex.unlock(io);
+                self.mutex.unlock(self.io);
 
                 self.reconnector.reconnect() catch |err2| {
-                    log.err("Re-opening connection failed ({}) and background reconnector failed to start ({})", .{ err1, err2 });
+                    const err_message = std.fmt.allocPrint(self.allocator, "Re-opening connection failed ({}) and background reconnector failed to start ({})", .{ err1, err2 }) catch "Re-opening connection failed";
+                    defer self.allocator.free(err_message);
+
+                    Io.File.stderr().writeStreamingAll(self.io, err_message) catch {};
                 };
                 return;
             };
         }
 
         var conns = self.conns;
-        self.mutex.lockUncancelable(io);
+        self.mutex.lockUncancelable(self.io);
         const available = self.available;
         conns[available] = conn_to_add;
         self.available = available + 1;
-        self.mutex.unlock(io);
-        self.cond.signal(io);
+        self.mutex.unlock(self.io);
+        self.cond.signal(self.io);
     }
 };
 
@@ -265,7 +266,7 @@ const Reconnector = struct {
                 return;
             }
 
-            const conn = newConnection(pool, false) catch {
+            const connection = newConnection(pool) catch {
                 std.Io.sleep(io, .fromNanoseconds(retry_delay), .awake) catch {};
                 self.mutex.lockUncancelable(io);
                 continue :loop;
@@ -277,7 +278,7 @@ const Reconnector = struct {
             pool.missing -= 1;
             pool.mutex.unlock(io);
 
-            conn.release(); // inserts it into the pool
+            connection.release(); // inserts it into the pool
             self.mutex.lockUncancelable(io);
             self.count -= 1;
         }
@@ -307,40 +308,28 @@ const Reconnector = struct {
     }
 };
 
-fn newConnection(pool: *Pool, log_failure: bool) !*Conn {
+fn newConnection(pool: *Pool) !*Conn {
     const opts = &pool.opts;
     const allocator = pool.allocator;
     const io = pool.io;
 
-    const conn = allocator.create(Conn) catch |err| {
-        if (log_failure) log.err("connect error: {}", .{err});
-        return err;
-    };
-    errdefer allocator.destroy(conn);
+    const connection = try allocator.create(Conn);
+    errdefer allocator.destroy(connection);
 
-    conn.* = Conn.open(io, allocator, opts.connect) catch |err| {
-        if (log_failure) log.err("connect error: {}", .{err});
-        return err;
-    };
-    errdefer conn.deinit();
+    connection.* = try Conn.open(io, allocator, opts.connect);
+    errdefer connection.deinit();
 
-    conn.auth(opts.auth) catch |err| {
-        if (log_failure) {
-            if (conn.err) |pg_err| {
-                log.err("connect error: {s}", .{pg_err.message});
-            } else {
-                log.err("connect error: {}", .{err});
-            }
-        }
-        return err;
-    };
-    conn.pool = pool;
-    return conn;
+    try connection.auth(opts.connect);
+    connection.pool = pool;
+    return connection;
 }
 
-const t = lib.testing;
+const t = @import("t.zig");
 test "Pool" {
-    var pool = try Pool.init(t.io, t.allocator, .{
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    var pool = try Pool.init(io, allocator, .{
         .size = 2,
         .auth = t.authOpts(.{}),
         .connect_on_init_count = 1,
@@ -374,7 +363,10 @@ test "Pool" {
 }
 
 test "Pool: Release" {
-    var pool = try Pool.init(t.io, t.allocator, .{
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    var pool = try Pool.init(io, allocator, .{
         .size = 2,
         .auth = .{
             .database = "postgres",
@@ -390,33 +382,36 @@ test "Pool: Release" {
 }
 
 test "Pool: init owns its connection strings" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+
     // Heap-allocate the auth strings and free them right after init to prove the
     // pool kept its own copies and doesn't depend on the caller's `opts`.
-    const username = try t.allocator.dupe(u8, "postgres");
-    const password = try t.allocator.dupe(u8, "postgres");
-    const database = try t.allocator.dupe(u8, "postgres");
-    const host = try t.allocator.dupe(u8, "127.0.0.1");
+    const username = try allocator.dupe(u8, "postgres");
+    const password = try allocator.dupe(u8, "postgres");
+    const database = try allocator.dupe(u8, "postgres");
+    const host = try allocator.dupe(u8, "127.0.0.1");
 
-    var pool = try Pool.init(t.io, t.allocator, .{
+    var pool = try Pool.init(io, allocator, .{
         .size = 2,
         .auth = .{ .username = username, .password = password, .database = database },
         .connect = .{ .host = host },
     });
     defer pool.deinit();
 
-    t.allocator.free(username);
-    t.allocator.free(password);
-    t.allocator.free(database);
-    t.allocator.free(host);
+    allocator.free(username);
+    allocator.free(password);
+    allocator.free(database);
+    allocator.free(host);
 
     try forceReconnect(pool);
 }
 
 fn testPool(p: *Pool) void {
     for (0..500) |i| {
-        const conn = p.acquire() catch unreachable;
-        _ = conn.exec("insert into pool_test (id) values ($1)", .{i}) catch unreachable;
-        conn.release();
+        const connection = p.acquire() catch unreachable;
+        _ = connection.exec("insert into pool_test (id) values ($1)", .{i}) catch unreachable;
+        connection.release();
     }
 }
 

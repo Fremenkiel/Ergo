@@ -1,12 +1,15 @@
 const std = @import("std");
-const lib = @import("lib.zig");
 const Buffer = @import("buffer").Buffer;
 
 const mem = std.mem;
 
-const types = lib.types;
-const Conn = lib.Conn;
-const Result = lib.Result;
+const assert = std.debug.assert;
+
+const types = @import("types.zig");
+const metrics = @import("metrics.zig");
+
+const Conn = @import("conn.zig").Conn;
+const Result = @import("result.zig").Result;
 
 pub const Stmt = struct {
     allocator: mem.Allocator,
@@ -256,7 +259,7 @@ pub const Stmt = struct {
         const name = self.name;
 
         const param_index = self.param_index;
-        lib.assert(param_index < self.param_count);
+        assert(param_index < self.param_count);
 
         // We tell PostgreSQL the format (text or binary) of each parameter. This
         // information is at the start of the message, always starts at byte 9
@@ -268,7 +271,7 @@ pub const Stmt = struct {
     }
 
     pub fn execute(self: *@This()) !*Result {
-        lib.assert(self.param_index == self.param_count);
+        assert(self.param_index == self.param_count);
 
         // We haven't sent our `bind` message yet. We need to finish it, and then
         // send it, along with our `Execute` and a final `Sync` message.
@@ -278,7 +281,7 @@ pub const Stmt = struct {
 
         // The last part of the bind message is telling PostgreSQL the format we
         // want to receive the result columns in.
-        try lib.types.resultEncoding(self.result_state.oids[0..self.column_count], buf);
+        try types.resultEncoding(self.result_state.oids[0..self.column_count], buf);
 
         // write the full payload length, which always starts at byte 1 (after
         // the 'B' message type)
@@ -328,7 +331,7 @@ pub const Stmt = struct {
         // concerned, we're still doing the query.
         conn.state = .query;
 
-        lib.metrics.query();
+        metrics.query();
 
         const opts = &self.opts;
         const state = self.result_state;

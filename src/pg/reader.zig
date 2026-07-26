@@ -1,13 +1,20 @@
 const std = @import("std");
-const lib = @import("lib.zig");
 const builtin = @import("builtin");
 
+const conn = @import("conn.zig");
+const metrics = @import("metrics.zig");
+const stream = @import("stream.zig");
+const t = @import("t.zig");
+
+const Io = std.Io;
+const mem = std.mem;
 const posix = std.posix;
-const Conn = lib.Conn;
-const Allocator = std.mem.Allocator;
+const testing = std.testing;
+
+const Conn = conn.Conn;
 
 // to everyone else, this is our reader
-pub const Reader = ReaderT(lib.Stream);
+pub const Reader = ReaderT(stream.Stream);
 
 const default_timeout_ms: i32 = 5;
 
@@ -21,7 +28,7 @@ fn ReaderT(comptime T: type) type {
         // Current active allocator. This will normally reference `default_allocator`
         // but a query can provide a specific allocator to use for the processing
         // of said query. (via startFlow)
-        allocator: Allocator,
+        allocator: mem.Allocator,
 
         // Exists for the lifetime of the reader, but normally references this, but
         // for messages that don't fit, we'll allocate memory dynamically and
@@ -41,11 +48,11 @@ fn ReaderT(comptime T: type) type {
 
         const Self = @This();
 
-        pub fn init(allocator: Allocator, size: usize, stream: T) !Self {
+        pub fn init(allocator: mem.Allocator, size: usize, conn_stream: T) !Self {
             const static = try allocator.alloc(u8, size);
             return .{
                 .buf = static,
-                .stream = stream,
+                .stream = conn_stream,
                 .static = static,
                 .allocator = allocator,
             };
@@ -140,9 +147,6 @@ fn ReaderT(comptime T: type) type {
         }
 
         fn read(self: *Self, error_peek: bool) !Message {
-            var stream = self.stream;
-            // const spare = buf.len - pos; // how much space we have left in our buffer
-
             // Every PG message has 1 type byte followed by a 4 byte length prefix.
             // Since the length prefix includes itself (but not the type byte) the
             // minimum possible length is 4. We use 0 to denote "unknown".
@@ -171,7 +175,7 @@ fn ReaderT(comptime T: type) type {
                                 //currently using our static buffer, we need to allocate a larger one
                                 new_buf = try self.allocator.alloc(u8, message_length);
                                 @memcpy(new_buf[0..current_length], buf[start..pos]);
-                                lib.metrics.allocReader(message_length);
+                                metrics.allocReader(message_length);
                             } else {
                                 // currently using a dynamically allocated buffer, we'll
                                 // grow or allocate a larger one (which is what realloc does)
@@ -179,7 +183,7 @@ fn ReaderT(comptime T: type) type {
                                 if (start > 0) {
                                     std.mem.copyForwards(u8, new_buf[0..current_length], new_buf[start..pos]);
                                 }
-                                lib.metrics.allocReader(message_length - current_length);
+                                metrics.allocReader(message_length - current_length);
                             }
 
                             self.start = 0;
@@ -200,7 +204,7 @@ fn ReaderT(comptime T: type) type {
                     }
                 }
 
-                const n = try stream.readWithTimeout(buf[pos..], self.timeout_ms);
+                const n = try self.stream.readWithTimeout(buf[pos..], self.timeout_ms);
                 if (n == 0) {
                     return error.Closed;
                 }
@@ -300,7 +304,6 @@ pub const Message = struct {
     len: u32,
 };
 
-const t = lib.testing;
 test "Reader: next" {
     const R = ReaderT(*t.Stream);
     var s = t.Stream.init();
@@ -729,4 +732,32 @@ test "Reader: startFlow with dynamic allocation into deinit " {
     try reader.startFlow(null);
     const msg1 = try reader.next();
     try t.expectSlice(u8, &.{ 1, 2, 3, 4 }, msg1.data);
+}
+
+
+test "Reader: read with timeout" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    defer t.reset();
+    const R = ReaderT(*stream.Stream);
+    var s = t.Stream.init();
+    defer s.deinit();
+
+    var conn_stream = try stream.Stream.connect(io, allocator, .{ .port = 5432, .host = "localhost" }, null);
+    defer conn_stream.close();
+
+    const pipes = try Io.Threaded.pipe2(.{ .CLOEXEC = true });
+    defer {
+        Io.Threaded.closeFd(pipes[0]);
+        Io.Threaded.closeFd(pipes[1]);
+    }
+
+    conn_stream.stream.socket.handle = pipes[0];
+
+    var reader = R.init(t.allocator, 1, &conn_stream) catch unreachable;
+    defer reader.deinit();
+
+    try reader.startFlow(250);
+    try t.expectError(error.Timeout, reader.next());
 }

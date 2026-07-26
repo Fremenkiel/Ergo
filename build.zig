@@ -60,7 +60,7 @@ pub fn build(b: *std.Build) void {
     const pg_module = b.addModule("pg", .{
         .target = target,
         .optimize = optimize,
-        .root_source_file = b.path("src/pg/pg.zig"),
+        .root_source_file = b.path("src/pg/root.zig"),
         .imports = &.{
             .{ .name = "buffer", .module = buffer_dep.module("buffer") },
             .{ .name = "metrics", .module = metrics_dep.module("metrics") },
@@ -127,6 +127,5 @@ pub fn build(b: *std.Build) void {
         .root_module = pg_module,
     });
     const run_pg_tests = b.addRunArtifact(pg_tests);
-    const pg_test_step = b.step("pg_test", "Run pg tests");
-    pg_test_step.dependOn(&run_pg_tests.step);
+    test_step.dependOn(&run_pg_tests.step);
 }

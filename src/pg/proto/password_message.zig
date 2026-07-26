@@ -1,11 +1,14 @@
 const std = @import("std");
+
+const Buffer = @import("buffer").Buffer;
+
 const proto = @import("proto.zig");
 
 const PasswordMessage = @This();
 
 password: []const u8,
 
-pub fn write(self: PasswordMessage, buf: *proto.Buffer) !void {
+pub fn write(self: PasswordMessage, buf: *Buffer) !void {
     // +4 since the payload length includes the length itself
     // +1 for null terminated string
     const payload_len = self.password.len + 5;

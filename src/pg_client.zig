@@ -6,7 +6,6 @@ const testing = std.testing;
 const assert = std.debug.assert;
 
 const pg = @import("pg");
-
 const types = @import("types.zig");
 
 pub const PgClientError = error{
@@ -69,7 +68,7 @@ pub const PgClient = struct {
     allocator: mem.Allocator,
     io: Io,
 
-    conn_opts: pg.Conn.ConnOpts,
+    conn_opts: pg.conn.Opts,
 
     last_lsn: u64,
     last_timestamp: i64,
@@ -80,7 +79,7 @@ pub const PgClient = struct {
     pool: ?*pg.Pool,
     wal_conn: ?*pg.Conn,
 
-    pub fn init(io: Io, allocator: mem.Allocator, opts: pg.Conn.ConnOpts) !PgClient{
+    pub fn init(io: Io, allocator: mem.Allocator, opts: pg.conn.Opts) !PgClient{
         var pool = try createConnPool(allocator, io, opts);
         errdefer pool.deinit();
 
@@ -153,7 +152,7 @@ pub const PgClient = struct {
     pub fn startWALReader(self: *@This(), timeout_ms: i32) !void {
         if (self.wal_conn == null) return PgClientError.WalConnectionNotInitialized;
 
-        const query = try std.fmt.allocPrint(self.allocator, "START_REPLICATION SLOT {s} LOGICAL 0/0 (proto_version '1', publication_names 'db_pub', messages 'true');", .{self.conn_opts.connect.wal});
+        const query = try std.fmt.allocPrint(self.allocator, "START_REPLICATION SLOT {s} LOGICAL 0/0 (proto_version '1', publication_names 'db_pub', messages 'true');", .{self.conn_opts.wal});
 
         const msg_len: u32 = @as(u32, @intCast(query.len)) + 4 + 1;
         var len_buf: [4]u8 = undefined;
@@ -174,7 +173,7 @@ pub const PgClient = struct {
     pub fn endWALReader(self: *@This()) !void {
         if (self.wal_conn == null) return PgClientError.WalConnectionNotInitialized;
 
-        const query = try std.fmt.allocPrint(self.allocator, "DROP_REPLICATION SLOT {s};", .{self.conn_opts.connect.wal});
+        const query = try std.fmt.allocPrint(self.allocator, "DROP_REPLICATION SLOT {s};", .{self.conn_opts.wal});
 
         const msg_len: u32 = @as(u32, @intCast(query.len)) + 4 + 1;
         var len_buf: [4]u8 = undefined;
@@ -210,7 +209,6 @@ pub const PgClient = struct {
                 };
 
                 const data_type = msg.data[0];
-                std.debug.print("read wal: {x}\n", .{data_type});
 
                 switch (data_type) {
                     'w' => {
@@ -265,56 +263,51 @@ pub const PgClient = struct {
                             try self.wal_conn.?.sendStandbyStatusUpdate(self.last_lsn, self.last_timestamp);
                         }
                     },
-                    'c' => {
-                        response.message = pg.packet.ServerPacket.CopyDone;
-
-                        assert(msg.data.len >= 5);
-
-                        const copy_done_message = mem.readInt(i32, msg.data[1..5][0..4], .big);
-                        if (copy_done_message != 4) {
-                            return PgClientError.InvalidCopyDoneMessage;
-                        }
-                    },
-                    'C' => {
-                        response.message = pg.packet.ServerPacket.CommandComplete;
-
-                        const command_tag_len = mem.readInt(i32, msg.data[1..5][0..4], .big);
-
-                        // command tag
-                        // COPY 0\0
-                        // START_REPLICATION\0
-                        // DROP_REPLICATION_SLOT\0
-                        _ = msg.data[6..@as(u32, @intCast(command_tag_len)) + 6];
-                    },
-                    'Z' => {
-                        response.message = pg.packet.ServerPacket.ReadyForQuery;
-
-                        const ready_message = mem.readInt(i32, msg.data[1..5][0..4], .big);
-                        if (ready_message != 5) {
-                            return PgClientError.InvalidReadyForQueryMessage;
-                        }
-
-                        const transaction_status = msg.data[6..7][0];
-
-                        switch (transaction_status) {
-                            'I' => {
-                                // Idle
-                            },
-                            'T' => {
-                                // In Transaction
-                            },
-                            'E' => return PgClientError.TransactionErrorState,
-                            else => return PgClientError.TransactionStateUnknown,
-                        }
-                    },
                     else => {}
                 }
                 return response;
             },
             'E' => {
-                const err_msg = pg.Error.parse(msg.data);
-                std.debug.print("Error from server! Code: {s}, Message: {s}\n", .{err_msg.code, err_msg.message});
+                const pg_err = pg.Error.parse(msg.data);
+                const err_msg = try std.fmt.allocPrint(self.allocator, "Error from server! Code: {s}, Message: {s}\n", .{pg_err.code, pg_err.message});
+                try std.Io.File.stderr().writeStreamingAll(self.io, err_msg);
                 return PgClientError.PostgresReplicationError;
+            },
+            'c' => {
+                assert(msg.len == 4);
+
+                return .{
+                    .message = pg.packet.ServerPacket.CopyDone,
+                    .data = null,
+                    .timestamp = null,
+                };
+            },
+            'C' => {
+                return .{
+                    .message = pg.packet.ServerPacket.CommandComplete,
+                    .data = null,
+                    .timestamp = null,
+                };
+            },
+            'Z' => {
+                const transaction_status = msg.data[0..1][0];
+
+                switch (transaction_status) {
+                    'I' => {
+                        // Idle
+                    },
+                    'T' => {
+                        // In Transaction
+                    },
+                    'E' => return PgClientError.TransactionErrorState,
+                    else => return PgClientError.TransactionStateUnknown,
+                }
+
+                return .{
+                    .message = pg.packet.ServerPacket.ReadyForQuery,
+                    .data = null,
+                    .timestamp = null,
+                };
             },
             else => {
                 // Ignore other messages
@@ -333,7 +326,6 @@ pub const PgClient = struct {
         } else {
             return PgClientError.UnableToSendCopyDone;
         }
-        std.debug.print("sent copy done\n", .{});
     }
 
     pub fn parsePgOutput(self: *@This(), payload: []const u8) !ParseResponse {
@@ -657,22 +649,27 @@ pub const PgClient = struct {
         return columns;
     }
 
-    pub fn createWalConn(allocator: mem.Allocator, io:  Io, opts: pg.Conn.ConnOpts) !*pg.Conn {
+    pub fn createWalConn(allocator: mem.Allocator, io:  Io, opts: pg.conn.Opts) !*pg.Conn {
         var conn = try allocator.create(pg.Conn);
-        conn.* = pg.Conn.open(io, allocator, opts.connect) catch |err| {
+        conn.* = pg.Conn.open(io, allocator, opts) catch |err| {
             std.debug.print("Failed to connect: {}\n", .{err});
             return err;
         };
         errdefer allocator.destroy(conn);
 
-        var authOpts = opts.auth;
+        var wal_opts = opts;
 
-        if (authOpts.startup_parameters == null) {
-            authOpts.startup_parameters = std.StringHashMap([]const u8).init(allocator);
+        wal_opts.startup_parameters = .init(allocator);
+        try wal_opts.startup_parameters.ensureUnusedCapacity(opts.startup_parameters.count() + 1);
+
+        var it = opts.startup_parameters.iterator();
+        while (it.next()) |entry| {
+            wal_opts.startup_parameters.putAssumeCapacity(entry.key_ptr.*, entry.value_ptr.*);
         }
-        try authOpts.startup_parameters.?.put("replication", "database");
 
-        conn.auth(authOpts) catch |err| {
+        wal_opts.startup_parameters.putAssumeCapacity("replication", "database");
+
+        conn.auth(wal_opts) catch |err| {
             if (conn.err) |pg_err| {
                 std.debug.print("Failed to auth: {} {s}: {s}\n", .{err, pg_err.code, pg_err.message});
             } else {
@@ -684,8 +681,8 @@ pub const PgClient = struct {
         return conn;
     }
 
-    pub fn createConnPool(allocator: mem.Allocator, io: Io, opts: pg.Conn.ConnOpts) !*pg.Pool {
-        return try pg.Pool.init(io, allocator, .{ .size = 1, .connect = opts.connect, .auth = opts.auth});
+    pub fn createConnPool(allocator: mem.Allocator, io: Io, opts: pg.conn.Opts) !*pg.Pool {
+        return try pg.Pool.init(io, allocator, .{ .size = 1, .connect = opts});
     }
 
     pub fn pgWalToClickHouseMs(pg_wal_us: u64) i64 {
@@ -797,6 +794,9 @@ test "parsePgOutput maps RELATION correctly" {
     const allocator = testing.allocator;
     const io = testing.io;
 
+    var startup_parameters: std.StringHashMap([]const u8) = .init(allocator); 
+    defer startup_parameters.deinit();
+
     var client = PgClient{
         .allocator = allocator,
         .io = io,
@@ -813,17 +813,14 @@ test "parsePgOutput maps RELATION correctly" {
         .table_reg = .init(allocator),
         .wal_conn = null,
         .pool = try PgClient.createConnPool(allocator, io, .{
-            .connect = .{  
-                .port = 5432,
-                .host = "localhost",
-                .wal = "wal_slot",
-            },
-            .auth = .{
-                .username = "db_rp",
-                .password = "12345678",
-                .database = "db",
-                .timeout_ms = 10_000,
-            } 
+            .port = 5432,
+            .host = "localhost",
+            .wal = "wal_slot",
+            .username = "db_rp",
+            .password = "12345678",
+            .database = "db",
+            .timeout_ms = 500,
+            .startup_parameters = startup_parameters
         }),
     };
     defer client.deinit();
@@ -1111,6 +1108,9 @@ test "readSchemaKeys" {
     const allocator = testing.allocator;
     const io = testing.io;
 
+    var startup_parameters: std.StringHashMap([]const u8) = .init(allocator); 
+    defer startup_parameters.deinit();
+
     var client = PgClient{
         .allocator = allocator,
         .io = undefined,
@@ -1119,17 +1119,14 @@ test "readSchemaKeys" {
         .last_lsn = undefined,
         .last_timestamp = undefined,
         .pool = try PgClient.createConnPool(allocator, io, .{
-            .connect = .{  
-                .port = 5432,
-                .host = "localhost",
-                .wal = "wal_slot",
-            },
-            .auth = .{
-                .username = "db_rp",
-                .password = "12345678",
-                .database = "db",
-                .timeout_ms = 10_000,
-            } 
+            .port = 5432,
+            .host = "localhost",
+            .wal = "wal_slot",
+            .username = "db_rp",
+            .password = "12345678",
+            .database = "db",
+            .timeout_ms = 500,
+            .startup_parameters = startup_parameters
         }),
         .table_reg = undefined,
         .wal_conn = null,

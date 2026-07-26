@@ -1,16 +1,19 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const lib = @import("lib.zig");
 const Buffer = @import("buffer").Buffer;
-
-const openssl = lib.openssl;
+const openssl = @import("openssl");
 
 const posix = std.posix;
-
-const Conn = lib.Conn;
-const Allocator = std.mem.Allocator;
+const testing = std.testing;
 const Io = std.Io;
-const Reader = lib.Reader;
+const mem = std.mem;
+
+const conn = @import("conn.zig");
+
+const Conn = conn.Conn;
+const Reader = @import("reader.zig").Reader;
+
+const printSSLError = @import("ssl.zig").printSSLError;
 
 const DEFAULT_HOST = "127.0.0.1";
 
@@ -20,7 +23,7 @@ pub const Stream = struct {
     stream: Io.net.Stream,
     io: Io,
 
-    pub fn connect(io: Io, allocator: Allocator, opts: Conn.Opts, ctx_: ?*openssl.SSL_CTX) !Stream {
+    pub fn connect(io: Io, allocator: mem.Allocator, opts: conn.Opts, ctx_: ?*openssl.SSL_CTX) !Stream {
         const host = opts.host orelse DEFAULT_HOST;
         const is_unix = host.len > 0 and host[0] == '/';
 
@@ -84,13 +87,9 @@ pub const Stream = struct {
                 const ret = openssl.SSL_connect(ssl);
                 if (ret != 1) {
                     const verification_code = openssl.SSL_get_verify_result(ssl);
-                    if (comptime lib._stderr_tls) {
-                        lib.printSSLError();
-                    }
+                    printSSLError();
                     if (verification_code != openssl.X509_V_OK) {
-                        if (comptime lib._stderr_tls) {
-                            std.debug.print("ssl verification error: {s}\n", .{openssl.X509_verify_cert_error_string(verification_code)});
-                        }
+                        std.debug.print("ssl verification error: {s}\n", .{openssl.X509_verify_cert_error_string(verification_code)});
                         return error.SSLCertificationVerificationError;
                     }
                     return error.SSLConnectFailed;
@@ -166,7 +165,7 @@ pub const Stream = struct {
     }
 };
 
-fn setKeepalive(handle: posix.socket_t, opts: Conn.Opts) !void {
+fn setKeepalive(handle: posix.socket_t, opts: conn.Opts) !void {
     if (opts.keepalive == false) {
         return;
     }
@@ -265,17 +264,21 @@ fn isHostName(host: []const u8) bool {
 }
 
 test "cancel stream while read" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
+    const allocator = testing.allocator;
+    const io = testing.io;
 
     var stream = try Stream.connect(io, allocator, .{ .port = 5432, .host = "localhost" }, null);
-    errdefer stream.close();
+    defer stream.close();
 
-    const buf = try Buffer.init(allocator, 2048);
-    errdefer buf.deinit();
+    const pipes = try Io.Threaded.pipe2(.{ .CLOEXEC = true });
+    defer {
+        Io.Threaded.closeFd(pipes[0]);
+        Io.Threaded.closeFd(pipes[1]);
+    }
 
-    var reader = try Reader.init(allocator, 4096, stream);
-    errdefer reader.deinit();
+    stream.stream.socket.handle = pipes[0];
 
-    std.testing.expectError(error.Cancelled, try reader.readWithTimeout(250));
+    var buf: [256]u8 = undefined;
+
+    try testing.expectError(error.Timeout, stream.readWithTimeout(&buf, 250));
 }

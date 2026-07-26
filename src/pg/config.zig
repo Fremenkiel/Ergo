@@ -1,16 +1,17 @@
 const std = @import("std");
-const lib = @import("lib.zig");
 const Buffer = @import("buffer").Buffer;
 
-const proto = lib.proto;
-const Reader = lib.Reader;
-const Stream = lib.Stream;
-
-const Allocator = std.mem.Allocator;
+const mem = std.mem;
 const Io = std.Io;
+const testing = std.testing;
 
-const Opts = lib.Conn.AuthOpts;
+const proto = @import("proto.zig");
+const conn = @import("conn.zig");
 
+const Reader = @import("reader.zig").Reader;
+const Stream = @import("stream.zig").Stream;
+
+// Todo: Redo this
 // Weird return (but Zig has no error payloads, so..)
 // null on success
 // a []const on a PG error
@@ -18,7 +19,7 @@ const Opts = lib.Conn.AuthOpts;
 //   - is only valid until the next call to reader.read()
 //     (we expect our caller to clone the value)
 // a normal zig error on any other error
-pub fn auth(io: Io, stream: *Stream, buf: *Buffer, reader: *Reader, opts: Opts) !?[]const u8 {
+pub fn auth(io: Io, stream: *Stream, buf: *Buffer, reader: *Reader, opts: conn.Opts) !?[]const u8 {
     try reader.startFlow(opts.timeout_ms);
 
     // ignore errors on endFlow, because it's troublesome to handle, and only
@@ -76,7 +77,7 @@ pub fn auth(io: Io, stream: *Stream, buf: *Buffer, reader: *Reader, opts: Opts) 
     }
 }
 
-fn saslAuth(io: Io, req: proto.AuthenticationRequest.SASL, stream: *Stream, buf: *Buffer, reader: *Reader, opts: Opts) !?[]const u8 {
+fn saslAuth(io: Io, req: proto.AuthenticationRequest.SASL, stream: *Stream, buf: *Buffer, reader: *Reader, opts: conn.Opts) !?[]const u8 {
     if (!req.scram_sha_256) {
         return error.UnexpectedDBMessage;
     }
@@ -131,7 +132,7 @@ fn saslAuth(io: Io, req: proto.AuthenticationRequest.SASL, stream: *Stream, buf:
     return null;
 }
 
-fn md5PasswordAuth(salt: []const u8, stream: *Stream, buf: *Buffer, opts: Opts) !void {
+fn md5PasswordAuth(salt: []const u8, stream: *Stream, buf: *Buffer, opts: conn.Opts) !void {
     var hash: [16]u8 = undefined;
     {
         var hasher = std.crypto.hash.Md5.init(.{});
@@ -160,7 +161,7 @@ fn passwordAuth(password: []const u8, stream: *Stream, buf: *Buffer) !void {
 }
 
 const SASL = struct {
-    allocator: Allocator,
+    allocator: mem.Allocator,
     client_first_message: []u8,
     auth_message: ?[]const u8 = null,
     salted_password: ?[32]u8 = null,
@@ -169,7 +170,7 @@ const SASL = struct {
     const Base64Encoder = std.base64.standard.Encoder;
     const Base64Decoder = std.base64.standard.Decoder;
 
-    pub fn init(io: Io, allocator: Allocator) !SASL {
+    pub fn init(io: Io, allocator: mem.Allocator) !SASL {
         var nonce: [18]u8 = undefined;
         std.Io.random(io, &nonce);
 
@@ -317,22 +318,23 @@ pub const ServerResponse = struct {
     iterations: u32,
 };
 
-const t = @import("lib.zig").testing;
+const t = @import("t.zig");
 test "SASL: init" {
     defer t.reset();
     var sasl1 = try SASL.init(t.io, t.arena.allocator());
 
-    try t.expectString("n,,n=,r=", sasl1.client_first_message[0..8]);
+    try testing.expectEqualStrings("n,,n=,r=", sasl1.client_first_message[0..8]);
 
     var sasl2 = try SASL.init(t.io, t.arena.allocator());
-    try t.expectString("n,,n=,r=", sasl2.client_first_message[0..8]);
+    try testing.expectEqualStrings("n,,n=,r=", sasl2.client_first_message[0..8]);
 
     var sasl3 = try SASL.init(t.io, t.arena.allocator());
-    try t.expectString("n,,n=,r=", sasl3.client_first_message[0..8]);
+    try testing.expectEqualStrings("n,,n=,r=", sasl3.client_first_message[0..8]);
 
     var sasl4 = try SASL.init(t.io, t.arena.allocator());
-    try t.expectString("n,,n=,r=", sasl4.client_first_message[0..8]);
+    try testing.expectEqualStrings("n,,n=,r=", sasl4.client_first_message[0..8]);
 
+    // TODO: Redo this
     // The nonce should be random. It's unlikely that if we generate 4, we'd get
     // the same value at a given byte.
     const nonce1 = sasl1.client_first_message[8..];
@@ -340,7 +342,7 @@ test "SASL: init" {
     const nonce3 = sasl3.client_first_message[8..];
     const nonce4 = sasl4.client_first_message[8..];
     for (0..18) |i| {
-        try t.expectEqual(true, nonce1[i] != nonce2[i] or
+        try testing.expectEqual(true, nonce1[i] != nonce2[i] or
             nonce2[i] != nonce3[i] or
             nonce1[i] != nonce3[i] or
             nonce3[i] != nonce4[i] or
@@ -372,8 +374,8 @@ test "SASL: serverResponse invalid" {
     var sasl = try SASL.init(t.io, t.arena.allocator());
 
     for (test_cases) |tc| {
-        try t.expectError(tc.expected, sasl.serverResponse(tc.input));
-        try t.expectEqual(null, sasl.server_response);
+        try testing.expectError(tc.expected, sasl.serverResponse(tc.input));
+        try testing.expectEqual(null, sasl.server_response);
     }
 }
 
@@ -382,7 +384,7 @@ test "SASL: serverResponse" {
     var sasl = try SASL.init(t.io, t.arena.allocator());
 
     try sasl.serverResponse("r=abc123,s=aaaaxa,i=4096");
-    try t.expectString("abc123", sasl.server_response.?.nonce);
-    try t.expectString("aaaaxa", sasl.server_response.?.base64_salt);
-    try t.expectEqual(4096, sasl.server_response.?.iterations);
+    try testing.expectEqualStrings("abc123", sasl.server_response.?.nonce);
+    try testing.expectEqualStrings("aaaaxa", sasl.server_response.?.base64_salt);
+    try testing.expectEqual(4096, sasl.server_response.?.iterations);
 }

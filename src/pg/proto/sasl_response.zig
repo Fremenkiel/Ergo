@@ -1,5 +1,9 @@
 const std = @import("std");
+
+pub const Buffer = @import("buffer").Buffer;
+
 const proto = @import("proto.zig");
+
 const Reader = proto.Reader;
 
 // #3 - Client finalizes with this
@@ -7,7 +11,7 @@ const SASLResponse = @This();
 
 data: []const u8,
 
-pub fn write(self: SASLResponse, buf: *proto.Buffer) !void {
+pub fn write(self: SASLResponse, buf: *Buffer) !void {
     // 4 +   N
     // len + $data
     const payload_len = 4 + self.data.len;

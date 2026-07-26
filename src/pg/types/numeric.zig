@@ -1,11 +1,11 @@
 const std = @import("std");
 const buffer = @import("buffer");
-const lib = @import("../lib.zig");
 const types = @import("../types.zig");
 
 const Encode = types.Encode;
 
 const math = std.math;
+const assert = std.debug.assert;
 
 // Until Zig has a native decimal type, or a third party library becomes de
 // facto standard, this library is going to have half-baked numeric support.
@@ -96,13 +96,12 @@ pub const Numeric = struct {
         return encodeValidString(stream.buffered(), buf);
     }
 
-    pub fn decode(comptime fail_mode: lib.FailMode, data: []const u8, data_oid: i32) if (fail_mode == .unsafe) Numeric else lib.TypeError!Numeric {
-        lib.verifyDecodeType(fail_mode, Numeric, &.{Numeric.oid.decimal}, data_oid) catch |err| {
-            if (fail_mode == .unsafe) unreachable;
+    pub fn decode(data: []const u8, data_oid: i32) types.TypeError!Numeric {
+        types.verifyDecodeType(&.{Numeric.oid.decimal}, data_oid) catch |err| {
             return err;
         };
 
-        lib.assert(data.len >= 8);
+        assert(data.len >= 8);
         return decodeKnown(data);
     }
 

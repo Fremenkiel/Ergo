@@ -1,11 +1,12 @@
 const std = @import("std");
-const lib = @import("lib.zig");
+
+const types = @import("types.zig");
+const proto = @import("proto.zig");
+
+const Conn = @import("conn.zig").Conn;
 
 const mem = std.mem;
-
-const types = lib.types;
-const proto = lib.proto;
-const Conn = lib.Conn;
+const testing = std.testing;
 
 pub const Result = struct {
     number_of_columns: usize,
@@ -74,13 +75,6 @@ pub const Result = struct {
     }
 
     pub fn next(self: *@This()) !?Row {
-        return self._next(.safe);
-    }
-    pub fn nextUnsafe(self: *@This()) !?RowUnsafe {
-        return self._next(.unsafe);
-    }
-
-    fn _next(self: *@This(), comptime fail_mode: lib.FailMode) !(if (fail_mode == .safe) ?Row else ?RowUnsafe) {
         if (self.conn.state != .query) {
             // Possibly weird state. Most likely cause is calling next() multiple times
             // despite null being returned.
@@ -233,124 +227,49 @@ pub const Result = struct {
     };
 };
 
-pub const Row = RowT(.safe);
-pub const RowUnsafe = RowT(.unsafe);
-
-pub fn RowT(comptime fail_mode: lib.FailMode) type {
-    return struct {
+pub const Row = struct {
         result: *Result,
         oids: []i32,
         values: []Result.State.Value,
 
-        pub fn get(self: *const @This(), comptime T: type, col: usize) if (fail_mode == .safe) lib.TypeError!T else T {
+        pub fn get(self: *const @This(), comptime T: type, col: usize) types.TypeError!T {
             const value = self.values[col];
             const TT = switch (@typeInfo(T)) {
                 .optional => |opt| {
                     if (value.is_null) {
                         return null;
                     }
-                    const val = self.get(opt.child, col);
-                    if (comptime fail_mode == .safe) {
-                        return try val;
-                    }
-                    return val;
+                    return self.get(opt.child, col);
                 },
                 .@"struct", .@"union" => blk: {
                     if (@hasDecl(T, "fromPgzRow") == true) {
                         return T.fromPgzRow(value, self.oids[col]) catch |err| {
-                            if (comptime fail_mode == .safe) {
                                 return err;
-                            }
-                            std.debug.panic("PostgreSQL value of type {s} could not be read into a " ++ @typeName(T) ++ ".", .{types.oidToString(self.oids[col])});
                         };
                     }
                     break :blk T;
                 },
                 else => blk: {
-                    lib.verifyNotNull(fail_mode, T, value.is_null) catch |err| {
-                        if (comptime fail_mode == .unsafe) unreachable;
-                        return err;
-                    };
+                    if (value.is_null != false) {
+                    return error.UnexpectedNull;
+                    }
                     break :blk T;
                 },
             };
 
-            return types.decodeScalar(fail_mode, TT, value.data, self.oids[col]);
+            return types.decodeScalar(TT, value.data, self.oids[col]);
         }
 
-        pub fn getCol(self: *@This(), comptime T: type, name: []const u8) if (fail_mode == .safe) lib.TypeError!T else T {
+        pub fn getCol(self: *@This(), comptime T: type, name: []const u8) types.TypeError!T {
             const col = self.result.columnIndex(name);
-            try lib.verifyColumnName(fail_mode, name, col != null);
+            if (col == null) {
+                return error.UnknownColumnName;
+            }
             return self.get(T, col.?);
         }
-    };
-}
+};
 
-// pub const QueryRow = QueryRowT(.safe);
-// pub const QueryRowUnsafe = QueryRowT(.unsafe);
-//
-// pub fn QueryRowT(comptime fail_mode: lib.FailMode) type {
-//     return struct {
-//         row: RowT(fail_mode),
-//         result: *Result,
-//
-//         const Self = @This();
-//
-//         pub fn get(self: *@This(), comptime T: type, col: usize) if (fail_mode == .safe) lib.TypeError!T else T {
-//             return self.row.get(T, col);
-//         }
-//
-//         pub fn deinit(self: *@This()) !void {
-//             // this is unfortunate
-//             try self.result.drain();
-//             self.result.deinit();
-//         }
-//     };
-// }
-
-// pub const Record = RecordT(.safe);
-// pub const RecordUnsafe = RecordT(.unsafe);
-//
-// pub fn RecordT(comptime fail_mode: lib.FailMode) type {
-//     return struct {
-//         data: []const u8,
-//         number_of_columns: usize,
-//
-//         const Self = @This();
-//
-//         pub fn next(self: *@This(), comptime T: type) if (fail_mode == .safe) lib.TypeError!T else T {
-//             var data = self.data;
-//
-//             // at least 4 bytes for the type and 4 bytes for the lenght
-//             lib.assert(data.len >= 8);
-//
-//             const oid = std.mem.readInt(i32, data[0..4], .big);
-//
-//             data = data[4..];
-//             const len = std.mem.readInt(i32, data[0..4], .big);
-//
-//             const TT = switch (@typeInfo(T)) {
-//                 .optional => |opt| blk: {
-//                     if (len == -1) return null;
-//                     break :blk opt.child;
-//                 },
-//                 else => T,
-//             };
-//
-//             // end of the data for this "column"
-//             const end = @as(usize, @intCast(len)) + 4;
-//
-//             // the rest of the data
-//             self.data = data[end..];
-//
-//             // start at 4 to skip the length which we already read
-//             return types.decodeScalar(fail_mode, TT, data[4..end], oid);
-//         }
-//     };
-// }
-
-const t = lib.testing;
-
+const t = @import("t.zig");
 test "Result: ints" {
     const allocator = std.testing.allocator;
     var c = try t.connect(.{});
@@ -362,15 +281,15 @@ test "Result: ints" {
         var result = try c.query(sql, .{ @as(i16, 32767), @as(i32, 2147483647), @as(i64, 9223372036854775807) });
         defer result.deinit(allocator);
         const row = (try result.nextUnsafe()).?;
-        try t.expectEqual(32767, row.get(i16, 0));
-        try t.expectEqual(2147483647, row.get(i32, 1));
-        try t.expectEqual(9223372036854775807, row.get(i64, 2));
+        try testing.expectEqual(32767, row.get(i16, 0));
+        try testing.expectEqual(2147483647, row.get(i32, 1));
+        try testing.expectEqual(9223372036854775807, row.get(i64, 2));
 
-        try t.expectEqual(32767, row.get(?i16, 0));
-        try t.expectEqual(2147483647, row.get(?i32, 1));
-        try t.expectEqual(9223372036854775807, row.get(?i64, 2));
+        try testing.expectEqual(32767, row.get(?i16, 0));
+        try testing.expectEqual(2147483647, row.get(?i32, 1));
+        try testing.expectEqual(9223372036854775807, row.get(?i64, 2));
 
-        try t.expectEqual(null, result.next());
+        try testing.expectEqual(null, result.next());
     }
 
     {
@@ -378,9 +297,9 @@ test "Result: ints" {
         var result = try c.query(sql, .{ @as(i16, -32768), @as(i32, -2147483648), @as(i64, -9223372036854775808) });
         defer result.deinit(allocator);
         const row = (try result.nextUnsafe()).?;
-        try t.expectEqual(-32768, row.get(i16, 0));
-        try t.expectEqual(-2147483648, row.get(i32, 1));
-        try t.expectEqual(-9223372036854775808, row.get(i64, 2));
+        try testing.expectEqual(-32768, row.get(i16, 0));
+        try testing.expectEqual(-2147483648, row.get(i32, 1));
+        try testing.expectEqual(-9223372036854775808, row.get(i64, 2));
         try result.drain();
     }
 
@@ -390,9 +309,9 @@ test "Result: ints" {
         defer result.deinit(allocator);
         defer result.drain() catch unreachable;
         const row = (try result.nextUnsafe()).?;
-        try t.expectEqual(null, row.get(?i16, 0));
-        try t.expectEqual(null, row.get(?i32, 1));
-        try t.expectEqual(null, row.get(?i64, 2));
+        try testing.expectEqual(null, row.get(?i16, 0));
+        try testing.expectEqual(null, row.get(?i32, 1));
+        try testing.expectEqual(null, row.get(?i64, 2));
     }
 
     {
@@ -400,13 +319,13 @@ test "Result: ints" {
         var result = try c.query(sql, .{ @as(u16, 32767), @as(u32, 2147483647), @as(u64, 9223372036854775807) });
         defer result.deinit(allocator);
         const row = (try result.nextUnsafe()).?;
-        try t.expectEqual(32767, row.get(i16, 0));
-        try t.expectEqual(2147483647, row.get(i32, 1));
-        try t.expectEqual(9223372036854775807, row.get(i64, 2));
+        try testing.expectEqual(32767, row.get(i16, 0));
+        try testing.expectEqual(2147483647, row.get(i32, 1));
+        try testing.expectEqual(9223372036854775807, row.get(i64, 2));
 
-        try t.expectEqual(32767, row.get(?i16, 0));
-        try t.expectEqual(2147483647, row.get(?i32, 1));
-        try t.expectEqual(9223372036854775807, row.get(?i64, 2));
+        try testing.expectEqual(32767, row.get(?i16, 0));
+        try testing.expectEqual(2147483647, row.get(?i32, 1));
+        try testing.expectEqual(9223372036854775807, row.get(?i64, 2));
         try result.drain();
     }
 
@@ -431,13 +350,13 @@ test "Result: floats" {
         var result = try c.query(sql, .{ @as(f32, 1.23456), @as(f64, 1093.229183) });
         defer result.deinit(allocator);
         const row = (try result.nextUnsafe()).?;
-        try t.expectEqual(1.23456, row.get(f32, 0));
-        try t.expectEqual(1093.229183, row.get(f64, 1));
+        try testing.expectEqual(1.23456, row.get(f32, 0));
+        try testing.expectEqual(1093.229183, row.get(f64, 1));
 
-        try t.expectEqual(1.23456, row.get(?f32, 0));
-        try t.expectEqual(1093.229183, row.get(?f64, 1));
+        try testing.expectEqual(1.23456, row.get(?f32, 0));
+        try testing.expectEqual(1093.229183, row.get(?f64, 1));
 
-        try t.expectEqual(null, result.next());
+        try testing.expectEqual(null, result.next());
     }
 
     {
@@ -445,9 +364,9 @@ test "Result: floats" {
         var result = try c.query(sql, .{ @as(f32, -392.31), @as(f64, -99991.99992) });
         defer result.deinit(allocator);
         const row = (try result.nextUnsafe()).?;
-        try t.expectEqual(-392.31, row.get(f32, 0));
-        try t.expectEqual(-99991.99992, row.get(f64, 1));
-        try t.expectEqual(null, result.next());
+        try testing.expectEqual(-392.31, row.get(f32, 0));
+        try testing.expectEqual(-99991.99992, row.get(f64, 1));
+        try testing.expectEqual(null, result.next());
     }
 
     {
@@ -455,9 +374,9 @@ test "Result: floats" {
         var result = try c.query(sql, .{ null, null });
         defer result.deinit(allocator);
         const row = (try result.nextUnsafe()).?;
-        try t.expectEqual(null, row.get(?f32, 0));
-        try t.expectEqual(null, row.get(?f64, 1));
-        try t.expectEqual(null, result.next());
+        try testing.expectEqual(null, row.get(?f32, 0));
+        try testing.expectEqual(null, row.get(?f64, 1));
+        try testing.expectEqual(null, result.next());
     }
 }
 
@@ -473,9 +392,9 @@ test "Result: bool" {
         defer result.deinit(allocator);
         defer result.drain() catch unreachable;
         const row = (try result.nextUnsafe()).?;
-        try t.expectEqual(true, row.get(bool, 0));
-        try t.expectEqual(true, row.get(?bool, 0));
-        try t.expectEqual(null, result.next());
+        try testing.expectEqual(true, row.get(bool, 0));
+        try testing.expectEqual(true, row.get(?bool, 0));
+        try testing.expectEqual(null, result.next());
     }
 
     {
@@ -484,9 +403,9 @@ test "Result: bool" {
         defer result.deinit(allocator);
         defer result.drain() catch unreachable;
         const row = (try result.nextUnsafe()).?;
-        try t.expectEqual(false, row.get(bool, 0));
-        try t.expectEqual(false, row.get(?bool, 0));
-        try t.expectEqual(null, result.next());
+        try testing.expectEqual(false, row.get(bool, 0));
+        try testing.expectEqual(false, row.get(?bool, 0));
+        try testing.expectEqual(null, result.next());
     }
 
     {
@@ -495,8 +414,8 @@ test "Result: bool" {
         defer result.deinit(allocator);
         defer result.drain() catch unreachable;
         const row = (try result.nextUnsafe()).?;
-        try t.expectEqual(null, row.get(?bool, 0));
-        try t.expectEqual(null, result.next());
+        try testing.expectEqual(null, row.get(?bool, 0));
+        try testing.expectEqual(null, result.next());
     }
 }
 
@@ -563,8 +482,8 @@ test "Result: text and bytea" {
         var result = try c.query(sql, .{ null, null });
         defer result.deinit(allocator);
         const row = (try result.nextUnsafe()).?;
-        try t.expectEqual(null, row.get(?[]u8, 0));
-        try t.expectEqual(null, row.get(?[]u8, 1));
+        try testing.expectEqual(null, row.get(?[]u8, 0));
+        try testing.expectEqual(null, row.get(?[]u8, 1));
         try result.drain();
     }
 }
@@ -584,11 +503,11 @@ test "Result: optional" {
         var result = try c.query(sql, .{ @as(?i32, 321), @as(?i32, null) });
         defer result.deinit(allocator);
         const row = (try result.nextUnsafe()).?;
-        try t.expectEqual(321, row.get(i32, 0));
+        try testing.expectEqual(321, row.get(i32, 0));
 
-        try t.expectEqual(321, row.get(?i32, 0));
-        try t.expectEqual(null, row.get(?i32, 1));
-        try t.expectEqual(null, result.next());
+        try testing.expectEqual(321, row.get(?i32, 0));
+        try testing.expectEqual(null, row.get(?i32, 1));
+        try testing.expectEqual(null, result.next());
     }
 }
 
@@ -601,8 +520,8 @@ test "Result: UUID" {
     defer result.deinit(allocator);
 
     const row = (try result.nextUnsafe()).?;
-    try t.expectSlice(u8, &.{ 252, 190, 191, 15, 185, 150, 67, 185, 152, 24, 103, 43, 198, 137, 205, 168 }, row.get([]u8, 0));
-    try t.expectSlice(u8, &.{ 174, 47, 71, 95, 128, 112, 65, 183, 186, 51, 134, 187, 168, 137, 123, 222 }, row.get([]u8, 1));
+    try t.expectEqualSlice(u8, &.{ 252, 190, 191, 15, 185, 150, 67, 185, 152, 24, 103, 43, 198, 137, 205, 168 }, row.get([]u8, 0));
+    try t.expectEqualSlice(u8, &.{ 174, 47, 71, 95, 128, 112, 65, 183, 186, 51, 134, 187, 168, 137, 123, 222 }, row.get([]u8, 1));
 }
 
 test "Result: lsn" {
@@ -614,7 +533,7 @@ test "Result: lsn" {
     defer result.deinit(allocator);
 
     const row = (try result.nextUnsafe()).?;
-    try t.expectEqual(32788447689, row.get(i64, 0));
+    try testing.expectEqual(32788447689, row.get(i64, 0));
 }
 
 test "Result: safe" {
@@ -627,11 +546,11 @@ test "Result: safe" {
         var result = try c.query(sql, .{ @as(?i32, 321), @as(?i32, null) });
         defer result.deinit(allocator);
         const row = (try result.next()).?;
-        try t.expectEqual(321, try row.get(i32, 0));
-        try t.expectEqual(error.InvalidType, row.get(bool, 0));
+        try testing.expectEqual(321, try row.get(i32, 0));
+        try testing.expectEqual(error.InvalidType, row.get(bool, 0));
 
-        try t.expectEqual(321, try row.get(?i32, 0));
-        try t.expectEqual(null, try row.get(?i32, 1));
-        try t.expectEqual(null, result.next());
+        try testing.expectEqual(321, try row.get(?i32, 0));
+        try testing.expectEqual(null, try row.get(?i32, 1));
+        try testing.expectEqual(null, result.next());
     }
 }
