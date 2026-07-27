@@ -1,12 +1,14 @@
 const std = @import("std");
 
-const config = @import("config.zig");
 const metrics = @import("metrics.zig");
 const openssl = @import("openssl");
-const proto = @import("proto.zig");
+const protocol = @import("protocol.zig");
 const ssl = @import("ssl.zig");
 const types = @import("types.zig");
 
+const Auth = @import("auth.zig").Auth;
+const AuthError = @import("auth.zig").AuthError;
+const Error = @import("error.zig").Error;
 const Message = @import("reader.zig").Message;
 const Pool = @import("pool.zig").Pool;
 const Reader = @import("reader.zig").Reader;
@@ -58,7 +60,7 @@ pub const Conn = struct {
     ssl_ctx: ?*openssl.SSL_CTX,
 
     // If we get a postgreSQL error, this will be set.
-    err: ?proto.Error,
+    err: ?Error,
 
     // The underlying data for err
     err_data: ?[]const u8,
@@ -209,9 +211,15 @@ pub const Conn = struct {
     }
 
     pub fn auth(self: *Conn, opts: Opts) !void {
-        if (try config.auth(self.allocator, self.io, &self.stream, &self.buf, &self.reader, opts)) |raw_pg_err| {
-            return self.setErr(raw_pg_err);
-        }
+        var conn_auth = Auth.init(self.allocator, self.io, &self.reader, opts);
+
+        conn_auth.auth() catch |err| {
+            std.debug.print("Error: auth error: {s}\n", .{@errorName(err)});
+            if (conn_auth.err_data) |err_data| {
+                return self.setErr(err_data);
+            }
+            return AuthError.UnexpectedDBMessage;
+        };
 
         while (true) {
             const msg = try self.read();
@@ -326,12 +334,9 @@ pub const Conn = struct {
                 // recover from this anyways)
                 self.state = .fail;
             };
-            const simple_query = proto.Query{ .sql = sql };
-            try simple_query.write(buf);
-            // no longer idle, we're now in a query
+            try protocol.writeQuery(self.allocator, self.io, self.stream, sql);
             metrics.query();
             self.state = .query;
-            try self.write(buf.string());
         } else {
             // TODO: there's some optimization opportunities here, since we know
             // we aren't expecting any result. We don't have to ask PG to DESCRIBE
@@ -354,8 +359,7 @@ pub const Conn = struct {
             };
             switch (msg.type) {
                 'C' => {
-                    const cc = try proto.CommandComplete.parse(msg.data);
-                    affected = cc.rowsAffected();
+                    affected = try protocol.CommandComplete.parse(msg.data);
                 },
                 'Z' => return affected,
                 'T' => affected = 0,
@@ -439,7 +443,7 @@ pub const Conn = struct {
 
         const owned = try allocator.dupe(u8, data);
         self.err_data = owned;
-        self.err = proto.Error.parse(owned);
+        self.err = Error.init(owned);
         return error.PG;
     }
 

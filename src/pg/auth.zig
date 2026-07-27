@@ -4,8 +4,8 @@ const mem = std.mem;
 const Io = std.Io;
 const testing = std.testing;
 
-const proto = @import("proto.zig");
 const conn = @import("conn.zig");
+const protocol = @import("protocol.zig");
 
 const Reader = @import("reader.zig").Reader;
 const Stream = @import("stream.zig").Stream;
@@ -18,124 +18,149 @@ const Stream = @import("stream.zig").Stream;
 //   - is only valid until the next call to reader.read()
 //     (we expect our caller to clone the value)
 // a normal zig error on any other error
-pub fn auth(io: Io, stream: *Stream, reader: *Reader, opts: conn.Opts) !?[]const u8 {
-    try reader.startFlow(opts.timeout_ms);
 
-    // ignore errors on endFlow, because it's troublesome to handle, and only
-    // something really bad (like OOM) can happen, and that'll surface again
-    // as soon as the app tries to use the connection.
-    defer reader.endFlow() catch {};
+pub const AuthError = error {
+UnableToAuthenticate,
+UnexpectedDBMessage,
+InvalidSASLFlow,
+};
 
-    {
+pub const Auth = struct {
+    allocator: mem.Allocator,
+    io: Io,
+
+    reader: *Reader,
+    stream: *Stream,
+
+    opts: conn.Opts,
+
+    err_data: ?[]const u8,
+
+    pub fn init(allocator: mem.Allocator, io: Io, reader: *Reader, opts: conn.Opts) Auth {
+        return .{
+            .allocator = allocator,
+            .io = io,
+            .reader = reader,
+            .stream = &reader.stream,
+            .opts = opts,
+            .err_data = null,
+        };
+    }
+
+    pub fn auth(self: *@This()) !void {
+        try self.reader.startFlow(self.opts.timeout_ms);
+
+        // ignore errors on endFlow, because it's troublesome to handle, and only
+        // something really bad (like OOM) can happen, and that'll surface again
+        // as soon as the app tries to use the connection.
+        defer self.reader.endFlow() catch |err| {
+            std.debug.print("Error: unable to end flow: {s}\n", .{@errorName(err)});
+        };
+
         // write our startup message
-        try proto.StartupMessage.write(io, stream, opts);
-    }
+        try protocol.StartupMessage.write(self.allocator, self.io, self.stream.stream, self.opts);
 
-    // read the server's response
-    {
-        const msg = try reader.next();
-        switch (msg.type) {
+        const init_msg = try self.reader.next();
+        switch (init_msg.type) {
             'R' => {},
-            'E' => return msg.data,
-            else => return error.UnexpectedDBMessage,
-        }
-
-        switch (try proto.AuthenticationRequest.parse(msg.data)) {
-            .ok => return null,
-            .sasl => |sasl| if (try saslAuth(io, sasl, stream, reader, opts)) |raw_pg_err| {
-                return raw_pg_err;
+            'E' => {
+                self.err_data = init_msg.data;
+                return AuthError.UnableToAuthenticate;
             },
-            .md5 => |salt| try md5PasswordAuth(salt, stream, opts),
-            .password => try passwordAuth(opts.password orelse "", stream),
+            else => return AuthError.UnexpectedDBMessage,
         }
-    }
 
-    {
-        // if we're here, it's because we sent more data to the server (e.g. a password)
-        // and we're now waiting for a reply, server should send a final auth ok message
-        const msg = try reader.next();
-        switch (msg.type) {
+        switch (try protocol.AuthenticationRequest.parse(init_msg.data)) {
+            .ok => return,
+            .sasl => |sasl| self.saslAuth(sasl) catch |err| {
+                return err;
+            },
+            .md5 => |salt| try self.md5PasswordAuth(salt),
+            .password => try self.passwordAuth(self.opts.password orelse ""),
+        }
+
+        const final_msg = try self.reader.next();
+        switch (final_msg.type) {
             'R' => {},
-            'E' => return msg.data,
-            else => return error.UnexpectedDBMessage,
+            'E' => {
+                self.err_data = final_msg.data;
+                return AuthError.UnableToAuthenticate;
+            },
+            else => return AuthError.UnexpectedDBMessage,
         }
 
-        switch (try proto.AuthenticationRequest.parse(msg.data)) {
-            .ok => return null,
-            else => return error.UnexpectedDBMessage,
+        switch (try protocol.AuthenticationRequest.parse(final_msg.data)) {
+            .ok => return,
+            else => return AuthError.UnexpectedDBMessage,
         }
     }
-}
 
-fn saslAuth(io: Io, req: proto.AuthenticationRequest.SASL, stream: *Stream, reader: *Reader, opts: conn.Opts) !?[]const u8 {
-    if (!req.scram_sha_256) {
-        return error.UnexpectedDBMessage;
-    }
-    var sasl_buf: [1024]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&sasl_buf);
-    var sasl = try SASL.init(io, fba.allocator());
+    fn saslAuth(self: *@This(), req: protocol.AuthenticationRequest.SASL) !void {
+        if (!req.scram_sha_256) {
+            return AuthError.UnexpectedDBMessage;
+        }
+        var sasl_buf: [1024]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&sasl_buf);
+        var sasl = try SASL.init(self.io, fba.allocator());
 
-    {
         // send the client initial response
-        try proto.writeSASLInitialResponse(stream, sasl.client_first_message, "SCRAM-SHA-256");
-    }
+        try protocol.SASLInitialResponse.write(self.allocator, self.io, self.stream.stream, sasl.client_first_message, "SCRAM-SHA-256");
 
-    {
         // read the server continue response
-        const msg = try reader.next();
-        switch (msg.type) {
+        const init_msg = try self.reader.next();
+        switch (init_msg.type) {
             'R' => {},
-            'E' => return msg.data,
-            else => return error.InvalidSASLFlow,
+            'E' => {
+                self.err_data = init_msg.data;
+                return AuthError.UnableToAuthenticate;
+            },
+            else => return AuthError.InvalidSASLFlow,
         }
-        const c = try proto.AuthenticationSASLContinue.parse(msg.data);
-        try sasl.serverResponse(c.data);
-    }
+        const continue_data = try protocol.AuthenticationSASLContinue.parse(init_msg.data);
+        try sasl.serverResponse(continue_data);
 
-    {
         // send the client final response
-        const client_final_message = try sasl.clientFinalMessage(opts.password orelse "");
-        try proto.writeSASLResponse(stream, client_final_message);
-    }
+        const client_final_message = try sasl.clientFinalMessage(self.opts.password orelse "");
+        try protocol.SASLResponse.write(self.allocator, self.io, self.stream.stream, client_final_message);
 
-    {
         // read the server final response
-        const msg = try reader.next();
+        const msg = try self.reader.next();
         switch (msg.type) {
             'R' => {},
-            'E' => return msg.data,
-            else => return error.InvalidSASLFlow,
+            'E' => {
+                self.err_data = msg.data;
+                return AuthError.UnableToAuthenticate;
+            },
+            else => return AuthError.InvalidSASLFlow,
         }
-        const final = try proto.AuthenticationSASLFinal.parse(msg.data);
-        try sasl.verifyServerFinal(final.data);
+        const final_data = try protocol.AuthenticationSASLFinal.parse(msg.data);
+        try sasl.verifyServerFinal(final_data);
     }
-    return null;
-}
 
-fn md5PasswordAuth(salt: []const u8, stream: *Stream, opts: conn.Opts) !void {
-    var hash: [16]u8 = undefined;
-    {
+    fn md5PasswordAuth(self: *@This(), salt: []const u8) !void {
+        var hash: [16]u8 = undefined;
+
         var hasher = std.crypto.hash.Md5.init(.{});
-        hasher.update(opts.password orelse "");
-        hasher.update(opts.username);
+        hasher.update(self.opts.password orelse "");
+        hasher.update(self.opts.username);
         hasher.final(&hash);
-    }
 
-    {
         const hex_hash = std.fmt.bytesToHex(&hash, .lower);
-        var hasher = std.crypto.hash.Md5.init(.{});
-        hasher.update(&hex_hash);
-        hasher.update(salt);
-        hasher.final(&hash);
-    }
-    var hashed_password: [35]u8 = undefined;
-    const password = try std.fmt.bufPrint(&hashed_password, "md5{s}", .{&std.fmt.bytesToHex(&hash, .lower)});
-    try passwordAuth(password, stream);
-}
+        var hex_hasher = std.crypto.hash.Md5.init(.{});
+        hex_hasher.update(&hex_hash);
+        hex_hasher.update(salt);
+        hex_hasher.final(&hash);
 
-fn passwordAuth(password: []const u8, stream: *Stream) !void {
-    try proto.writePasswordMessage(stream, password);
-}
+        var hashed_password: [35]u8 = undefined;
+        const password = try std.fmt.bufPrint(&hashed_password, "md5{s}", .{&std.fmt.bytesToHex(&hash, .lower)});
+
+        try self.passwordAuth(password);
+    }
+
+    fn passwordAuth(self: *@This(), password: []const u8) !void {
+        try protocol.PasswordMessage.write(self.allocator, self.io, self.stream.stream, password);
+    }
+};
 
 const SASL = struct {
     allocator: mem.Allocator,

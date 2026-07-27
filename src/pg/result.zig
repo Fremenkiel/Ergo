@@ -1,12 +1,11 @@
 const std = @import("std");
 
-const types = @import("types.zig");
-const proto = @import("proto.zig");
-
-const Conn = @import("conn.zig").Conn;
-
 const mem = std.mem;
 const testing = std.testing;
+
+const types = @import("types.zig");
+
+const Conn = @import("conn.zig").Conn;
 
 pub const Result = struct {
     number_of_columns: usize,

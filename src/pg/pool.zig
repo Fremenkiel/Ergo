@@ -45,34 +45,28 @@ pub const Pool = struct {
         const size = opts.size;
         const conns = try allocator.alloc(*Conn, size);
 
-        // Copy every caller-provided string into our arena so the pool owns them
-        // outright. Callers (including initUri) don't need to keep `opts`'s strings
-        // alive past this call.
         var opts_copy = opts;
         opts_copy.connect.username = try allocator.dupe(u8, opts.connect.username);
+        opts_copy.connect.database = try allocator.dupe(u8, opts.connect.database);
+        opts_copy.connect.host = try allocator.dupe(u8, opts.connect.host);
+        opts_copy.connect.application_name = try allocator.dupe(u8, opts.connect.application_name);
+
         if (opts.connect.password) |v| opts_copy.connect.password = try allocator.dupe(u8, v);
-        if (opts.connect.database) |v| opts_copy.connect.database = try allocator.dupe(u8, v);
-        if (opts.connect.application_name) |v| opts_copy.connect.application_name = try allocator.dupe(u8, v);
-        if (opts.connect.host) |v| opts_copy.connect.host = try allocator.dupe(u8, v);
-        // Note: auth.startup_parameters (a StringHashMap) is not deep-copied; it is
-        // currently unused, but if it ever gets wired up it must be owned here too.
 
         var ssl_ctx: ?*openssl.SSL_CTX = null;
             switch (opts_copy.connect.tls) {
                 .off => {},
                 else => |tls_config| {
-                    if (opts_copy.connect.host) |h| {
-                        opts_copy.connect.hostz = try allocator.dupeZ(u8, h);
-                    }
-                    // the cert path is re-read on every (re)connect, so own it too
-                    switch (tls_config) {
-                        .verify_full => |path| if (path) |p| {
-                            opts_copy.connect.tls = .{ .verify_full = try allocator.dupe(u8, p) };
-                        },
-                        else => {},
-                    }
-                    ssl_ctx = try ssl.initializeSSLContext(tls_config);
-                },
+                opts_copy.connect.hostz = try allocator.dupeZ(u8, opts.connect.host);
+                // the cert path is re-read on every (re)connect, so own it too
+                switch (tls_config) {
+                    .verify_full => |path| if (path) |p| {
+                        opts_copy.connect.tls = .{ .verify_full = try allocator.dupe(u8, p) };
+                    },
+                    else => {},
+                }
+                ssl_ctx = try ssl.initializeSSLContext(tls_config);
+            },
         }
         errdefer ssl.freeSSLContext(ssl_ctx);
         const connect_on_init_count = opts_copy.connect_on_init_count orelse size;
@@ -121,18 +115,14 @@ pub const Pool = struct {
         }
         allocator.free(self.conns);
 
-        if (self.opts.connect.host) |host| {
-            self.allocator.free(host);
-        }
+        self.allocator.free(self.opts.connect.host);
+        self.allocator.free(self.opts.connect.database);
+        self.allocator.free(self.opts.connect.username);
+        self.allocator.free(self.opts.connect.application_name);
 
-        if (self.opts.connect.database) |database| {
-            self.allocator.free(database);
-        }
         if (self.opts.connect.password) |password| {
             self.allocator.free(password);
         }
-        self.allocator.free(self.opts.connect.username);
-
 
         ssl.freeSSLContext(self.ssl_ctx);
         self.allocator.destroy(self);

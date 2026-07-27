@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const Io = std.Io;
 const mem = std.mem;
 
 const assert = std.debug.assert;
@@ -12,7 +13,6 @@ const Result = @import("result.zig").Result;
 
 pub const Stmt = struct {
     allocator: mem.Allocator,
-    buf: *[]u8,
 
     opts: Conn.QueryOpts,
 
@@ -50,7 +50,6 @@ pub const Stmt = struct {
         return .{
             .conn = conn,
             .opts = opts,
-            .buf = &conn.buf,
             .allocator = allocator,
             .param_index = 0,
             .param_count = 0,
@@ -66,7 +65,6 @@ pub const Stmt = struct {
             .conn = conn,
             .opts = opts,
             .allocator = allocator,
-            .buf = &conn.buf,
             .param_index = 0,
             .param_count = @intCast(describe.param_oids.len),
             .param_oids = describe.param_oids,
@@ -90,8 +88,6 @@ pub const Stmt = struct {
 
         try conn.reader.startFlow(opts.timeout_ms);
 
-        var buf = self.buf;
-        buf.reset();
 
         const name = self.name;
 
@@ -113,31 +109,33 @@ pub const Stmt = struct {
             // the +3 for the initial byte message for each of the 3 messages
             const total_length = 3 + bind_payload_len + describe_payload_len + sync_payload_len;
 
-            if (buf.len < total_length) {
-                self.allocator.free(buf);
-                self.buf.* = try self.allocator.alloc(u8, total_length);
-            }
-            var view = buf.skip(total_length) catch unreachable;
+            var buf: []u8 = undefined;
+            buf = try self.allocator.alloc(u8, total_length);
+            defer self.allocator.free(buf);
+
+            var writer = Io.Writer.fixed(buf);
+            var w = &writer;
 
             // PARSE
-            view.writeByte('P');
-            view.writeIntBig(u32, @intCast(bind_payload_len));
-            view.write(name);
-            view.writeByte(0);
-            view.write(sql);
+            try w.writeByte('P');
+            try w.writeInt(u32, @intCast(bind_payload_len), .big);
+            try w.writeAll(name);
+            try w.writeByte(0);
+            try w.writeAll(sql);
             // null terminate sql string, and we'll be specifying 0 parameter types
-            view.write(&.{ 0, 0, 0 });
+            try w.writeAll(&.{ 0, 0, 0 });
 
             // DESCRIBE
-            view.writeByte('D');
-            view.writeIntBig(u32, @intCast(describe_payload_len));
-            view.writeByte('S'); // Describe a prepared statement
-            view.write(name);
-            view.writeByte(0); // null terminate our name
+            try w.writeByte('D');
+            try w.writeInt(u32, @intCast(describe_payload_len), .big);
+            try w.writeByte('S'); // Describe a prepared statement
+            try w.writeAll(name);
+            try w.writeByte(0); // null terminate our name
 
             // SYNC
-            view.write(&.{ 'S', 0, 0, 0, 4 });
-            try conn.write(buf.string());
+            try w.writeAll(&.{ 'S', 0, 0, 0, 4 });
+
+            try conn.write(buf);
         }
 
         // no longer idle, we're now in a query
@@ -228,8 +226,6 @@ pub const Stmt = struct {
     pub fn prepareForBind(self: *@This(), param_count: u16) !void {
         try self.conn.readyForQuery();
 
-        var buf = self.buf;
-
         const name = self.name;
 
         // Bind command = 'B'
@@ -237,27 +233,34 @@ pub const Stmt = struct {
         // portal name (empty string, length 0) - 0
         // prepared statement name  + null terminator
         const capacity = 1 + 4 + 1 + name.len + 1 + 2;
-        if (buf.len < capacity) {
-            self.allocator.free(buf);
-            self.buf.* = try self.allocator.alloc(u8, capacity);
-        }
+
+        var buf: []u8 = undefined;
+        buf = try self.allocator.alloc(u8, capacity);
+        defer self.allocator.free(buf);
+
+        var writer = self.conn.stream.stream.writer(self.conn.io, buf);
+        var w = &writer.interface;
 
         // length of buffer is guaranteed to be 128, so it's safe to use
         // writeAssumeCapacity (4 byte length placeholder, 1 byte empty portal)
-        buf.writeAssumeCapacity(&.{ 'B', 0, 0, 0, 0, 0 });
+        try w.writeAll(&.{ 'B', 0, 0, 0, 0, 0 });
 
-        buf.writeAssumeCapacity(name);
-        buf.writeByteAssumeCapacity(0);
+        try w.writeAll(name);
+        try w.writeByte(0);
 
         // number of parameters types we're sending a
-        try buf.writeIntBig(u16, param_count);
+        try w.writeInt(u16, param_count, .big);
 
         // the format (text or binary) of each parameter. We'll default to text
         // for now, and fill this in as we get the data
-        try buf.writeByteNTimes(0, param_count * 2);
+        const n_times = param_count * 2;
+        var i: u32 = 0;
+        while (i < n_times) : (i += 1) {
+            try w.writeByte(0);
+        }
 
         // number of parameters we're sending a
-        try buf.writeIntBig(u16, param_count);
+        try w.writeInt(u16, param_count, .big);
     }
 
     pub fn bind(self: *@This(), value: anytype) !void {

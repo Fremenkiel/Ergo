@@ -15,8 +15,6 @@ const Reader = @import("reader.zig").Reader;
 
 const printSSLError = @import("ssl.zig").printSSLError;
 
-const DEFAULT_HOST = "127.0.0.1";
-
 pub const Stream = struct {
     valid: bool,
     ssl: ?*openssl.SSL,
@@ -24,19 +22,18 @@ pub const Stream = struct {
     io: Io,
 
     pub fn connect(io: Io, allocator: mem.Allocator, opts: conn.Opts, ctx_: ?*openssl.SSL_CTX) !Stream {
-        const host = opts.host orelse DEFAULT_HOST;
-        const is_unix = host.len > 0 and host[0] == '/';
+        const is_unix = opts.host.len > 0 and opts.host[0] == '/';
 
         const stream = try blk: {
             if (is_unix) {
                 if (comptime Io.net.has_unix_sockets == false or std.posix.AF == void) {
                     return error.UnixPathNotSupported;
                 }
-                const addr: Io.net.UnixAddress = try .init(host);
+                const addr: Io.net.UnixAddress = try .init(opts.host);
                 break :blk addr.connect(io);
             }
             const port = opts.port orelse 5432;
-            const hostname: Io.net.HostName = try .init(host);
+            const hostname: Io.net.HostName = try .init(opts.host);
             break :blk hostname.connect(io, port, .{ .mode = .stream });
         };
         errdefer stream.close(io);
@@ -58,12 +55,12 @@ pub const Stream = struct {
             ssl = openssl.SSL_new(ctx) orelse return error.SSLNewFailed;
             errdefer openssl.SSL_free(ssl);
 
-            if (isHostName(host)) {
+            if (isHostName(opts.host)) {
                 // don't send this for an ip address
                 var owned = false;
                 const h = opts.hostz orelse blk: {
                     owned = true;
-                    break :blk try allocator.dupeZ(u8, host);
+                    break :blk try allocator.dupeZ(u8, opts.host);
                 };
 
                 defer if (owned) {

@@ -13,3 +13,6 @@ Add time limit on main test to make them fail and not halt
 
 Research decimal support
 Remove buffer lib
+
+w.Write needs SSL handling
+Make sure prepareForBind works:
