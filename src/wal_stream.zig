@@ -54,7 +54,7 @@ pub fn WalStream(comptime PgClient: type, comptime ChClient: type) type {
         pub fn startStreaming(self: *@This()) !void {
             self.pg_client.startWALReader(read_timeout_ms) catch |err| switch (err) {
                 pg_client.PgClientError.WalConnectionNotInitialized => {
-                    self.pg_client.*.wal_conn = try PgClient.createWalConn(self.allocator, self.io, self.pg_client.*.opts);
+                    self.pg_client.*.wal_conn = try PgClient.createWalConn(self.allocator, self.io, self.pg_client.*.wal_opts);
 
                     try self.pg_client.startWALReader(read_timeout_ms);
                 },

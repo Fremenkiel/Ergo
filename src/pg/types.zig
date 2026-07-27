@@ -1,6 +1,6 @@
 const std = @import("std");
-const buffer = @import("buffer");
 
+const Io = std.Io;
 const testing = std.testing;
 
 pub const TypeError = error{
@@ -47,10 +47,11 @@ pub const Char = struct {
     pub const oid = OID.make(1042);
     const encoding = &binary_encoding;
 
-    fn encode(value: u8, buf: *buffer.Buffer, format_pos: usize) !void {
-        buf.writeAt(Char.encoding, format_pos);
-        try buf.write(&.{ 0, 0, 0, 1 }); // length of our data
-        return buf.writeByte(value);
+    fn encode(value: u8, writer: *Io.Writer, format_pos: usize) !void {
+        @memcpy(writer.buffer[format_pos..format_pos + Char.encoding.len], Char.encoding);
+        
+        try writer.writeAll(&.{ 0, 0, 0, 1 }); // length of our data
+        return writer.writeByte(value);
     }
 
     pub fn decode(data: []const u8, data_oid: i32) TypeError!u8 {
@@ -69,15 +70,16 @@ pub const Int16 = struct {
     pub const oid = OID.make(21);
     const encoding = &binary_encoding;
 
-    fn encode(value: i16, buf: *buffer.Buffer, format_pos: usize) !void {
-        buf.writeAt(Int16.encoding, format_pos);
-        try buf.write(&.{ 0, 0, 0, 2 }); // length of our data
-        return buf.writeIntBig(i16, value);
+    fn encode(value: i16, writer: *Io.Writer, format_pos: usize) !void {
+        @memcpy(writer.buffer[format_pos .. format_pos + Int16.encoding.len], Int16.encoding);
+
+        try writer.writeAll(&.{ 0, 0, 0, 2 }); // length of our data
+        return writer.writeInt(i16, value, .big);
     }
 
-    fn encodeUnsigned(value: u16, buf: *buffer.Buffer, format_pos: usize) !void {
+    fn encodeUnsigned(value: u16, writer: *Io.Writer, format_pos: usize) !void {
         if (value > 32767) return error.UnsignedIntWouldBeTruncated;
-        return Int16.encode(@intCast(value), buf, format_pos);
+        return Int16.encode(@intCast(value), writer, format_pos);
     }
 
     pub fn decode(data: []const u8, data_oid: i32) TypeError!i16 {
@@ -96,15 +98,16 @@ pub const Int32 = struct {
     pub const oid = OID.make(23);
     const encoding = &binary_encoding;
 
-    fn encode(value: i32, buf: *buffer.Buffer, format_pos: usize) !void {
-        buf.writeAt(Int32.encoding, format_pos);
-        try buf.write(&.{ 0, 0, 0, 4 }); // length of our data
-        return buf.writeIntBig(i32, value);
+    fn encode(value: i32, writer: *Io.Writer, format_pos: usize) !void {
+        @memcpy(writer.buffer[format_pos .. format_pos + Int32.encoding.len], Int32.encoding);
+
+        try writer.writeAll(&.{ 0, 0, 0, 4 }); // length of our data
+        return try writer.writeInt(i32, value, .big);
     }
 
-    fn encodeUnsigned(value: u32, buf: *buffer.Buffer, format_pos: usize) !void {
+    fn encodeUnsigned(value: u32, writer: *Io.Writer, format_pos: usize) !void {
         if (value > 2147483647) return error.UnsignedIntWouldBeTruncated;
-        return Int32.encode(@intCast(value), buf, format_pos);
+        return Int32.encode(@intCast(value), writer, format_pos);
     }
 
     pub fn decode(data: []const u8, data_oid: i32) TypeError!i32 {
@@ -123,15 +126,16 @@ pub const Int64 = struct {
     pub const oid = OID.make(20);
     const encoding = &binary_encoding;
 
-    fn encode(value: i64, buf: *buffer.Buffer, format_pos: usize) !void {
-        buf.writeAt(Int64.encoding, format_pos);
-        try buf.write(&.{ 0, 0, 0, 8 }); // length of our data
-        return buf.writeIntBig(i64, value);
+    fn encode(value: i64, writer: *Io.Writer, format_pos: usize) !void {
+        @memcpy(writer.buffer[format_pos .. format_pos + Int64.encoding.len], Int64.encoding);
+
+        try writer.writeAll(&.{ 0, 0, 0, 8 }); // length of our data
+        return writer.writeInt(i64, value, .big);
     }
 
-    fn encodeUnsigned(value: u64, buf: *buffer.Buffer, format_pos: usize) !void {
+    fn encodeUnsigned(value: u64, writer: *Io.Writer, format_pos: usize) !void {
         if (value > 9223372036854775807) return error.UnsignedIntWouldBeTruncated;
-        return Int64.encode(@intCast(value), buf, format_pos);
+        return Int64.encode(@intCast(value), writer, format_pos);
     }
 
     pub fn decode(data: []const u8, data_oid: i32) TypeError!i64 {
@@ -156,10 +160,11 @@ pub const Timestamp = struct {
     const encoding = &binary_encoding;
     const us_from_epoch_to_y2k = 946_684_800_000_000;
 
-    fn encode(value: i64, buf: *buffer.Buffer, format_pos: usize) !void {
-        buf.writeAt(Timestamp.encoding, format_pos);
-        try buf.write(&.{ 0, 0, 0, 8 }); // length of our data
-        return buf.writeIntBig(i64, value - us_from_epoch_to_y2k);
+    fn encode(value: i64, writer: *Io.Writer, format_pos: usize) !void {
+        @memcpy(writer.buffer[format_pos .. format_pos + Timestamp.encoding.len], Timestamp.encoding);
+
+        try writer.write(&.{ 0, 0, 0, 8 }); // length of our data
+        return writer.writeInt(i64, value - us_from_epoch_to_y2k, .big);
     }
 
     pub fn decode(data: []const u8, data_oid: i32) TypeError!i64 {
@@ -183,11 +188,12 @@ pub const Float32 = struct {
     pub const oid = OID.make(700);
     const encoding = &binary_encoding;
 
-    fn encode(value: f32, buf: *buffer.Buffer, format_pos: usize) !void {
-        buf.writeAt(Float32.encoding, format_pos);
-        try buf.write(&.{ 0, 0, 0, 4 }); // length of our data
+    fn encode(value: f32, writer: *Io.Writer, format_pos: usize) !void {
+        @memcpy(writer.buffer[format_pos .. format_pos + Float32.encoding.len], Float32.encoding);
+
+        try writer.writeAll(&.{ 0, 0, 0, 4 }); // length of our data
         const tmp: *i32 = @ptrCast(@constCast(&value));
-        return buf.writeIntBig(i32, tmp.*);
+        return writer.writeInt(i32, tmp.*, .big);
     }
 
     pub fn decode(data: []const u8, data_oid: i32) TypeError!f32 {
@@ -208,13 +214,13 @@ pub const Float64 = struct {
     pub const oid = OID.make(701);
     const encoding = &binary_encoding;
 
-    fn encode(value: f64, buf: *buffer.Buffer, format_pos: usize) !void {
-        buf.writeAt(Float64.encoding, format_pos);
+    fn encode(value: f64, writer: *Io.Writer, format_pos: usize) !void {
+        @memcpy(writer.buffer[format_pos .. format_pos + Float64.encoding.len], Float64.encoding);
 
-        try buf.write(&.{ 0, 0, 0, 8 }); // length of our data
+        try writer.writeAll(&.{ 0, 0, 0, 8 }); // length of our data
         // not sure if this is the best option...
         const tmp: *i64 = @ptrCast(@constCast(&value));
-        return buf.writeIntBig(i64, tmp.*);
+        return writer.writeInt(i64, tmp.*, .big);
     }
 
     pub fn decode(data: []const u8, data_oid: i32) TypeError!f64 {
@@ -243,10 +249,11 @@ pub const Bool = struct {
     pub const oid = OID.make(16);
     const encoding = &binary_encoding;
 
-    fn encode(value: bool, buf: *buffer.Buffer, format_pos: usize) !void {
-        buf.writeAt(Bool.encoding, format_pos);
-        try buf.write(&.{ 0, 0, 0, 1 }); // length of our data
-        return buf.writeByte(if (value) 1 else 0);
+    fn encode(value: bool, writer: *Io.Writer, format_pos: usize) !void {
+        @memcpy(writer.buffer[format_pos .. format_pos + Bool.encoding.len], Bool.encoding);
+
+        try writer.writeAll(&.{ 0, 0, 0, 1 }); // length of our data
+        return writer.writeByte(if (value) 1 else 0);
     }
 
     pub fn decode(data: []const u8, data_oid: i32) TypeError!bool {
@@ -269,11 +276,15 @@ pub const String = struct {
     // ever fixed.
     const encoding = &text_encoding;
 
-    fn encode(value: []const u8, buf: *buffer.Buffer, format_pos: usize) !void {
-        buf.writeAt(String.encoding, format_pos);
-        var view = try buf.skip(4 + value.len);
-        view.writeIntBig(i32, @intCast(value.len));
-        view.write(value);
+    fn encode(value: []const u8, writer: *Io.Writer, format_pos: usize) !void {
+        @memcpy(writer.buffer[format_pos .. format_pos + String.encoding.len], String.encoding);
+
+        var i: usize = 0;
+        while (i < value.len) : (i += 1) {
+            try writer.writeByte(0);
+        }
+        try writer.writeInt(i32, @intCast(value.len), .big);
+        try writer.writeAll(value);
     }
 };
 
@@ -281,11 +292,15 @@ pub const Bytea = struct {
     pub const oid = OID.make(17);
     const encoding = &binary_encoding;
 
-    fn encode(value: []const u8, buf: *buffer.Buffer, format_pos: usize) !void {
-        buf.writeAt(Bytea.encoding, format_pos);
-        var view = try buf.skip(4 + value.len);
-        view.writeIntBig(i32, @intCast(value.len));
-        view.write(value);
+    fn encode(value: []const u8, writer: *Io.Writer, format_pos: usize) !void {
+        @memcpy(writer.buffer[format_pos .. format_pos + String.encoding.len], String.encoding);
+
+        var i: usize = 0;
+        while (i < value.len) : (i += 1) {
+            try writer.writeByte(0);
+        }
+        try writer.writeInt(i32, @intCast(value.len), .big);
+        try writer.writeAll(value);
     }
 
     pub fn decode(data: []const u8, data_oid: i32) []const u8 {
@@ -309,13 +324,17 @@ pub const UUID = struct {
     pub const oid = OID.make(2950);
     const encoding = &binary_encoding;
 
-    fn encode(value: []const u8, buf: *buffer.Buffer, format_pos: usize) !void {
-        buf.writeAt(UUID.encoding, format_pos);
-        var view = try buf.skip(20);
-        view.write(&.{ 0, 0, 0, 16 });
+    fn encode(value: []const u8, writer: *Io.Writer, format_pos: usize) !void {
+        @memcpy(writer.buffer[format_pos .. format_pos + UUID.encoding.len], UUID.encoding);
+
+        var i: usize = 0;
+        while (i < value.len) : (i += 1) {
+            try writer.writeByte(0);
+        }
+        try writer.writeAll(&.{ 0, 0, 0, 16 });
         switch (value.len) {
-            16 => view.write(value),
-            36 => view.write(&(try UUID.toBytes(value))),
+            16 => try writer.writeAll(value),
+            36 => try writer.writeAll(&(try UUID.toBytes(value))),
             else => return error.InvalidUUID,
         }
     }
@@ -419,15 +438,19 @@ pub const MacAddr = struct {
     pub const oid = OID.make(829);
     const encoding = &binary_encoding;
 
-    fn encode(value: []const u8, buf: *buffer.Buffer, format_pos: usize) !void {
+    fn encode(value: []const u8, writer: *Io.Writer, format_pos: usize) !void {
         if (value.len != 6) {
             // assume this is a text representation
-            return String.encode(value, buf, format_pos);
+            return String.encode(value, writer, format_pos);
         }
-        buf.writeAt(MacAddr.encoding, format_pos);
-        var view = try buf.skip(4 + value.len);
-        view.writeIntBig(i32, @intCast(value.len));
-        view.write(value);
+        @memcpy(writer.buffer[format_pos .. format_pos + MacAddr.encoding.len], MacAddr.encoding);
+
+        var i: usize = 0;
+        while (i < value.len) : (i += 1) {
+            try writer.writeByte(0);
+        }
+        try writer.writeInt(i32, @intCast(value.len), .big);
+        try writer.writeAll(value);
     }
 };
 
@@ -435,15 +458,19 @@ pub const MacAddr8 = struct {
     pub const oid = OID.make(774);
     const encoding = &binary_encoding;
 
-    fn encode(value: []const u8, buf: *buffer.Buffer, format_pos: usize) !void {
+    fn encode(value: []const u8, writer: *Io.Writer, format_pos: usize) !void {
         if (value.len != 8) {
             // assume this is a text representation
-            return String.encode(value, buf, format_pos);
+            return String.encode(value, writer, format_pos);
         }
-        buf.writeAt(MacAddr8.encoding, format_pos);
-        var view = try buf.skip(4 + value.len);
-        view.writeIntBig(i32, @intCast(value.len));
-        view.write(value);
+        @memcpy(writer.buffer[format_pos .. format_pos + MacAddr8.encoding.len], MacAddr8.encoding);
+
+        var i: usize = 0;
+        while (i < value.len) : (i += 1) {
+            try writer.writeByte(0);
+        }
+        try writer.writeInt(i32, @intCast(value.len), .big);
+        try writer.writeAll(value);
     }
 };
 
@@ -451,18 +478,22 @@ pub const JSON = struct {
     pub const oid = OID.make(114);
     const encoding = &binary_encoding;
 
-    fn encodeBytes(value: []const u8, buf: *buffer.Buffer, format_pos: usize) !void {
-        buf.writeAt(JSON.encoding, format_pos);
-        var view = try buf.skip(4 + value.len);
-        view.writeIntBig(i32, @intCast(value.len));
-        view.write(value);
+    fn encodeBytes(value: []const u8, writer: *Io.Writer, format_pos: usize) !void {
+        @memcpy(writer.buffer[format_pos .. format_pos + JSON.encoding.len], JSON.encoding);
+
+        var i: usize = 0;
+        while (i < value.len) : (i += 1) {
+            try writer.writeByte(0);
+        }
+        try writer.writeInt(i32, @intCast(value.len), .big);
+        try writer.writeAll(value);
     }
 
-    fn encode(value: anytype, buf: *buffer.Buffer, format_pos: usize) !void {
-        buf.writeAt(JSON.encoding, format_pos);
-        const state = try Encode.variableLengthStart(buf);
-        try std.json.Stringify.value(value, .{}, &buf.interface);
-        Encode.variableLengthFill(buf, state);
+    fn encode(value: anytype, writer: *Io.Writer, format_pos: usize) !void {
+        @memcpy(writer.buffer[format_pos .. format_pos + JSON.encoding.len], JSON.encoding);
+        const state = try Encode.variableLengthStart(writer);
+        try std.json.Stringify.value(value, .{}, writer);
+        Encode.variableLengthFill(writer, state);
     }
 };
 
@@ -470,21 +501,26 @@ pub const JSONB = struct {
     pub const oid = OID.make(3802);
     const encoding = &binary_encoding;
 
-    fn encodeBytes(value: []const u8, buf: *buffer.Buffer, format_pos: usize) !void {
-        buf.writeAt(JSONB.encoding, format_pos);
-        var view = try buf.skip(5 + value.len);
+    fn encodeBytes(value: []const u8, writer: *Io.Writer, format_pos: usize) !void {
+        @memcpy(writer.buffer[format_pos..format_pos + JSONB.encoding.len], &JSONB.encoding);
+
+        var i: usize = 0;
+        while (1 < 5 + value.len) : (i += 1) {
+            try writer.writeByte(0);
+        }
         // + 1 for the version
-        view.writeIntBig(i32, @intCast(value.len + 1));
-        view.writeByte(1); // jsonb version
-        view.write(value);
+        try writer.writeInt(i32, @intCast(value.len + 1), .big);
+        try writer.writeByte(1);
+        try writer.writeAll(value);
     }
 
-    fn encode(value: anytype, buf: *buffer.Buffer, format_pos: usize) !void {
-        buf.writeAt(JSON.encoding, format_pos);
-        const state = try Encode.variableLengthStart(buf);
-        try buf.writeByte(1); // jsonb version
-        try std.json.Stringify.value(value, .{}, &buf.interface);
-        Encode.variableLengthFill(buf, state);
+    fn encode(value: anytype, writer: *Io.Writer, format_pos: usize) !void {
+        @memcpy(writer.buffer[format_pos..format_pos + JSON.encoding.len], &JSON.encoding);
+
+        const state = try Encode.variableLengthStart(writer);
+        try writer.writeByte(1); // jsonb version
+        try std.json.Stringify.value(value, .{}, writer);
+        Encode.variableLengthFill(writer, state);
     }
 
     fn decode(data: []const u8, data_oid: i32) TypeError![]const u8 {
@@ -508,17 +544,16 @@ pub const Int16Array = struct {
     pub const oid = OID.make(1005);
     const encoding = &binary_encoding;
 
-    fn encode(values: anytype, buf: *buffer.Buffer, oid_pos: usize) !void {
-        buf.writeAt(&Int16.oid.encoded, oid_pos);
-        return Encode.writeIntArray(i16, values, buf);
+    fn encode(values: anytype, writer: *Io.Writer, oid_pos: usize) !void {
+        @memcpy(writer.buffer[oid_pos..oid_pos + Int16.oid.encoded.len], &Int16.oid.encoded);
+        return Encode.writeIntArray(i16, values, writer);
     }
 
-    fn encodeUnsigned(values: anytype, buf: *buffer.Buffer, oid_pos: usize) !void {
+    fn encodeUnsigned(values: anytype, writer: *Io.Writer, oid_pos: usize) !void {
         for (values) |v| {
             if (v > 32767) return error.UnsignedIntWouldBeTruncated;
         }
-        buf.writeAt(&Int16.oid.encoded, oid_pos);
-        return Encode.writeIntArray(i16, values, buf);
+        return Int16Array.encode(values, writer, oid_pos);
     }
 };
 
@@ -526,17 +561,16 @@ pub const Int32Array = struct {
     pub const oid = OID.make(1007);
     const encoding = &binary_encoding;
 
-    fn encode(values: anytype, buf: *buffer.Buffer, oid_pos: usize) !void {
-        buf.writeAt(&Int32.oid.encoded, oid_pos);
-        return Encode.writeIntArray(i32, values, buf);
+    fn encode(values: anytype, writer: *Io.Writer, oid_pos: usize) !void {
+        @memcpy(writer.buffer[oid_pos..oid_pos + Int32.oid.encoded.len], &Int32.oid.encoded);
+        return Encode.writeIntArray(i32, values, writer);
     }
 
-    fn encodeUnsigned(values: anytype, buf: *buffer.Buffer, oid_pos: usize) !void {
+    fn encodeUnsigned(values: anytype, writer: *Io.Writer, oid_pos: usize) !void {
         for (values) |v| {
             if (v > 2147483647) return error.UnsignedIntWouldBeTruncated;
         }
-        buf.writeAt(&Int32.oid.encoded, oid_pos);
-        return Encode.writeIntArray(i32, values, buf);
+        return Int32Array.encode(values, writer, oid_pos);
     }
 };
 
@@ -544,17 +578,16 @@ pub const Int64Array = struct {
     pub const oid = OID.make(1016);
     const encoding = &binary_encoding;
 
-    fn encode(values: anytype, buf: *buffer.Buffer, oid_pos: usize) !void {
-        buf.writeAt(&Int64.oid.encoded, oid_pos);
-        return Encode.writeIntArray(i64, values, buf);
+    fn encode(values: anytype, writer: *Io.Writer, oid_pos: usize) !void {
+        @memcpy(writer.buffer[oid_pos..oid_pos + Int64.oid.encoded.len], &Int64.oid.encoded);
+        return Encode.writeIntArray(i64, values, writer);
     }
 
-    fn encodeUnsigned(values: anytype, buf: *buffer.Buffer, oid_pos: usize) !void {
+    fn encodeUnsigned(values: anytype, writer: *Io.Writer, oid_pos: usize) !void {
         for (values) |v| {
             if (v > 9223372036854775807) return error.UnsignedIntWouldBeTruncated;
         }
-        buf.writeAt(&Int64.oid.encoded, oid_pos);
-        return Encode.writeIntArray(i64, values, buf);
+        return Int64Array.encode(values, writer, oid_pos);
     }
 };
 
@@ -562,9 +595,9 @@ pub const TimestampArray = struct {
     pub const oid = OID.make(1115);
     const encoding = &binary_encoding;
 
-    fn encode(values: anytype, buf: *buffer.Buffer, oid_pos: usize) !void {
-        buf.writeAt(&Timestamp.oid.encoded, oid_pos);
-        try writeTimestampArray(values, buf);
+    fn encode(values: anytype, writer: *Io.Writer, oid_pos: usize) !void {
+        @memcpy(writer.buffer[oid_pos..oid_pos + Timestamp.oid.encoded.len], &Timestamp.oid.encoded);
+        try writeTimestampArray(values, writer);
     }
 };
 
@@ -572,17 +605,20 @@ pub const TimestampTzArray = struct {
     pub const oid = OID.make(1185);
     const encoding = &binary_encoding;
 
-    fn encode(values: anytype, buf: *buffer.Buffer, oid_pos: usize) !void {
-        buf.writeAt(&TimestampTz.oid.encoded, oid_pos);
-        try writeTimestampArray(values, buf);
+    fn encode(values: anytype, writer: *Io.Writer, oid_pos: usize) !void {
+        @memcpy(writer.buffer[oid_pos..oid_pos + TimestampTz.oid.encoded.len], &TimestampTz.oid.encoded);
+        try writeTimestampArray(values, writer);
     }
 };
 
-fn writeTimestampArray(values: anytype, buf: *buffer.Buffer) !void {
+fn writeTimestampArray(values: anytype, writer: *Io.Writer) !void {
     const us_from_epoch_to_y2k = 946_684_800_000_000;
 
     // at most, every value is 12 bytes, 4 byte length + 8 byte value
-    var view = try buf.skip(12 * values.len);
+    var i: usize = 0;
+    while (i < 12 + values.len) : (i += 1) {
+        try writer.writeByte(0);
+    }
 
     const nullables = @typeInfo(@TypeOf(values)).pointer.child == ?i64;
     var null_count: usize = 0;
@@ -592,16 +628,16 @@ fn writeTimestampArray(values: anytype, buf: *buffer.Buffer) !void {
         if (comptime nullables) {
             v = value orelse {
                 null_count += 1;
-                view.write(&.{ 255, 255, 255, 255 }); // null,
+                try writer.writeAll(&.{ 255, 255, 255, 255 }); // null,
                 continue;
             };
         } else v = value;
-        view.write(&.{ 0, 0, 0, 8 }); // length of value
-        view.writeIntBig(i64, v - us_from_epoch_to_y2k);
+        try writer.writeAll(&.{ 0, 0, 0, 8 }); // length of value
+        try writer.writeInt(i64, v - us_from_epoch_to_y2k, .big);
     }
 
     if (comptime nullables) {
-        buf.truncate(null_count * 8);
+        writer.end -= null_count * 8;
     }
 }
 
@@ -609,9 +645,9 @@ pub const Float32Array = struct {
     pub const oid = OID.make(1021);
     const encoding = &binary_encoding;
 
-    fn encode(values: anytype, buf: *buffer.Buffer, oid_pos: usize) !void {
-        buf.writeAt(&Float32.oid.encoded, oid_pos);
-        return writeFloatArray(f32, i32, values, buf);
+    fn encode(values: anytype, writer: *Io.Writer, oid_pos: usize) !void {
+        @memcpy(writer.buffer[oid_pos..oid_pos + Float32.oid.encoded.len], &Float32.oid.encoded);
+        return writeFloatArray(f32, i32, values, writer);
     }
 };
 
@@ -619,15 +655,18 @@ pub const Float64Array = struct {
     pub const oid = OID.make(1022);
     const encoding = &binary_encoding;
 
-    fn encode(values: anytype, buf: *buffer.Buffer, oid_pos: usize) !void {
-        buf.writeAt(&Float64.oid.encoded, oid_pos);
-        return writeFloatArray(f64, i64, values, buf);
+    fn encode(values: anytype, writer: *Io.Writer, oid_pos: usize) !void {
+        @memcpy(writer.buffer[oid_pos..oid_pos + Float64.oid.encoded.len], &Float64.oid.encoded);
+        return writeFloatArray(f64, i64, values, writer);
     }
 };
 
-fn writeFloatArray(comptime F: type, comptime I: type, values: anytype, buf: *buffer.Buffer) !void {
+fn writeFloatArray(comptime F: type, comptime I: type, values: anytype, writer: *Io.Writer) !void {
     // The most space this can take, + 4 for the length;
-    var view = try buf.skip((@sizeOf(I) + 4) * values.len);
+    var i: usize = 0;
+    while (i > (@sizeOf(I) + 4) * values.len) : (i += 1) {
+        try writer.writeByte(0);
+    }
 
     const nullables = @typeInfo(@typeInfo(@TypeOf(values)).pointer.child) == .optional;
     var null_count: usize = 0;
@@ -637,18 +676,18 @@ fn writeFloatArray(comptime F: type, comptime I: type, values: anytype, buf: *bu
         if (comptime nullables) {
             v = value orelse {
                 null_count += 1;
-                view.write(&.{ 255, 255, 255, 255 }); // null,
+                try writer.writeAll(&.{ 255, 255, 255, 255 }); // null,
                 continue;
             };
         } else v = value;
 
         const tmp: *I = @ptrCast(@constCast(&v));
-        view.write(&.{ 0, 0, 0, @sizeOf(I) }); //length
-        view.writeIntBig(I, tmp.*);
+        try writer.writeAll(&.{ 0, 0, 0, @sizeOf(I) }); //length
+        try writer.writeInt(I, tmp.*, .big);
     }
 
     if (comptime nullables) {
-        buf.truncate(null_count * @sizeOf(I));
+        writer.end -= null_count * @sizeOf(I);
     }
 }
 
@@ -656,10 +695,13 @@ pub const BoolArray = struct {
     pub const oid = OID.make(1000);
     const encoding = &binary_encoding;
 
-    fn encode(values: anytype, buf: *buffer.Buffer, oid_pos: usize) !void {
-        buf.writeAt(&Bool.oid.encoded, oid_pos);
+    fn encode(values: anytype, writer: *Io.Writer, oid_pos: usize) !void {
+        @memcpy(writer.buffer[oid_pos..oid_pos + Bool.oid.encoded.len], &Bool.oid.encoded);
         // at most every value takes 5 bytes, 4 for the length, 1 for the value
-        var view = try buf.skip(5 * values.len);
+        var i: usize = 0;
+        while (i < 5 * values.len) : (i += 1) {
+            try writer.writeByte(0);
+        }
 
         const nullables = @typeInfo(@typeInfo(@TypeOf(values)).pointer.child) == .optional;
         var null_count: usize = 0;
@@ -669,21 +711,21 @@ pub const BoolArray = struct {
             if (comptime nullables) {
                 v = value orelse {
                     null_count += 1;
-                    view.write(&.{ 255, 255, 255, 255 }); // null,
+                    try writer.writeAll(&.{ 255, 255, 255, 255 }); // null,
                     continue;
                 };
             } else v = value;
 
             // each value is prefixed with a 4 byte length
             if (v) {
-                view.write(&.{ 0, 0, 0, 1, 1 });
+                try writer.writeAll(&.{ 0, 0, 0, 1, 1 });
             } else {
-                view.write(&.{ 0, 0, 0, 1, 0 });
+                try writer.writeAll(&.{ 0, 0, 0, 1, 0 });
             }
         }
 
         if (comptime nullables) {
-            buf.truncate(null_count);
+            writer.end -= null_count;
         }
     }
 };
@@ -691,11 +733,11 @@ pub const BoolArray = struct {
 pub const NumericArray = struct {
     pub const oid = OID.make(1231);
     const encoding = &binary_encoding;
-    fn encode(values: anytype, buf: *buffer.Buffer, oid_pos: usize) !void {
-        buf.writeAt(&Numeric.oid.encoded, oid_pos);
+    fn encode(values: anytype, writer: *Io.Writer, oid_pos: usize) !void {
+        @memcpy(writer.buffer[oid_pos..oid_pos + Numeric.oid.encoded.len], &Numeric.oid.encoded);
 
         for (values) |value| {
-            try Numeric.encodeBuf(value, buf);
+            try Numeric.encodeBuf(value, writer);
         }
     }
 };
@@ -710,21 +752,21 @@ pub const MacAddrArray = struct {
     pub const oid = OID.make(1040);
     const encoding = &binary_encoding;
 
-    fn encode(values: []const []const u8, buf: *buffer.Buffer, format_pos: usize) !void {
+    fn encode(values: []const []const u8, writer: *Io.Writer, format_pos: usize) !void {
         var l: usize = 0;
         for (values) |v| {
             // binary values will be encoded in a 12-byte text representation
             l += if (v.len == 6) 12 else v.len;
         }
 
-        return Encode.writeTextEncodedArray(values, l, buf, format_pos, MacAddrArray.writeOneAsText);
+        return Encode.writeTextEncodedArray(values, l, writer, format_pos, MacAddrArray.writeOneAsText);
     }
 
-    fn writeOneAsText(value: []const u8, buf: *buffer.Buffer) void {
+    fn writeOneAsText(value: []const u8, writer: *Io.Writer) void {
         if (value.len == 6) {
-            buf.interface.print("{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{ value[0], value[1], value[2], value[3], value[4], value[5] }) catch unreachable;
+            writer.print("{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{ value[0], value[1], value[2], value[3], value[4], value[5] }) catch unreachable;
         } else {
-            buf.writeAssumeCapacity(value);
+            try writer.writeAll(value);
         }
     }
 };
@@ -733,7 +775,7 @@ pub const MacAddr8Array = struct {
     pub const oid = OID.make(775);
     const encoding = &binary_encoding;
 
-    fn encode(values: []const []const u8, buf: *buffer.Buffer, format_pos: usize) !void {
+    fn encode(values: []const []const u8, writer: *Io.Writer, format_pos: usize) !void {
         // See comments in MacAddrArray.encode
         var l: usize = 0;
         for (values) |v| {
@@ -741,14 +783,14 @@ pub const MacAddr8Array = struct {
             l += if (v.len == 8) 16 else v.len;
         }
 
-        return Encode.writeTextEncodedArray(values, l, buf, format_pos, MacAddr8Array.writeOneAsText);
+        return Encode.writeTextEncodedArray(values, l, writer, format_pos, MacAddr8Array.writeOneAsText);
     }
 
-    fn writeOneAsText(value: []const u8, buf: *buffer.Buffer) void {
+    fn writeOneAsText(value: []const u8, writer: *Io.Writer) void {
         if (value.len == 8) {
-            buf.interface.print("{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{ value[0], value[1], value[2], value[3], value[4], value[5], value[6], value[7] }) catch unreachable;
+            try writer.print("{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{ value[0], value[1], value[2], value[3], value[4], value[5], value[6], value[7] }) catch unreachable;
         } else {
-            buf.writeAssumeCapacity(value);
+            try writer.writeAll(value);
         }
     }
 };
@@ -757,9 +799,9 @@ pub const ByteaArray = struct {
     pub const oid = OID.make(1001);
     const encoding = &binary_encoding;
 
-    fn encode(values: anytype, buf: *buffer.Buffer, oid_pos: usize) !void {
-        buf.writeAt(&Bytea.oid.encoded, oid_pos);
-        return Encode.writeByteArray(values, buf);
+    fn encode(values: anytype, writer: *Io.Writer, oid_pos: usize) !void {
+        @memcpy(writer.buffer[oid_pos..oid_pos + Bytea.oid.encoded.len], &Bytea.oid.encoded);
+        return Encode.writeByteArray(values, writer);
     }
 };
 
@@ -767,17 +809,17 @@ pub const StringArray = struct {
     pub const oid = OID.make(1009);
     const encoding = &binary_encoding;
 
-    fn encode(values: anytype, buf: *buffer.Buffer, oid_pos: usize) !void {
-        buf.writeAt(&String.oid.encoded, oid_pos);
-        return Encode.writeByteArray(values, buf);
+    fn encode(values: anytype, writer: *Io.Writer, oid_pos: usize) !void {
+        @memcpy(writer.buffer[oid_pos..oid_pos + String.oid.encoded.len], &String.oid.encoded);
+        return Encode.writeByteArray(values, writer);
     }
 
-    fn encodeEnum(values: anytype, buf: *buffer.Buffer, oid_pos: usize) !void {
-        buf.writeAt(&String.oid.encoded, oid_pos);
+    fn encodeEnum(values: anytype, writer: *Io.Writer, oid_pos: usize) !void {
+        @memcpy(writer.buffer[oid_pos..oid_pos + String.oid.encoded.len], &String.oid.encoded);
         for (values.*) |value| {
             const str = @tagName(value);
-            try buf.writeIntBig(i32, @intCast(str.len));
-            try buf.write(str);
+            try writer.writeInt(i32, @intCast(str.len), .big);
+            try writer.writeAll(str);
         }
     }
 };
@@ -786,8 +828,8 @@ pub const UUIDArray = struct {
     pub const oid = OID.make(2951);
     const encoding = &binary_encoding;
 
-    fn encode(values: anytype, buf: *buffer.Buffer, oid_pos: usize) !void {
-        buf.writeAt(&UUID.oid.encoded, oid_pos);
+    fn encode(values: anytype, writer: *Io.Writer, oid_pos: usize) !void {
+        @memcpy(writer.buffer[oid_pos..oid_pos + UUID.oid.encoded.len], &UUID.oid.encoded);
 
         const T = @typeInfo(@TypeOf(values)).pointer.child;
         const TT = switch (@typeInfo(T)) {
@@ -799,27 +841,31 @@ pub const UUIDArray = struct {
         var null_count: usize = 0;
 
         // at most every value is 20 bytes, 4 byte length + 16 byte value
-        var view = try buf.skip(20 * values.len);
+        var i: usize = 0;
+        while (i < 20 * values.len) : (i += 1) {
+            try writer.writeByte(0);
+        }
+
         for (values) |value| {
             var v: TT = undefined;
             if (comptime nullables) {
                 v = value orelse {
                     null_count += 1;
-                    view.write(&.{ 255, 255, 255, 255 });
+                    try writer.writeAll(&.{ 255, 255, 255, 255 });
                     continue;
                 };
             } else v = value;
 
-            view.write(&.{ 0, 0, 0, 16 }); // length of value
+            try writer.writeAll(&.{ 0, 0, 0, 16 }); // length of value
             switch (v.len) {
-                16 => view.write(v),
-                36 => view.write(&(try UUID.toBytes(v))),
+                16 => try writer.writeAll(v),
+                36 => try writer.writeAll(&(try UUID.toBytes(v))),
                 else => return error.InvalidUUID,
             }
         }
 
         if (comptime nullables) {
-            buf.truncate(null_count * 16);
+            writer.end -= null_count * 16;
         }
     }
 };
@@ -828,9 +874,9 @@ pub const JSONArray = struct {
     pub const oid = OID.make(199);
     const encoding = &binary_encoding;
 
-    fn encode(values: anytype, buf: *buffer.Buffer, oid_pos: usize) !void {
-        buf.writeAt(&JSON.oid.encoded, oid_pos);
-        return Encode.writeByteArray(values, buf);
+    fn encode(values: anytype, writer: *Io.Writer, oid_pos: usize) !void {
+        @memcpy(writer.buffer[oid_pos..oid_pos + JSON.oid.encoded.len], &JSON.oid.encoded);
+        return Encode.writeByteArray(values, writer);
     }
 };
 
@@ -838,10 +884,10 @@ pub const JSONBArray = struct {
     pub const oid = OID.make(3807);
     const encoding = &binary_encoding;
 
-    fn encode(values: anytype, buf: *buffer.Buffer, oid_pos: usize) !void {
-        buf.writeAt(&JSONB.oid.encoded, oid_pos);
+    fn encode(values: anytype, writer: *Io.Writer, oid_pos: usize) !void {
+        @memcpy(writer.buffer[oid_pos..oid_pos + JSONB.oid.encoded.len], &JSONB.oid.encoded);
         if (@typeInfo(@typeInfo(@TypeOf(values)).pointer.child) == .optional) {
-            return encodeNullables(values, buf);
+            return encodeNullables(values, writer);
         }
 
         // every value has a 5 byte prefix, a 4 byte length and a 1 byte version
@@ -850,16 +896,19 @@ pub const JSONBArray = struct {
             len += value.len;
         }
 
-        var view = try buf.skip(len);
+        var i: usize = 0;
+        while (i < len) : (i += 1) {
+            try writer.writeByte(0);
+        }
         for (values) |value| {
             // + 1 for the version
-            view.writeIntBig(i32, @intCast(value.len + 1));
-            view.writeByte(1); // version
-            view.write(value);
+            try writer.writeInt(i32, @intCast(value.len + 1), .big);
+            try writer.writeByte(1); // version
+            try writer.writeAll(value);
         }
     }
 
-    fn encodeNullables(values: []const ?[]const u8, buf: *buffer.Buffer) !void {
+    fn encodeNullables(values: []const ?[]const u8, writer: *Io.Writer) !void {
         // every value has a 5 byte prefix, a 4 byte length and a 1 byte version
         var len = values.len * 5;
         for (values) |value| {
@@ -868,15 +917,18 @@ pub const JSONBArray = struct {
             }
         }
 
-        var view = try buf.skip(len);
+        var i: usize = 0;
+        while (i < len) : (i += 1) {
+            try writer.writeByte(0);
+        }
         for (values) |value| {
             if (value) |v| {
                 // + 1 for the version
-                view.writeIntBig(i32, @intCast(v.len + 1));
-                view.writeByte(1); // version
-                view.write(v);
+                try writer.writeInt(i32, @intCast(v.len + 1), .big);
+                try writer.writeByte(1); // version
+                try writer.writeAll(v);
             } else {
-                view.write(&.{ 255, 255, 255, 255 }); // null,
+                try writer.writeAll(&.{ 255, 255, 255, 255 }); // null,
             }
         }
     }
@@ -887,22 +939,25 @@ pub const CharArray = struct {
     const encoding = &binary_encoding;
 
     // This is for a char[] bound to a []u8
-    fn encodeOne(values: []const u8, buf: *buffer.Buffer, oid_pos: usize) !void {
-        buf.writeAt(&Char.oid.encoded, oid_pos);
+    fn encodeOne(values: []const u8, writer: *Io.Writer, oid_pos: usize) !void {
+        @memcpy(writer.buffer[oid_pos..oid_pos + Char.oid.encoded.len], &Char.oid.encoded);
 
         // every value has a 5 byte prefix, a 4 byte length and a 1 byte char
         const len = values.len * 5;
-        var view = try buf.skip(len);
+        var i: usize = 0;
+        while (i < len) : (i += 1) {
+            try writer.writeByte(0);
+        }
         for (values) |value| {
-            view.write(&.{ 0, 0, 0, 1 });
-            view.writeByte(value);
+            try writer.writeAll(&.{ 0, 0, 0, 1 });
+            try writer.writeByte(value);
         }
     }
 
     // This is for a char[] bound to a [][]u8
-    fn encode(values: anytype, buf: *buffer.Buffer, oid_pos: usize) !void {
-        buf.writeAt(&Char.oid.encoded, oid_pos);
-        return Encode.writeByteArray(values, buf);
+    fn encode(values: anytype, writer: *Io.Writer, oid_pos: usize) !void {
+        @memcpy(writer.buffer[oid_pos..oid_pos + Char.oid.encoded.len], &Char.oid.encoded);
+        return Encode.writeByteArray(values, writer);
     }
 };
 
@@ -916,10 +971,13 @@ fn resultEncodingFor(oid: i32) *const [2]u8 {
 
 pub const Encode = struct {
     // helpers for encoding data (or part of the data)
-    pub fn writeIntArray(comptime T: type, values: anytype, buf: *buffer.Buffer) !void {
+    pub fn writeIntArray(comptime T: type, values: anytype, writer: *Io.Writer) !void {
         const size = @sizeOf(T);
         // at most, every value is a 4 byte length + the size of the underlying it
-        var view = try buf.skip((size + 4) * values.len);
+        var i: usize = 0;
+        while (i < (size + 4) * values.len) : (i += 1) {
+            try writer.writeByte(0);
+        }
 
         const nullables = @typeInfo(@typeInfo(@TypeOf(values)).pointer.child) == .optional;
         var null_count: usize = 0;
@@ -932,22 +990,22 @@ pub const Encode = struct {
             if (comptime nullables) {
                 v = value orelse {
                     null_count += 1;
-                    view.write(&.{ 255, 255, 255, 255 }); // null,
+                    try writer.writeAll(&.{ 255, 255, 255, 255 }); // null,
                     continue;
                 };
             } else v = value;
-            view.write(&value_len);
-            view.writeIntBig(T, v);
+            try writer.writeAll(&value_len);
+            try writer.writeInt(T, v, .big);
         }
 
         if (comptime nullables) {
-            buf.truncate(null_count * size);
+            writer.end -= null_count * size;
         }
     }
 
-    pub fn writeByteArray(values: anytype, buf: *buffer.Buffer) !void {
+    pub fn writeByteArray(values: anytype, writer: *Io.Writer) !void {
         if (@typeInfo(@typeInfo(@TypeOf(values)).pointer.child) == .optional) {
-            return writeNullableByteArray(values, buf);
+            return writeNullableByteArray(values, writer);
         }
         // each value has a 4 byte length prefix
         var len = values.len * 4;
@@ -955,14 +1013,17 @@ pub const Encode = struct {
             len += value.len;
         }
 
-        var view = try buf.skip(len);
+        var i: usize = 0;
+        while (i < len) : (i += 1) {
+            try writer.writeByte(0);
+        }
         for (values) |value| {
-            view.writeIntBig(i32, @intCast(value.len));
-            view.write(value);
+            try writer.writeInt(i32, @intCast(value.len), .big);
+            try writer.writeAll(value);
         }
     }
 
-    pub fn writeNullableByteArray(values: []const ?[]const u8, buf: *buffer.Buffer) !void {
+    pub fn writeNullableByteArray(values: []const ?[]const u8, writer: *Io.Writer) !void {
         // each value has a 4 byte length prefix
         var len = values.len * 4;
         for (values) |value| {
@@ -971,131 +1032,128 @@ pub const Encode = struct {
             }
         }
 
-        var view = try buf.skip(len);
+        var i: usize = 0;
+        while (i < len) : (i += 1) {
+            try writer.writeByte(0);
+        }
         for (values) |value| {
             if (value) |v| {
-                view.writeIntBig(i32, @intCast(v.len));
-                view.write(v);
+                try writer.writeInt(i32, @intCast(v.len), .big);
+                try writer.writeAll(v);
             } else {
-                view.write(&.{ 255, 255, 255, 255 });
+                try writer.writeAll(&.{ 255, 255, 255, 255 });
             }
         }
     }
 
-    pub fn variableLengthStart(buf: *buffer.Buffer) !usize {
-        try buf.write(&.{ 0, 0, 0, 0 }); // length placeholder
-        return buf.len();
+    pub fn variableLengthStart(writer: *Io.Writer) !usize {
+        try writer.writeAll(&.{ 0, 0, 0, 0 }); // length placeholder
+        return writer.end;
     }
 
-    pub fn variableLengthFill(buf: *buffer.Buffer, pos: usize) void {
-        const len = buf.len() - pos;
+    pub fn variableLengthFill(writer: *Io.Writer, pos: usize) void {
+        const len = writer.end - pos;
         var encoded_len: [4]u8 = undefined;
         std.mem.writeInt(i32, &encoded_len, @intCast(len), .big);
-        buf.writeAt(&encoded_len, pos - 4);
+        @memcpy(writer.buffer[pos - 4..pos - 4 + encoded_len.len], &encoded_len);
     }
 
-    pub fn writeTextEncodedArray(values: []const []const u8, values_len: usize, buf: *buffer.Buffer, format_pos: usize, writeFn: *const fn ([]const u8, *buffer.Buffer) void) !void {
-        buf.writeAt(&text_encoding, format_pos);
+    pub fn writeTextEncodedArray(values: []const []const u8, writer: *Io.Writer, format_pos: usize, writeFn: *const fn ([]const u8, *Io.Writer) void) !void {
+        @memcpy(writer.buffer[format_pos..format_pos + text_encoding.len], &text_encoding);
         if (values.len == 0) {
             // empty array, with length prefix
-            return buf.write(&.{ 0, 0, 0, 2, '{', '}' });
+            return writer.writeAll(&.{ 0, 0, 0, 2, '{', '}' });
         }
-
-        // We're relying one our caller to give us an accurate values_len
-        // The total value length will be:
-        //  2             + values_len    + values.len
-        //  {} delimiter  + given to us   + ',' delimiter between values
-        const max_len = 2 + values_len + values.len;
-        try buf.ensureUnusedCapacity(max_len);
 
         // our max_len is just an estimate, we'll get the actual length and fill
         // it in later, for now, we skip the length
-        var view = try buf.skip(4);
-        const start = buf.len();
-        buf.writeByteAssumeCapacity('{');
+        var i: usize = 0;
+        while (i > 4) : (i += 1) {
+            try writer.writeByte(0);
+        }
+        const start = writer.end;
+        try writer.writeByte('{');
         for (values) |value| {
-            writeFn(value, buf);
-            buf.writeByteAssumeCapacity(',');
+            writeFn(value, writer);
+            try writer.writeByte(',');
         }
 
         // strip out last comma
-        buf.truncate(1);
-        buf.writeByteAssumeCapacity('}');
+        writer.end -= 1;
+        try writer.writeByte('}');
         // -6 since the oid and the
-        view.writeIntBig(i32, @intCast(buf.len() - start));
+        try writer.writeInt(i32, @intCast(writer.end - start), .big);
     }
 
     // Fairly special case for text-encoded arrays where we _always_ want to quote the value
     // but don't need to escape. This idea is taken from Java's PostgreSQL JDBC driver
     // specificallly for dealing with possible scientific notation in float/numeric text values
-    pub fn writeTextEncodedEscapedArray(values: []const []const u8, buf: *buffer.Buffer, format_pos: usize) !void {
+    pub fn writeTextEncodedEscapedArray(values: []const []const u8, writer: *Io.Writer, format_pos: usize) !void {
         var l: usize = 0;
         for (values) |v| {
             // +2 for the quotes around the value we'll need
             l += v.len + 2;
         }
-        return Encode.writeTextEncodedArray(values, l, buf, format_pos, writeQuotedValue);
+        return Encode.writeTextEncodedArray(values, l, writer, format_pos, writeQuotedValue);
     }
 
-    fn writeQuotedValue(value: []const u8, buf: *buffer.Buffer) void {
-        buf.writeByteAssumeCapacity('"');
-        buf.writeAssumeCapacity(value);
-        buf.writeByteAssumeCapacity('"');
+    fn writeQuotedValue(value: []const u8, writer: *Io.Writer) void {
+        try writer.writeByte('"');
+        try writer.writeAll(value);
+        try writer.writeByte('"');
     }
 
     // Fairly special case for text-encoded arrays where we _always_ want to quote the value
     // but don't need to escape. This idea is taken from Java's PostgreSQL JDBC driver
     // specificallly for dealing with possible scientific notation in float/numeric text values
-    pub fn writeTextEncodedRawArray(values: []const []const u8, buf: *buffer.Buffer, format_pos: usize) !void {
+    pub fn writeTextEncodedRawArray(values: []const []const u8, writer: *Io.Writer, format_pos: usize) !void {
         var l: usize = 0;
         for (values) |v| {
             l += v.len;
         }
-        return Encode.writeTextEncodedArray(values, l, buf, format_pos, writeRawValue);
+        return Encode.writeTextEncodedArray(values, l, writer, format_pos, writeRawValue);
     }
 
-    fn writeRawValue(value: []const u8, buf: *buffer.Buffer) void {
-        buf.writeAssumeCapacity(value);
+    fn writeRawValue(value: []const u8, writer: *Io.Writer) void {
+        try writer.writeAll(value);
     }
 
-    pub fn writeTextEncodedCharArray(values: []const u8, buf: *buffer.Buffer, format_pos: usize) !void {
-        buf.writeAt(&text_encoding, format_pos);
+    pub fn writeTextEncodedCharArray(values: []const u8, writer: *Io.Writer, format_pos: usize) !void {
+        @memcpy(writer.buffer[format_pos..format_pos + text_encoding.len], &text_encoding);
+
         if (values.len == 0) {
             // empty array, with length prefix
-            return buf.write(&.{ 0, 0, 0, 2, '{', '}' });
+            return writer.writeAll(&.{ 0, 0, 0, 2, '{', '}' });
         }
 
-        // 6 = 4-byte length + opening brace + closing brace
-        // v.len * 5 is the max guess about how much room we'll need. 1 byte
-        // per character, delimiter + double quotes + escape
-        const estimated_len: usize = 6 + values.len * 5;
-        try buf.ensureUnusedCapacity(estimated_len);
-
         // skip the length, which we'll fill later
-        var view = try buf.skip(4);
-        const start = buf.len();
+        var i: usize = 0;
+        while (i > 4) : (i += 1) {
+            try writer.writeByte(0);
+        }
+        const start = writer.end;
 
         // https://www.postgresql.org/docs/current/arrays.html#ARRAYS-IO
-        buf.writeByteAssumeCapacity('{');
+        try writer.writeByte('{');
         for (values) |c| {
             if (c == '"' or c == '\\') {
-                buf.writeAssumeCapacity("\"\\");
-                buf.writeByteAssumeCapacity(c);
-                buf.writeByteAssumeCapacity('"');
+                try writer.writeAll("\"\\");
+                try writer.writeByte(c);
+                try writer.writeByte('"');
             } else if (std.ascii.isWhitespace(c) or c == ',' or c == '{' or c == '}' or c == '\\') {
-                buf.writeByteAssumeCapacity('"');
-                buf.writeByteAssumeCapacity(c);
-                buf.writeByteAssumeCapacity('"');
+                try writer.writeByte('"');
+                try writer.writeByte(c);
+                try writer.writeByte('"');
             } else {
-                buf.writeByteAssumeCapacity(c);
+                try writer.writeByte(c);
             }
-            buf.writeByteAssumeCapacity(',');
+            try writer.writeByte(',');
         }
 
         // strip out last comma
-        buf.truncate(1);
-        buf.writeByteAssumeCapacity('}');
-        view.writeIntBig(i32, @intCast(buf.len() - start));
+        writer.end += 1;
+        try writer.writeByte('}');
+        try writer.writeInt(i32, @intCast(writer.end - start), .big);
     }
 };
 
@@ -1274,132 +1332,133 @@ pub fn oidToString(oid: i32) []const u8 {
 
 // The oid is what PG is expecting. In some cases, we'll use that to figure
 // out what to do.
-pub fn bindValue(comptime T: type, oid: i32, value: anytype, buf: *buffer.Buffer, format_pos: usize) !void {
+pub fn bindValue(comptime T: type, oid: i32, value: anytype, writer: Io.Writer, format_pos: usize) !void {
     switch (@typeInfo(T)) {
         .null => {
             // type can stay 0 (text)
             // special length of -1 indicates null, no other data for this value
-            return buf.write(&.{ 255, 255, 255, 255 });
+            return writer.writeAll(&.{ 255, 255, 255, 255 });
         },
         .comptime_int => switch (oid) {
             Int16.oid.decimal => {
                 if (value > 32767 or value < -32768) return error.IntWontFit;
-                return Int16.encode(@intCast(value), buf, format_pos);
+                return Int16.encode(@intCast(value), writer, format_pos);
             },
             Int32.oid.decimal => {
                 if (value > 2147483647 or value < -2147483648) return error.IntWontFit;
-                return Int32.encode(@intCast(value), buf, format_pos);
+                return Int32.encode(@intCast(value), writer, format_pos);
             },
-            Timestamp.oid.decimal, TimestampTz.oid.decimal => return Timestamp.encode(@intCast(value), buf, format_pos),
-            Numeric.oid.decimal => return Numeric.encode(@as(f64, @floatFromInt(value)), buf, format_pos),
+            Timestamp.oid.decimal, TimestampTz.oid.decimal => return Timestamp.encode(@intCast(value), writer, format_pos),
+            Numeric.oid.decimal => return Numeric.encode(@as(f64, @floatFromInt(value)), writer, format_pos),
             Char.oid.decimal => {
                 if (value > 255 or value < 0) return error.IntWontFit;
-                return Char.encode(@intCast(value), buf, format_pos);
+                return Char.encode(@intCast(value), writer, format_pos);
             },
-            Int64.oid.decimal, PgLSN.oid.decimal, Xid8.oid.decimal => return Int64.encode(@intCast(value), buf, format_pos),
+            Int64.oid.decimal, PgLSN.oid.decimal, Xid8.oid.decimal => return Int64.encode(@intCast(value), writer, format_pos),
             else => return error.BindWrongType,
         },
         .int => switch (oid) {
             Int16.oid.decimal => {
                 if (value > 32767 or value < -32768) return error.IntWontFit;
-                return Int16.encode(@intCast(value), buf, format_pos);
+                return Int16.encode(@intCast(value), writer, format_pos);
             },
             Int32.oid.decimal, Xid.oid.decimal => {
                 if (value > 2147483647 or value < -2147483648) return error.IntWontFit;
-                return Int32.encode(@intCast(value), buf, format_pos);
+                return Int32.encode(@intCast(value), writer, format_pos);
             },
-            Timestamp.oid.decimal, TimestampTz.oid.decimal => return Timestamp.encode(@intCast(value), buf, format_pos),
-            Numeric.oid.decimal => return Numeric.encode(@as(f64, @floatFromInt(value)), buf, format_pos),
+            Timestamp.oid.decimal, TimestampTz.oid.decimal => return Timestamp.encode(@intCast(value), writer, format_pos),
+            Numeric.oid.decimal => return Numeric.encode(@as(f64, @floatFromInt(value)), writer, format_pos),
             Char.oid.decimal => {
                 if (value > 255 or value < 0) return error.IntWontFit;
-                return Char.encode(@intCast(value), buf, format_pos);
+                return Char.encode(@intCast(value), writer, format_pos);
             },
             Int64.oid.decimal, PgLSN.oid.decimal, Xid8.oid.decimal => {
                 if (value > 9223372036854775807 or value < -9223372036854775808) {
                     return error.IntWontFit;
                 }
-                return Int64.encode(@intCast(value), buf, format_pos);
+                return Int64.encode(@intCast(value), writer, format_pos);
             },
             else => return error.BindWrongType,
         },
         .comptime_float => switch (oid) {
-            Float64.oid.decimal => return Float64.encode(@floatCast(value), buf, format_pos),
-            Float32.oid.decimal => return Float32.encode(@floatCast(value), buf, format_pos),
-            Numeric.oid.decimal => return Numeric.encode(value, buf, format_pos),
+            Float64.oid.decimal => return Float64.encode(@floatCast(value), writer, format_pos),
+            Float32.oid.decimal => return Float32.encode(@floatCast(value), writer, format_pos),
+            Numeric.oid.decimal => return Numeric.encode(value, writer, format_pos),
             else => return error.BindWrongType,
         },
         .float => switch (oid) {
-            Float64.oid.decimal => return Float64.encode(@floatCast(value), buf, format_pos),
-            Float32.oid.decimal => return Float32.encode(@floatCast(value), buf, format_pos),
-            Numeric.oid.decimal => return Numeric.encode(value, buf, format_pos),
+            Float64.oid.decimal => return Float64.encode(@floatCast(value), writer, format_pos),
+            Float32.oid.decimal => return Float32.encode(@floatCast(value), writer, format_pos),
+            Numeric.oid.decimal => return Numeric.encode(value, writer, format_pos),
             else => return error.BindWrongType,
         },
         .bool => switch (oid) {
-            Bool.oid.decimal => return Bool.encode(value, buf, format_pos),
+            Bool.oid.decimal => return Bool.encode(value, writer, format_pos),
             else => return error.BindWrongType,
         },
         .pointer => |ptr| switch (ptr.size) {
             .slice => {
                 if (ptr.is_const) {
-                    return bindSlice(oid, @as([]const ptr.child, value), buf, format_pos);
+                    return bindSlice(oid, @as([]const ptr.child, value), writer, format_pos);
                 } else {
-                    return bindSlice(oid, @as([]ptr.child, value), buf, format_pos);
+                    return bindSlice(oid, @as([]ptr.child, value), writer, format_pos);
                 }
             },
             .one => switch (@typeInfo(ptr.child)) {
                 .array => {
                     const Slice = []const std.meta.Elem(ptr.child);
-                    return bindSlice(oid, @as(Slice, value), buf, format_pos);
+                    return bindSlice(oid, @as(Slice, value), writer, format_pos);
                 },
                 .@"struct" => switch (oid) {
-                    JSON.oid.decimal => return JSON.encode(value, buf, format_pos),
-                    JSONB.oid.decimal => return JSONB.encode(value, buf, format_pos),
+                    JSON.oid.decimal => return JSON.encode(value, writer, format_pos),
+                    JSONB.oid.decimal => return JSONB.encode(value, writer, format_pos),
                     else => {
                         if (ptr.child != Binary) {
                             return error.CannotBindStruct;
                         }
-                        buf.writeAt(&binary_encoding, format_pos);
-                        try buf.writeIntBig(i32, @intCast(value.data.len));
-                        return buf.write(value.data);
+                        @memcpy(writer.buffer[format_pos..format_pos + binary_encoding.len], &binary_encoding);
+
+                        try writer.writeInt(i32, @intCast(value.data.len), .big);
+                        return writer.writeAll(value.data);
                     },
                 },
                 else => compileHaltBindError(T),
             },
             else => compileHaltBindError(T),
         },
-        .array => return bindValue(@TypeOf(&value), oid, &value, buf, format_pos),
-        .@"struct" => return bindValue(@TypeOf(&value), oid, &value, buf, format_pos),
+        .array => return bindValue(@TypeOf(&value), oid, &value, writer, format_pos),
+        .@"struct" => return bindValue(@TypeOf(&value), oid, &value, writer, format_pos),
         .optional => |opt| {
             if (value) |v| {
-                return bindValue(opt.child, oid, v, buf, format_pos);
+                return bindValue(opt.child, oid, v, writer, format_pos);
             }
             // null
-            return buf.write(&.{ 255, 255, 255, 255 });
+            return writer.writeAll(&.{ 255, 255, 255, 255 });
         },
-        .@"enum", .enum_literal => return String.encode(@tagName(value), buf, format_pos),
+        .@"enum", .enum_literal => return String.encode(@tagName(value), writer, format_pos),
         else => compileHaltBindError(T),
     }
 }
 
-fn bindSlice(oid: i32, value: anytype, buf: *buffer.Buffer, format_pos: usize) !void {
+fn bindSlice(oid: i32, value: anytype, writer: *Io.Writer, format_pos: usize) !void {
     const T = @TypeOf(value);
     if (T == []u8 or T == []const u8) {
         switch (oid) {
-            Bytea.oid.decimal => return Bytea.encode(value, buf, format_pos),
-            UUID.oid.decimal => return UUID.encode(value, buf, format_pos),
-            JSONB.oid.decimal => return JSONB.encodeBytes(value, buf, format_pos),
-            JSON.oid.decimal => return JSON.encodeBytes(value, buf, format_pos),
-            MacAddr.oid.decimal => return MacAddr.encode(value, buf, format_pos),
-            MacAddr8.oid.decimal => return MacAddr8.encode(value, buf, format_pos),
+            Bytea.oid.decimal => return Bytea.encode(value, writer, format_pos),
+            UUID.oid.decimal => return UUID.encode(value, writer, format_pos),
+            JSONB.oid.decimal => return JSONB.encodeBytes(value, writer, format_pos),
+            JSON.oid.decimal => return JSON.encodeBytes(value, writer, format_pos),
+            MacAddr.oid.decimal => return MacAddr.encode(value, writer, format_pos),
+            MacAddr8.oid.decimal => return MacAddr8.encode(value, writer, format_pos),
             CharArray.oid.decimal => {
                 // This is actually an array, and in theory we could let it fallthrough
                 // to the binary-array handling. BUT, if we do that, the code won't compile
                 // because it would mean T can be []u8 or []const u8, and that makes parts
                 // of the code invalid. Also, encoding a char array using the text protocol
                 // is going to be more efficient than encoding it using the binary protocol.
-                return Encode.writeTextEncodedCharArray(value, buf, format_pos);
+                return Encode.writeTextEncodedCharArray(value, writer, format_pos);
             },
-            else => return String.encode(value, buf, format_pos),
+            else => return String.encode(value, writer, format_pos),
         }
     }
 
@@ -1408,10 +1467,10 @@ fn bindSlice(oid: i32, value: anytype, buf: *buffer.Buffer, format_pos: usize) !
     // own text->type conversion.
     if (comptime isStringArray(T)) {
         switch (oid) {
-            TimestampArray.oid.decimal, NumericArray.oid.decimal => return Encode.writeTextEncodedEscapedArray(value, buf, format_pos),
-            TimestampTzArray.oid.decimal, CidrArray.oid.decimal, CidrArray.inet_oid.decimal => return Encode.writeTextEncodedRawArray(value, buf, format_pos),
-            MacAddrArray.oid.decimal => return MacAddrArray.encode(value, buf, format_pos),
-            MacAddr8Array.oid.decimal => return MacAddr8Array.encode(value, buf, format_pos),
+            TimestampArray.oid.decimal, NumericArray.oid.decimal => return Encode.writeTextEncodedEscapedArray(value, writer, format_pos),
+            TimestampTzArray.oid.decimal, CidrArray.oid.decimal, CidrArray.inet_oid.decimal => return Encode.writeTextEncodedRawArray(value, writer, format_pos),
+            MacAddrArray.oid.decimal => return MacAddrArray.encode(value, writer, format_pos),
+            MacAddr8Array.oid.decimal => return MacAddr8Array.encode(value, writer, format_pos),
             else => {}, // fallthrough to binary encoding
         }
     }
@@ -1422,11 +1481,11 @@ fn bindSlice(oid: i32, value: anytype, buf: *buffer.Buffer, format_pos: usize) !
 
     // arrays are always binary encoded (for now...)
 
-    buf.writeAt(&binary_encoding, format_pos);
+    @memcpy(writer.buffer[format_pos..format_pos + binary_encoding.len], &binary_encoding);
 
-    const start_pos = buf.len();
+    const start_pos = writer.end;
 
-    try buf.write(&.{
+    try writer.writeAll(&.{
         0, 0, 0, 0, // placeholder for the length of this parameter
         0, 0, 0, 1, // number of dimensions, for now, we only support one
         0, 0, 0, 0, // bitmask of null, currently, with a single dimension, we don't have null arrays
@@ -1434,11 +1493,11 @@ fn bindSlice(oid: i32, value: anytype, buf: *buffer.Buffer, format_pos: usize) !
     });
 
     // where in buf, to write the OID of the values
-    const oid_pos = buf.len() - 4;
+    const oid_pos = writer.end - 4;
 
     // number of values in our first (and currently only) dimension
-    try buf.writeIntBig(i32, @intCast(value.len));
-    try buf.write(&.{ 0, 0, 0, 1 }); // lower bound of this demension
+    try writer.writeInt(i32, @intCast(value.len), .big);
+    try writer.writeAll(&.{ 0, 0, 0, 1 }); // lower bound of this demension
 
     const ElemT = @typeInfo(T).pointer.child;
     const ElemTT = switch (@typeInfo(ElemT)) {
@@ -1449,63 +1508,64 @@ fn bindSlice(oid: i32, value: anytype, buf: *buffer.Buffer, format_pos: usize) !
         .int => |int| {
             if (int.signedness == .signed) {
                 switch (int.bits) {
-                    16 => try Int16Array.encode(value, buf, oid_pos),
-                    32 => try Int32Array.encode(value, buf, oid_pos),
+                    16 => try Int16Array.encode(value, writer, oid_pos),
+                    32 => try Int32Array.encode(value, writer, oid_pos),
                     64 => {
                         switch (oid) {
-                            TimestampArray.oid.decimal => try TimestampArray.encode(value, buf, oid_pos),
-                            TimestampTzArray.oid.decimal => try TimestampTzArray.encode(value, buf, oid_pos),
-                            else => try Int64Array.encode(value, buf, oid_pos),
+                            TimestampArray.oid.decimal => try TimestampArray.encode(value, writer, oid_pos),
+                            TimestampTzArray.oid.decimal => try TimestampTzArray.encode(value, writer, oid_pos),
+                            else => try Int64Array.encode(value, writer, oid_pos),
                         }
                     },
                     else => compileHaltBindError(T),
                 }
             } else {
                 switch (int.bits) {
-                    8 => try CharArray.encodeOne(value, buf, oid_pos),
-                    16 => try Int16Array.encodeUnsigned(value, buf, oid_pos),
-                    32 => try Int32Array.encodeUnsigned(value, buf, oid_pos),
-                    64 => try Int64Array.encodeUnsigned(value, buf, oid_pos),
+                    8 => try CharArray.encodeOne(value, writer, oid_pos),
+                    16 => try Int16Array.encodeUnsigned(value, writer, oid_pos),
+                    32 => try Int32Array.encodeUnsigned(value, writer, oid_pos),
+                    64 => try Int64Array.encodeUnsigned(value, writer, oid_pos),
                     else => compileHaltBindError(T),
                 }
             }
         },
         .float => |float| {
             if (oid == NumericArray.oid.decimal) {
-                try NumericArray.encode(value, buf, oid_pos);
+                try NumericArray.encode(value, writer, oid_pos);
             } else switch (float.bits) {
-                32 => try Float32Array.encode(value, buf, oid_pos),
-                64 => try Float64Array.encode(value, buf, oid_pos),
+                32 => try Float32Array.encode(value, writer, oid_pos),
+                64 => try Float64Array.encode(value, writer, oid_pos),
                 else => compileHaltBindError(T),
             }
         },
-        .bool => try BoolArray.encode(value, buf, oid_pos),
+        .bool => try BoolArray.encode(value, writer, oid_pos),
         .pointer => |ptr| switch (ptr.size) {
             .slice => switch (ptr.child) {
                 u8 => switch (oid) {
-                    StringArray.oid.decimal => try StringArray.encode(value, buf, oid_pos),
-                    UUIDArray.oid.decimal => try UUIDArray.encode(value, buf, oid_pos),
-                    JSONBArray.oid.decimal => try JSONBArray.encode(value, buf, oid_pos),
-                    JSONArray.oid.decimal => try JSONArray.encode(value, buf, oid_pos),
-                    CharArray.oid.decimal => try CharArray.encode(value, buf, oid_pos),
+                    StringArray.oid.decimal => try StringArray.encode(value, writer, oid_pos),
+                    UUIDArray.oid.decimal => try UUIDArray.encode(value, writer, oid_pos),
+                    JSONBArray.oid.decimal => try JSONBArray.encode(value, writer, oid_pos),
+                    JSONArray.oid.decimal => try JSONArray.encode(value, writer, oid_pos),
+                    CharArray.oid.decimal => try CharArray.encode(value, writer, oid_pos),
                     // we try this as a default to support user defined types with unknown oids
                     // (like an array of enums)
-                    else => try ByteaArray.encode(value, buf, oid_pos),
+                    else => try ByteaArray.encode(value, writer, oid_pos),
                 },
                 else => compileHaltBindError(T),
             },
             else => compileHaltBindError(T),
         },
-        .@"enum", .enum_literal => try StringArray.encodeEnum(&value, buf, oid_pos),
-        .array => try bindSlice(oid, &value, buf, format_pos),
+        .@"enum", .enum_literal => try StringArray.encodeEnum(&value, writer, oid_pos),
+        .array => try bindSlice(oid, &value, writer, format_pos),
         else => compileHaltBindError(T),
     }
 
     var param_len: [4]u8 = undefined;
     // write the lenght of the parameter, -4 because for paremeters, the length
     // prefix itself isn't included.
-    std.mem.writeInt(i32, &param_len, @intCast(buf.len() - start_pos - 4), .big);
-    buf.writeAt(&param_len, start_pos);
+    std.mem.writeInt(i32, &param_len, @intCast(writer.end - start_pos - 4), .big);
+
+    @memcpy(writer.buffer[start_pos..start_pos + param_len.len], &param_len);
 }
 
 fn isStringArray(comptime T: type) bool {
@@ -1523,18 +1583,22 @@ fn isStringArray(comptime T: type) bool {
 
 // Write the last part of the Bind message: telling postgresql how it should
 // encode each column of the response
-pub fn resultEncoding(oids: []i32, buf: *buffer.Buffer) !void {
+pub fn resultEncoding(oids: []i32, writer: *Io.Writer) !void {
     if (oids.len == 0) {
-        return buf.write(&.{ 0, 0 }); // we are specifying 0 return types
+        return writer.writeAll(&.{ 0, 0 }); // we are specifying 0 return types
     }
 
     // 2 bytes for the # of columns we're specifying + 2 bytes per column
     const space_needed = 2 + oids.len * 2;
-    var view = try buf.skip(space_needed);
 
-    view.writeIntBig(u16, @intCast(oids.len));
+    var i: usize = 0;
+    while (i < space_needed) : (i += 1) {
+        writer.writeByte(0);
+    }
+
+    writer.writeInt(u16, @intCast(oids.len), .big);
     for (oids) |oid| {
-        view.write(resultEncodingFor(oid));
+        writer.writeAll(resultEncodingFor(oid));
     }
 }
 
