@@ -174,7 +174,9 @@ const MockPgClient = struct {
     responses: []pg_client.ReadResponse,
     read_response_index: ?u8,
 
-    conn_opts: void,
+    pool_opts: void,
+    wal_opts: void,
+
     wal_conn: *bool,
 
     pub fn init(allocator: mem.Allocator, io: Io, responses: []pg_client.ReadResponse) !MockPgClient {
@@ -185,7 +187,8 @@ const MockPgClient = struct {
             .io = io,
             .responses = responses,
             .read_response_index = null,
-            .conn_opts = {},
+            .pool_opts = {},
+            .wal_opts = {},
             .wal_conn = conn,
         };
     }

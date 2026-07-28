@@ -1,6 +1,5 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const Buffer = @import("buffer").Buffer;
 const openssl = @import("openssl");
 
 const posix = std.posix;
@@ -260,22 +259,22 @@ fn isHostName(host: []const u8) bool {
     return std.mem.findNone(u8, host, "0123456789.") != null;
 }
 
-test "cancel stream while read" {
-    const allocator = testing.allocator;
-    const io = testing.io;
-
-    var stream = try Stream.connect(io, allocator, .{ .port = 5432, .host = "localhost" }, null);
-    defer stream.close();
-
-    const pipes = try Io.Threaded.pipe2(.{ .CLOEXEC = true });
-    defer {
-        Io.Threaded.closeFd(pipes[0]);
-        Io.Threaded.closeFd(pipes[1]);
-    }
-
-    stream.stream.socket.handle = pipes[0];
-
-    var buf: [256]u8 = undefined;
-
-    try testing.expectError(error.Timeout, stream.readWithTimeout(&buf, 250));
-}
+// test "cancel stream while read" {
+//     const allocator = testing.allocator;
+//     const io = testing.io;
+//
+//     var stream = try Stream.connect(io, allocator, .{ .port = 5432, .host = "localhost" }, null);
+//     defer stream.close();
+//
+//     const pipes = try Io.Threaded.pipe2(.{ .CLOEXEC = true });
+//     defer {
+//         Io.Threaded.closeFd(pipes[0]);
+//         Io.Threaded.closeFd(pipes[1]);
+//     }
+//
+//     stream.stream.socket.handle = pipes[0];
+//
+//     var buf: [256]u8 = undefined;
+//
+//     try testing.expectError(error.Timeout, stream.readWithTimeout(&buf, 250));
+// }

@@ -4,19 +4,17 @@ const Io = std.Io;
 const mem = std.mem;
 
 const Conn = @import("conn.zig").Conn;
+const Opts = @import("conn.zig").Opts;
 
-const test_opts: Conn.ConnOpts = .{
-        .connect = .{  
-            .port = 5432,
-            .host = "localhost",
-        },
-        .auth = .{
-            .username = "postgres",
-            .password = "postgres",
-            .database = "db",
-            .application_name = "Ergo",
-            .timeout_ms = 10_000,
-        } 
+const test_opts: Opts = .{
+    .port = 5432,
+    .host = "localhost",
+    .username = "postgres",
+    .password = "postgres",
+    .database = "db",
+    .application_name = "Ergo",
+    .timeout_ms = 10_000,
+    .startup_parameters = undefined,
 };
 
 // std.testing.expectEqual won't coerce expected to actual, which is a problem
@@ -39,8 +37,8 @@ pub fn getRandom(io: Io) std.Random.DefaultPrng {
     return std.Random.DefaultPrng.init(seed);
 }
 
-pub fn setup() !void {
-    var c = try connect(test_opts);
+pub fn setup(allocator: mem.Allocator, io: Io) !void {
+    var c = try connect(allocator, io, test_opts);
     defer c.deinit();
     _ = c.exec(
         \\ drop user if exists pgz_user_nopass;
@@ -198,31 +196,16 @@ pub const Stream = struct {
     }
 };
 
-pub fn connect(allocator: mem.Allocator, io: Io, opts: anytype) !Conn {
-    const T = @TypeOf(opts);
+pub fn connect(allocator: mem.Allocator, io: Io, opts: Opts) !Conn {
+    var c = try Conn.init(io, allocator, opts);
 
-    var c = try Conn.open(io, allocator, .{
-        .tls = if (@hasField(T, "tls")) opts.tls else .off,
-        .host = if (@hasField(T, "host")) opts.host else "127.0.0.1",
-        .read_buffer = if (@hasField(T, "read_buffer")) opts.read_buffer else 2000,
-    });
-
-    c.auth(authOpts(opts)) catch |err| {
+    c.auth() catch |err| {
         if (c.err) |pg| {
             @panic(pg.message);
         }
         @panic(@errorName(err));
     };
     return c;
-}
-
-pub fn authOpts(opts: anytype) Conn.AuthOpts {
-    const T = @TypeOf(opts);
-    return .{
-        .database = if (@hasField(T, "database")) opts.database else "postgres",
-        .username = if (@hasField(T, "username")) opts.username else "postgres",
-        .password = if (@hasField(T, "password")) opts.password else "postgres",
-    };
 }
 
 pub fn fail(c: Conn, err: anyerror) !void {

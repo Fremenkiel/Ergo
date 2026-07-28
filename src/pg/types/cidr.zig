@@ -1,5 +1,4 @@
 const std = @import("std");
-const buffer = @import("buffer");
 const types = @import("../types.zig");
 
 const assert = std.debug.assert;

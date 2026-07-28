@@ -282,7 +282,7 @@ pub const PgClient = struct {
                 return response;
             },
             'E' => {
-                const pg_err = pg.Error.parse(msg.data);
+                const pg_err = pg.Error.init(msg.data);
                 const err_msg = try std.fmt.allocPrint(self.allocator, "Error from server! Code: {s}, Message: {s}\n", .{pg_err.code, pg_err.message});
                 try std.Io.File.stderr().writeStreamingAll(self.io, err_msg);
                 return PgClientError.PostgresReplicationError;
@@ -824,7 +824,8 @@ test "parsePgOutput maps RELATION correctly" {
             .password = "12345678",
             .database = "db",
             .timeout_ms = 500,
-            .startup_parameters = startup_parameters
+            .startup_parameters = startup_parameters,
+            .application_name = "Ergo test",
         }),
     };
     defer client.deinit();
@@ -1131,7 +1132,8 @@ test "readSchemaKeys" {
             .password = "12345678",
             .database = "db",
             .timeout_ms = 500,
-            .startup_parameters = startup_parameters
+            .startup_parameters = startup_parameters,
+            .application_name = "Ergo test",
         }),
         .table_reg = undefined,
         .wal_conn = null,

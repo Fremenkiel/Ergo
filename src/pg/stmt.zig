@@ -6,7 +6,6 @@ const mem = std.mem;
 const assert = std.debug.assert;
 
 const types = @import("types.zig");
-const metrics = @import("metrics.zig");
 
 const Conn = @import("conn.zig").Conn;
 const Result = @import("result.zig").Result;
@@ -263,7 +262,7 @@ pub const Stmt = struct {
         try w.writeInt(u16, param_count, .big);
     }
 
-    pub fn bind(self: *@This(), value: anytype) !void {
+    pub fn bind(self: *@This(), writer: *Io.Writer, value: anytype) !void {
         const name = self.name;
 
         const param_index = self.param_index;
@@ -274,30 +273,29 @@ pub const Stmt = struct {
         // and each value is 2 bytes.
         const format_offset = 9 + (param_index * 2) + name.len;
 
-        try types.bindValue(@TypeOf(value), self.param_oids[param_index], value, self.buf, format_offset);
+        try types.bindValue(@TypeOf(value), self.param_oids[param_index], value, writer, format_offset);
         self.param_index = param_index + 1;
     }
 
-    pub fn execute(self: *@This()) !*Result {
+    pub fn execute(self: *@This(), writer: *Io.Writer) !*Result {
         assert(self.param_index == self.param_count);
 
         // We haven't sent our `bind` message yet. We need to finish it, and then
         // send it, along with our `Execute` and a final `Sync` message.
 
-        const buf = self.buf;
         const conn = self.conn;
 
         // The last part of the bind message is telling PostgreSQL the format we
         // want to receive the result columns in.
-        try types.resultEncoding(self.result_state.oids[0..self.column_count], buf);
+        try types.resultEncoding(self.result_state.oids[0..self.column_count], writer);
 
         // write the full payload length, which always starts at byte 1 (after
         // the 'B' message type)
         // Reaching directly into buf.buf is bad!
         // -1 because the length doesn't include the 'B'
-        std.mem.writeInt(u32, buf.buf[1..5], @intCast(buf.len() - 1), .big);
+        std.mem.writeInt(u32, writer.buffer[1..5], @intCast(writer.end - 1), .big);
 
-        try buf.write(&.{
+        try writer.writeAll(&.{
             'E',
             // message length
             0,
@@ -320,8 +318,7 @@ pub const Stmt = struct {
             4,
         });
 
-        try conn.write(buf.string());
-
+        try writer.flush();
         {
             const msg = conn.read() catch |err| {
                 if (err == error.PG) try conn.recoverFromError();
@@ -338,8 +335,6 @@ pub const Stmt = struct {
         // our call to readyForQuery above changed the state, but as far as we're
         // concerned, we're still doing the query.
         conn.state = .query;
-
-        metrics.query();
 
         const opts = &self.opts;
         const state = self.result_state;

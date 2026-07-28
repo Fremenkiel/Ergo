@@ -161,8 +161,8 @@ pub const PasswordMessage = struct {
     }
 };
 
-const CommandComplete = struct {
-    pub fn parse(buf: []const u8) ![]const u8 {
+pub const CommandComplete = struct {
+    pub fn parse(buf: []const u8) !?i64 {
         assert(buf[buf.len - 1] == 0);
 
         const end = buf.len - 2;

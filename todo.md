@@ -16,3 +16,4 @@ Remove buffer lib
 
 w.Write needs SSL handling
 Make sure prepareForBind works:
+Drop pool
