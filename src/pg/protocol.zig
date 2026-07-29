@@ -7,16 +7,21 @@ const testing = std.testing;
 const assert = std.debug.assert;
 
 const conn = @import("conn.zig");
+const Stream = @import("stream.zig").Stream;
+
+const user_key = "user";
+const database_key = "database";
+const application_name_key = "application_name";
 
 pub const StartupMessage = struct {
     const startup_message_protocol: []const u8 = &[_]u8{ 0, 3, 0, 0 };
 
-    pub fn write(allocator: mem.Allocator, io: Io, stream: Io.net.Stream, opts: conn.Opts) !void {
+    pub fn write(allocator: mem.Allocator, stream: *Stream, opts: conn.Opts) !void {
         var payload_len: u64 = 4 + 1; // len + end zero
         payload_len += startup_message_protocol.len;
-        payload_len += "user".len + opts.username.len + 2;
-        payload_len += "database".len + opts.database.len + 2;
-        payload_len += "application_name".len + opts.application_name.len + 2;
+        payload_len += user_key.len + opts.username.len + 2;
+        payload_len += database_key.len + opts.database.len + 2;
+        payload_len += application_name_key.len + opts.application_name.len + 2;
 
         var it = opts.startup_parameters.iterator();
         while (it.next()) |kv| {
@@ -28,42 +33,41 @@ pub const StartupMessage = struct {
         buf = try allocator.alloc(u8, payload_len);
         defer allocator.free(buf);
 
-        var writer = stream.writer(io, buf);
-        const w = &writer.interface;
+        var writer = Io.Writer.fixed(buf);
 
-        try w.writeInt(u32, @intCast(payload_len), .big);
-        try w.writeAll(startup_message_protocol);
+        try writer.writeInt(u32, @intCast(payload_len), .big);
+        try writer.writeAll(startup_message_protocol);
 
-        try w.writeAll("user");
-        try w.writeByte(0);
-        try w.writeAll(opts.username);
-        try w.writeByte(0);
+        try writer.writeAll(user_key);
+        try writer.writeByte(0);
+        try writer.writeAll(opts.username);
+        try writer.writeByte(0);
 
-        try w.writeAll("database");
-        try w.writeByte(0);
-        try w.writeAll(opts.database);
-        try w.writeByte(0);
+        try writer.writeAll(database_key);
+        try writer.writeByte(0);
+        try writer.writeAll(opts.database);
+        try writer.writeByte(0);
 
-        try w.writeAll("application_name");
-        try w.writeByte(0);
-        try w.writeAll(opts.application_name);
-        try w.writeByte(0);
+        try writer.writeAll(application_name_key);
+        try writer.writeByte(0);
+        try writer.writeAll(opts.application_name);
+        try writer.writeByte(0);
 
         it = opts.startup_parameters.iterator();
         while (it.next()) |kv| {
-            try w.writeAll(kv.key_ptr.*);
-            try w.writeByte(0);
-            try w.writeAll(kv.value_ptr.*);
-            try w.writeByte(0);
+            try writer.writeAll(kv.key_ptr.*);
+            try writer.writeByte(0);
+            try writer.writeAll(kv.value_ptr.*);
+            try writer.writeByte(0);
         }
-        try w.writeByte(0);
+        try writer.writeByte(0);
 
-        try w.flush();
+        try stream.writeAll(buf);
     }
 };
 
 pub const SASLResponse = struct {
-    pub fn write(allocator: mem.Allocator, io: Io, stream: Io.net.Stream, data: []const u8) !void {
+    pub fn write(allocator: mem.Allocator, stream: *Stream, data: []const u8) !void {
         // 4 +   N
         // len + $data
         const payload_len = 4 + data.len;
@@ -74,19 +78,22 @@ pub const SASLResponse = struct {
         buf = try allocator.alloc(u8, total_length);
         allocator.free(buf);
 
-        var writer = stream.writer(io, buf);
-        const w = &writer.interface;
+        var writer = Io.Writer.fixed(buf);
 
-        try w.writeByte('p');
-        try w.writeInt(u32, @intCast(payload_len), .big);
-        try w.writeAll(data);
+        try writer.writeByte('p');
+        try writer.writeInt(u32, @intCast(payload_len), .big);
+        try writer.writeAll(data);
 
-        try w.flush();
+        assert(total_length == @sizeOf(u8) + @sizeOf(u32) + data.len);
+        assert(buf.len == total_length);
+        assert(buf[0] == 'p');
+
+        try stream.writeAll(buf);
     }
 };
 
 pub const SASLInitialResponse = struct {
-    pub fn write(allocator: mem.Allocator, io: Io, stream: Io.net.Stream, response: []const u8, mechanism: []const u8) !void {
+    pub fn write(allocator: mem.Allocator, stream: *Stream, response: []const u8, mechanism: []const u8) !void {
         // 4 +   M          + 1 + 4             + R
         // len + $mechanism + 0 + $response.len + $response
         const payload_len = 9 + mechanism.len + response.len;
@@ -97,22 +104,28 @@ pub const SASLInitialResponse = struct {
         buf = try allocator.alloc(u8, total_length);
         defer allocator.free(buf);
 
-        var writer = stream.writer(io, buf);
-        const w = &writer.interface;
+        var writer = Io.Writer.fixed(buf);
 
-        try w.writeByte('p');
-        try w.writeInt(u32, @intCast(payload_len), .big);
-        try w.writeAll(mechanism);
-        try w.writeByte(0);
-        try w.writeInt(u32, @intCast(response.len), .big);
-        try w.writeAll(response);
+        try writer.writeByte('p');
+        try writer.writeInt(u32, @intCast(payload_len), .big);
+        try writer.writeAll(mechanism);
+        try writer.writeByte(0);
+        try writer.writeInt(u32, @intCast(response.len), .big);
+        try writer.writeAll(response);
 
-        try w.flush();
+        assert(total_length == @sizeOf(u8) + @sizeOf(u32) + mechanism.len + @sizeOf(u8) + @sizeOf(u32) + response.len);
+        assert(buf.len == total_length);
+        assert(buf[0] == 'p');
+
+        // -1 for index offset, +1 for the next byte.
+        assert(buf[@sizeOf(u8) + @sizeOf(u32) + mechanism.len] == 0);
+
+        try stream.writeAll(buf);
     }
 };
 
 pub const Query = struct {
-    pub fn write(allocator: mem.Allocator, io: Io, stream: Io.net.Stream, sql: []const u8) !void {
+    pub fn write(allocator: mem.Allocator, stream: *Stream, sql: []const u8) !void {
         // 4   + S    + 1
         // len + $sql + 0
         const payload_len = 5 + sql.len;
@@ -124,20 +137,24 @@ pub const Query = struct {
         buf = try allocator.alloc(u8, total_length);
         defer allocator.free(buf);
 
-        var writer = stream.writer(io, buf);
-        var w = &writer.interface;
+        var writer = Io.Writer.fixed(buf);
 
-        try w.writeByte('Q');
-        try w.writeInt(u32, @intCast(payload_len), .big);
-        try w.writeAll(sql);
-        try w.writeByte(0);
+        try writer.writeByte('Q');
+        try writer.writeInt(u32, @intCast(payload_len), .big);
+        try writer.writeAll(sql);
+        try writer.writeByte(0);
 
-        try w.flush();
+        assert(total_length == @sizeOf(u8) + @sizeOf(u32) + sql.len + @sizeOf(u8));
+        assert(buf.len == total_length);
+        assert(buf[0] == 'Q');
+        assert(buf[buf.len - 1] == 0);
+
+        try stream.writeAll(buf);
     }
 };
 
 pub const PasswordMessage = struct {
-    pub fn write(allocator: mem.Allocator, io: Io, stream: Io.net.Stream, password: []const u8) !void {
+    pub fn write(allocator: mem.Allocator, stream: *Stream, password: []const u8) !void {
         // +4 since the payload length includes the length itself
         // +1 for null terminated string
         const payload_len = password.len + 5;
@@ -149,20 +166,25 @@ pub const PasswordMessage = struct {
         buf = try allocator.alloc(u8, total_length);
         defer allocator.free(buf);
 
-        var writer = stream.writer(io, buf);
-        var w = &writer.interface;
+        var writer = Io.Writer.fixed(buf);
 
-        try w.writeByte('p');
-        try w.writeInt(u32, @intCast(payload_len), .big);
-        try w.writeAll(password);
-        try w.writeByte(0);
+        try writer.writeByte('p');
+        try writer.writeInt(u32, @intCast(payload_len), .big);
+        try writer.writeAll(password);
+        try writer.writeByte(0);
 
-        try w.flush();
+        assert(total_length == @sizeOf(u8) + @sizeOf(u32) + password.len + @sizeOf(u8));
+        assert(buf.len == total_length);
+        assert(buf[0] == 'p');
+        assert(buf[buf.len - 1] == 0);
+
+        try stream.writeAll(buf);
     }
 };
 
 pub const CommandComplete = struct {
     pub fn parse(buf: []const u8) !?i64 {
+        assert(buf.len > 0);
         assert(buf[buf.len - 1] == 0);
 
         const end = buf.len - 2;
@@ -194,6 +216,8 @@ pub const AuthenticationRequest = union(enum) {
     };
 
     pub fn parse(buf: []const u8) !AuthenticationRequest {
+        assert(buf.len >= 4);
+
         const code = std.mem.readInt(u32, buf[0..4][0..4], .big);
         switch (code) {
             0 => return .{ .ok = {} }, // authentication ok
@@ -204,11 +228,19 @@ pub const AuthenticationRequest = union(enum) {
                 if (buf.len != 8) {
                     return error.NoMoreData;
                 }
-                return .{ .md5 = buf[5..] };
+                const md5 = buf[4..];
+
+                assert(@sizeOf(@TypeOf(code)) + md5.len == buf.len);
+
+                return .{ .md5 = md5 };
             },
             10 => {
                 var sasl = SASL{};
-                while (readOptionalString(buf[5..])) |auth_mechanism| {
+                const str = buf[4..];
+
+                assert(@sizeOf(@TypeOf(code)) + str.len == buf.len);
+
+                if (readOptionalString(str)) |auth_mechanism| {
                     if (std.ascii.eqlIgnoreCase(auth_mechanism, "SCRAM-SHA-256")) {
                         sasl.scram_sha_256 = true;
                     } else if (std.ascii.eqlIgnoreCase(auth_mechanism, "SCRAM-SHA-256-PLUS")) {
@@ -224,28 +256,46 @@ pub const AuthenticationRequest = union(enum) {
 
 pub const AuthenticationSASLFinal = struct {
     pub fn parse(buf: []const u8) ![]const u8 {
+        assert(buf.len > 4);
+
         const code = std.mem.readInt(u32, buf[0..4][0..4], .big);
 
         assert(code == 12);
 
-        return buf[5..];
+        const msg = buf[4..];
+
+        assert(@sizeOf(@TypeOf(code)) + msg.len == buf.len);
+
+        return msg;
     }
 };
 
 pub const AuthenticationSASLContinue = struct {
     pub fn parse(buf: []const u8) ![]const u8 {
+        assert(buf.len > 4);
+
         const code = std.mem.readInt(u32, buf[0..4][0..4], .big);
 
         assert(code == 11);
 
-        return buf[5..];
+        const msg = buf[4..];
+
+        assert(@sizeOf(@TypeOf(code)) + msg.len == buf.len);
+
+        return msg;
     }
 };
 
 pub fn readOptionalString(buf: []const u8) ?[]const u8 {
+    assert(buf.len > 0);
     const index = std.mem.indexOfScalarPos(u8, buf, 0, 0) orelse return null;
 
+    assert(index > 0);
+
     const value = buf[0..index];
+
+    assert(value.len <= buf.len);
+
     return value;
 }
 

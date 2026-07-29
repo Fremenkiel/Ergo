@@ -120,4 +120,26 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_ch_tests.step);
     test_step.dependOn(&run_pg_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+
+    // Test conn
+    const debug_exe = b.addExecutable(.{
+        .name = "debug ergo",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("debug.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    debug_exe.root_module.addImport("ch", ch_module);
+    debug_exe.root_module.addImport("pg", pg_module);
+    b.installArtifact(debug_exe);
+    const debug_step = b.step("debug", "Run the app in debug mode");
+    const debug_cmd = b.addRunArtifact(debug_exe);
+    debug_step.dependOn(&debug_cmd.step);
+    debug_cmd.step.dependOn(b.getInstallStep());
+
+    if (b.args) |args| {
+        debug_cmd.addArgs(args);
+    }
+
 }

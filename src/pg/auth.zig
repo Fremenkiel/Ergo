@@ -58,7 +58,8 @@ pub const Auth = struct {
         };
 
         // write our startup message
-        try protocol.StartupMessage.write(self.allocator, self.io, self.stream.stream, self.opts);
+        try protocol.StartupMessage.write(self.allocator, self.stream, self.opts);
+        std.debug.print("sent startup message\n", .{});
 
         const init_msg = try self.reader.next();
         switch (init_msg.type) {
@@ -69,6 +70,7 @@ pub const Auth = struct {
             },
             else => return AuthError.UnexpectedDBMessage,
         }
+        std.debug.print("read init message\n", .{});
 
         switch (try protocol.AuthenticationRequest.parse(init_msg.data)) {
             .ok => return,
@@ -78,6 +80,7 @@ pub const Auth = struct {
             .md5 => |salt| try self.md5PasswordAuth(salt),
             .password => try self.passwordAuth(self.opts.password orelse ""),
         }
+        std.debug.print("parsed auth request\n", .{});
 
         const final_msg = try self.reader.next();
         switch (final_msg.type) {
@@ -88,6 +91,7 @@ pub const Auth = struct {
             },
             else => return AuthError.UnexpectedDBMessage,
         }
+        std.debug.print("read final message\n", .{});
 
         switch (try protocol.AuthenticationRequest.parse(final_msg.data)) {
             .ok => return,
@@ -96,15 +100,14 @@ pub const Auth = struct {
     }
 
     fn saslAuth(self: *@This(), req: protocol.AuthenticationRequest.SASL) !void {
+        std.debug.print("handling sasl auth\n", .{});
         if (!req.scram_sha_256) {
             return AuthError.UnexpectedDBMessage;
         }
-        var sasl_buf: [1024]u8 = undefined;
-        var fba = std.heap.FixedBufferAllocator.init(&sasl_buf);
-        var sasl = try SASL.init(self.io, fba.allocator());
+        var sasl = try SASL.init(self.io, self.allocator);
 
         // send the client initial response
-        try protocol.SASLInitialResponse.write(self.allocator, self.io, self.stream.stream, sasl.client_first_message, "SCRAM-SHA-256");
+        try protocol.SASLInitialResponse.write(self.allocator, self.stream, sasl.client_first_message, "SCRAM-SHA-256");
 
         // read the server continue response
         const init_msg = try self.reader.next();
@@ -121,7 +124,7 @@ pub const Auth = struct {
 
         // send the client final response
         const client_final_message = try sasl.clientFinalMessage(self.opts.password orelse "");
-        try protocol.SASLResponse.write(self.allocator, self.io, self.stream.stream, client_final_message);
+        try protocol.SASLResponse.write(self.allocator, self.stream, client_final_message);
 
         // read the server final response
         const msg = try self.reader.next();
@@ -138,6 +141,7 @@ pub const Auth = struct {
     }
 
     fn md5PasswordAuth(self: *@This(), salt: []const u8) !void {
+        std.debug.print("handling md5 auth\n", .{});
         var hash: [16]u8 = undefined;
 
         var hasher = std.crypto.hash.Md5.init(.{});
@@ -158,7 +162,7 @@ pub const Auth = struct {
     }
 
     fn passwordAuth(self: *@This(), password: []const u8) !void {
-        try protocol.PasswordMessage.write(self.allocator, self.io, self.stream.stream, password);
+        try protocol.PasswordMessage.write(self.allocator, self.stream, password);
     }
 };
 

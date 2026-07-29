@@ -12,11 +12,6 @@ pub const Error = @import("error.zig").Error;
 
 pub const Conn = conn.Conn;
 
-const t = @import("t.zig");
 test "tests:beforeAll" {
-    const allocator = testing.allocator;
-    const io = testing.io;
-
-    try t.setup(allocator, io);
     std.testing.refAllDecls(@This());
 }

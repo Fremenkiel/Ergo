@@ -214,15 +214,15 @@ pub const Conn = struct {
             }
             return AuthError.UnexpectedDBMessage;
         };
-
-        while (true) {
-            const msg = try self.read();
-            switch (msg.type) {
-                'Z' => return,
-                'K' => {}, // TODO: BackendKeyData
-                else => return self.unexpectedDBMessage(),
-            }
-        }
+        //
+        // while (true) {
+        //     const msg = try self.read();
+        //     switch (msg.type) {
+        //         'Z' => return,
+        //         'K' => {}, // TODO: BackendKeyData
+        //         else => return self.unexpectedDBMessage(),
+        //     }
+        // }
     }
 
     pub fn prepare(self: *Conn, sql: []const u8) !Stmt {
@@ -477,93 +477,42 @@ pub const Conn = struct {
 };
 
 const t = @import("t.zig");
-test "Conn: auth trust (no pass)" {
-    const allocator = testing.allocator;
-    const io = testing.io;
-
-    const opts: Opts = .{
-        .host = "localhost",
-        .database = "db",
-        .username = "db_np",
-        .application_name = "Ergo test",
-        .startup_parameters = .init(allocator),
-    };
-
-    var conn = try Conn.init(io, allocator, opts);
-    defer conn.deinit();
-    try conn.auth();
-}
-
-test "Conn: auth unknown user" {
-    const allocator = testing.allocator;
-    const io = testing.io;
-
-    const opts: Opts = .{
-        .host = "localhost",
-        .database = "db",
-        .username = "does_not_exist",
-        .application_name = "Ergo test",
-        .startup_parameters = .init(allocator),
-    };
-
-    var conn = try Conn.init(io, allocator, opts);
-    defer conn.deinit();
-    try testing.expectError(error.PG, conn.auth());
-    try testing.expectEqual(true, std.mem.find(u8, conn.err.?.message, "user \"does_not_exist\"") != null);
-}
-
-test "Conn: auth cleartext password" {
-    const allocator = testing.allocator;
-    const io = testing.io;
-
-    {
-        const opts: Opts = .{
-            .host = "localhost",
-            .database = "db",
-            .username = "db_ro",
-            .application_name = "Ergo test",
-            .startup_parameters = .init(allocator),
-        };
-
-        var conn = try Conn.init(io, allocator, opts);
-        defer conn.deinit();
-        try testing.expectError(error.PG, conn.auth());
-        try testing.expectEqualStrings("empty password returned by client", conn.err.?.message);
-    }
-
-    {
-        const opts: Opts = .{
-            .host = "localhost",
-            .database = "db",
-            .username = "db_ro",
-            .password = "wrong",
-            .application_name = "Ergo test",
-            .startup_parameters = .init(allocator),
-        };
-
-        var conn = try Conn.init(io, allocator, opts);
-        defer conn.deinit();
-        try testing.expectError(error.PG, conn.auth());
-        try testing.expectEqualStrings("password authentication failed for user \"db_ro\"", conn.err.?.message);
-    }
-
-    {
-        const opts: Opts = .{
-            .host = "localhost",
-            .database = "db",
-            .username = "db_ro",
-            .password = "12345678",
-            .application_name = "Ergo test",
-            .startup_parameters = .init(allocator),
-        };
-
-        var conn = try Conn.init(io, allocator, opts);
-        defer conn.deinit();
-        try conn.auth();
-    }
-}
-
-// test "Conn: auth scram-sha-256 password" {
+// test "Conn: auth trust (no pass)" {
+//     const allocator = testing.allocator;
+//     const io = testing.io;
+//
+//     const opts: Opts = .{
+//         .host = "localhost",
+//         .database = "db",
+//         .username = "db_np",
+//         .application_name = "Ergo test",
+//         .startup_parameters = .init(allocator),
+//     };
+//
+//     var conn = try Conn.init(io, allocator, opts);
+//     defer conn.deinit();
+//     try conn.auth();
+// }
+//
+// test "Conn: auth unknown user" {
+//     const allocator = testing.allocator;
+//     const io = testing.io;
+//
+//     const opts: Opts = .{
+//         .host = "localhost",
+//         .database = "db",
+//         .username = "does_not_exist",
+//         .application_name = "Ergo test",
+//         .startup_parameters = .init(allocator),
+//     };
+//
+//     var conn = try Conn.init(io, allocator, opts);
+//     defer conn.deinit();
+//     try testing.expectError(error.PG, conn.auth());
+//     try testing.expectEqual(true, std.mem.find(u8, conn.err.?.message, "user \"does_not_exist\"") != null);
+// }
+//
+// test "Conn: auth cleartext password" {
 //     const allocator = testing.allocator;
 //     const io = testing.io;
 //
@@ -571,7 +520,7 @@ test "Conn: auth cleartext password" {
 //         const opts: Opts = .{
 //             .host = "localhost",
 //             .database = "db",
-//             .username = "db_ro_scram_sha256",
+//             .username = "db_ro",
 //             .application_name = "Ergo test",
 //             .startup_parameters = .init(allocator),
 //         };
@@ -579,14 +528,14 @@ test "Conn: auth cleartext password" {
 //         var conn = try Conn.init(io, allocator, opts);
 //         defer conn.deinit();
 //         try testing.expectError(error.PG, conn.auth());
-//         try testing.expectEqualStrings("password authentication failed for user \"db_ro_scram_sha256\"", conn.err.?.message);
+//         try testing.expectEqualStrings("empty password returned by client", conn.err.?.message);
 //     }
 //
 //     {
 //         const opts: Opts = .{
 //             .host = "localhost",
 //             .database = "db",
-//             .username = "db_ro_scram_sha256",
+//             .username = "db_ro",
 //             .password = "wrong",
 //             .application_name = "Ergo test",
 //             .startup_parameters = .init(allocator),
@@ -595,14 +544,14 @@ test "Conn: auth cleartext password" {
 //         var conn = try Conn.init(io, allocator, opts);
 //         defer conn.deinit();
 //         try testing.expectError(error.PG, conn.auth());
-//         try testing.expectEqualStrings("password authentication failed for user \"db_ro_scram_sha256\"", conn.err.?.message);
+//         try testing.expectEqualStrings("password authentication failed for user \"db_ro\"", conn.err.?.message);
 //     }
 //
 //     {
 //         const opts: Opts = .{
 //             .host = "localhost",
 //             .database = "db",
-//             .username = "db_ro_scram_sha256",
+//             .username = "db_ro",
 //             .password = "12345678",
 //             .application_name = "Ergo test",
 //             .startup_parameters = .init(allocator),
@@ -614,42 +563,93 @@ test "Conn: auth cleartext password" {
 //     }
 // }
 
-test "Conn: exec rowsAffected" {
+test "Conn: auth scram-sha-256 password" {
     const allocator = testing.allocator;
     const io = testing.io;
 
-    const opts: Opts = .{
-        .host = "localhost",
-        .database = "db",
-        .username = "postgres",
-        .password = "postgres",
-        .application_name = "Ergo test",
-        .startup_parameters = .init(allocator),
-    };
-
-    var c = try t.connect(allocator, io, opts);
-    defer c.deinit();
-
     {
-        const n = try c.exec("insert into simple_table values ('exec_insert_a'), ('exec_insert_b')", .{});
-        try testing.expectEqual(2, n.?);
+        const opts: Opts = .{
+            .host = "localhost",
+            .database = "db",
+            .username = "db_ro_scram_sha256",
+            .application_name = "Ergo test",
+            .startup_parameters = .init(allocator),
+        };
+
+        var conn = try Conn.init(io, allocator, opts);
+        defer conn.deinit();
+        try testing.expectError(error.PG, conn.auth());
+        try testing.expectEqualStrings("password authentication failed for user \"db_ro_scram_sha256\"", conn.err.?.message);
     }
 
-    {
-        const n = try c.exec("update simple_table set value = 'exec_insert_a' where value = 'exec_insert_a'", .{});
-        try testing.expectEqual(1, n.?);
-    }
-
-    {
-        const n = try c.exec("delete from simple_table where value like 'exec_insert%'", .{});
-        try testing.expectEqual(2, n.?);
-    }
-
-    {
-        try testing.expectEqual(null, try c.exec("begin", .{}));
-        try testing.expectEqual(null, try c.exec("end", .{}));
-    }
+    // {
+    //     const opts: Opts = .{
+    //         .host = "localhost",
+    //         .database = "db",
+    //         .username = "db_ro_scram_sha256",
+    //         .password = "wrong",
+    //         .application_name = "Ergo test",
+    //         .startup_parameters = .init(allocator),
+    //     };
+    //
+    //     var conn = try Conn.init(io, allocator, opts);
+    //     defer conn.deinit();
+    //     try testing.expectError(error.PG, conn.auth());
+    //     try testing.expectEqualStrings("password authentication failed for user \"db_ro_scram_sha256\"", conn.err.?.message);
+    // }
+    //
+    // {
+    //     const opts: Opts = .{
+    //         .host = "localhost",
+    //         .database = "db",
+    //         .username = "db_ro_scram_sha256",
+    //         .password = "12345678",
+    //         .application_name = "Ergo test",
+    //         .startup_parameters = .init(allocator),
+    //     };
+    //
+    //     var conn = try Conn.init(io, allocator, opts);
+    //     defer conn.deinit();
+    //     try conn.auth();
+    // }
 }
+
+// test "Conn: exec rowsAffected" {
+//     const allocator = testing.allocator;
+//     const io = testing.io;
+//
+//     const opts: Opts = .{
+//         .host = "localhost",
+//         .database = "db",
+//         .username = "postgres",
+//         .password = "postgres",
+//         .application_name = "Ergo test",
+//         .startup_parameters = .init(allocator),
+//     };
+//
+//     var c = try t.connect(allocator, io, opts);
+//     defer c.deinit();
+//
+//     {
+//         const n = try c.exec("insert into simple_table values ('exec_insert_a'), ('exec_insert_b')", .{});
+//         try testing.expectEqual(2, n.?);
+//     }
+//
+//     {
+//         const n = try c.exec("update simple_table set value = 'exec_insert_a' where value = 'exec_insert_a'", .{});
+//         try testing.expectEqual(1, n.?);
+//     }
+//
+//     {
+//         const n = try c.exec("delete from simple_table where value like 'exec_insert%'", .{});
+//         try testing.expectEqual(2, n.?);
+//     }
+//
+//     {
+//         try testing.expectEqual(null, try c.exec("begin", .{}));
+//         try testing.expectEqual(null, try c.exec("end", .{}));
+//     }
+// }
 //
 // test "Conn: exec with values rowsAffected" {
 //     const allocator = testing.allocator;

@@ -51,6 +51,8 @@ ALTER SCHEMA public OWNER TO db_migrator;
 -- db_Migrator full control
 GRANT USAGE, CREATE ON SCHEMA public TO db_migrator;
 
+CREATE TYPE custom_enum AS ENUM ('val1', 'val2');
+
 -- Example tables
 CREATE TABLE IF NOT EXISTS addresses (
   id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -153,3 +155,49 @@ BEGIN
     END IF;
 END
 $$;
+
+        -- \\ drop table if exists all_types;
+        -- \\ create table all_types (
+        -- \\   id integer primary key,
+        -- \\   col_int2 smallint,
+        -- \\   col_int4 integer,
+        -- \\   col_int8 bigint,
+        -- \\   col_float4 float4,
+        -- \\   col_float8 float8,
+        -- \\   col_bool bool,
+        -- \\   col_text text,
+        -- \\   col_bytea bytea,
+        -- \\   col_int2_arr smallint[],
+        -- \\   col_int4_arr integer[],
+        -- \\   col_int8_arr bigint[],
+        -- \\   col_float4_arr float4[],
+        -- \\   col_float8_arr float[],
+        -- \\   col_bool_arr bool[],
+        -- \\   col_text_arr text[],
+        -- \\   col_bytea_arr bytea[],
+        -- \\   col_enum custom_enum,
+        -- \\   col_enum_arr custom_enum[],
+        -- \\   col_uuid uuid,
+        -- \\   col_uuid_arr uuid[],
+        -- \\   col_numeric numeric,
+        -- \\   col_numeric_arr numeric[],
+        -- \\   col_timestamp timestamp,
+        -- \\   col_timestamp_arr timestamp[],
+        -- \\   col_json json,
+        -- \\   col_json_arr json[],
+        -- \\   col_jsonb jsonb,
+        -- \\   col_jsonb_arr jsonb[],
+        -- \\   col_char char,
+        -- \\   col_char_arr char[],
+        -- \\   col_charn char(3),
+        -- \\   col_charn_arr char(2)[],
+        -- \\   col_timestamptz timestamptz,
+        -- \\   col_timestamptz_arr timestamptz[],
+        -- \\   col_cidr cidr,
+        -- \\   col_cidr_arr cidr[],
+        -- \\   col_inet inet,
+        -- \\   col_inet_arr inet[],
+        -- \\   col_macaddr macaddr,
+        -- \\   col_macaddr_arr macaddr[],
+        -- \\   col_macaddr8 macaddr8,
+        -- \\   col_macaddr8_arr macaddr8[]

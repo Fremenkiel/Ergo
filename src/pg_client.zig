@@ -665,13 +665,13 @@ pub const PgClient = struct {
 
     pub fn createWalConn(allocator: mem.Allocator, io:  Io, opts: pg.conn.Opts) !*pg.Conn {
         var conn = try allocator.create(pg.Conn);
-        conn.* = pg.Conn.open(io, allocator, opts) catch |err| {
+        conn.* = pg.Conn.init(io, allocator, opts) catch |err| {
             std.debug.print("Failed to connect: {}\n", .{err});
             return err;
         };
         errdefer allocator.destroy(conn);
 
-        conn.auth(opts) catch |err| {
+        conn.auth() catch |err| {
             if (conn.err) |pg_err| {
                 std.debug.print("Failed to auth: {} {s}: {s}\n", .{err, pg_err.code, pg_err.message});
             } else {
@@ -1158,4 +1158,7 @@ test "readSchemaKeys" {
         else if (mem.eql(u8, "gender", item.name)) { try testing.expectEqual(false, item.is_key); }
         else if (mem.eql(u8, "name", item.name)) { try testing.expectEqual(false, item.is_key); }
     }
+}
+
+test "update from value to null" {
 }
