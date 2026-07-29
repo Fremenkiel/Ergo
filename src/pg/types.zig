@@ -1588,14 +1588,7 @@ pub fn resultEncoding(oids: []i32, writer: *Io.Writer) !void {
         return writer.writeAll(&.{ 0, 0 }); // we are specifying 0 return types
     }
 
-    // 2 bytes for the # of columns we're specifying + 2 bytes per column
-    const space_needed = 2 + oids.len * 2;
-
-    var i: usize = 0;
-    while (i < space_needed) : (i += 1) {
-        try writer.writeByte(0);
-    }
-
+    std.debug.print("oid len: {d}\n", .{oids.len});
     try writer.writeInt(u16, @intCast(oids.len), .big);
     for (oids) |oid| {
         try writer.writeAll(resultEncodingFor(oid));

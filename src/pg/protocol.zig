@@ -183,11 +183,16 @@ pub const PasswordMessage = struct {
 };
 
 pub const CommandComplete = struct {
-    pub fn parse(buf: []const u8) !?i64 {
-        assert(buf.len > 0);
-        assert(buf[buf.len - 1] == 0);
+    pub fn parse(data: []const u8) !?i64 {
+        assert(data.len > 0);
 
-        const end = buf.len - 2;
+        if (data[data.len - 1] != 0) {
+            return error.NotAString;
+        }
+
+        const buf = data[0 .. data.len - 1];
+
+        const end = buf.len - 1;
         var i: usize = end;
         while (i >= 0) : (i -= 1) {
             const b = buf[i];
@@ -203,6 +208,7 @@ pub const CommandComplete = struct {
         return std.fmt.parseInt(i64, buf[(i + 1)..], 10) catch unreachable;
     }
 };
+
 
 pub const AuthenticationRequest = union(enum) {
     ok: void,
@@ -368,39 +374,66 @@ pub fn readOptionalString(buf: []const u8) ?[]const u8 {
 //     try t.expectString("gh@nim@", try reader.string());
 // }
 //
-// test "CommandComplete: parse" {
-//     {
-//         // not a string (not null terminated)
-//         try buf.write("123");
-//         try t.expectError(error.NotAString, CommandComplete.parse(buf.string()));
-//     }
-//
-//     {
-//         // success
-//         try buf.write("CREATE ROLE");
-//         try buf.writeByte(0);
-//
-//         const c = try CommandComplete.parse(buf.string());
-//         try t.expectString("CREATE ROLE", c.tag);
-//     }
-// }
-//
-// test "CommandComplete: rowsAffected" {
-//     {
-//         const c = CommandComplete{ .tag = "DROP ROLE" };
-//         try t.expectEqual(null, c.rowsAffected());
-//     }
-//
-//     {
-//         const c = CommandComplete{ .tag = "INSERT 392 1" };
-//         try t.expectEqual(1, c.rowsAffected());
-//     }
-//
-//     {
-//         const c = CommandComplete{ .tag = "DELETE 9392" };
-//         try t.expectEqual(9392, c.rowsAffected());
-//     }
-// }
+test "CommandComplete: parse" {
+    const allocator = testing.allocator;
+    {
+        // not a string (not null terminated)
+        try testing.expectError(error.NotAString, CommandComplete.parse("123"));
+    }
+
+    {
+        // success
+        const buf = try allocator.alloc(u8,  12);
+        defer allocator.free(buf);
+
+        var writer = Io.Writer.fixed(buf);
+
+        try writer.writeAll("CREATE ROLE");
+        try writer.writeByte(0);
+
+        try testing.expectEqual(null, try CommandComplete.parse(buf));
+    }
+}
+
+test "CommandComplete: rowsAffected" {
+    const allocator = testing.allocator;
+
+    {
+        const buf = try allocator.alloc(u8,  10);
+        defer allocator.free(buf);
+
+        var writer = Io.Writer.fixed(buf);
+
+        try writer.writeAll("DROP ROLE");
+        try writer.writeByte(0);
+        
+        try testing.expectEqual(null, try CommandComplete.parse(buf));
+    }
+
+    {
+        const buf = try allocator.alloc(u8,  13);
+        defer allocator.free(buf);
+
+        var writer = Io.Writer.fixed(buf);
+
+        try writer.writeAll("INSERT 392 1");
+        try writer.writeByte(0);
+        
+        try testing.expectEqual(1, try CommandComplete.parse(buf));
+    }
+
+    {
+        const buf = try allocator.alloc(u8,  12);
+        defer allocator.free(buf);
+
+        var writer = Io.Writer.fixed(buf);
+
+        try writer.writeAll("DELETE 9392");
+        try writer.writeByte(0);
+        
+        try testing.expectEqual(9392, try CommandComplete.parse(buf));
+    }
+}
 //
 // test "AuthenticationRequest: invalid" {
 //     var buf = try proto.Buffer.init(t.allocator, 128);

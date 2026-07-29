@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS users (
   );
 ALTER TABLE users REPLICA IDENTITY FULL;
 
+CREATE TABLE simple_table (value text);
+
 CREATE TABLE IF NOT EXISTS test_sync_marker (
   id BIGINT
   );

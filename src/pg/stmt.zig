@@ -9,6 +9,7 @@ const types = @import("types.zig");
 
 const Conn = @import("conn.zig").Conn;
 const Result = @import("result.zig").Result;
+const Stream = @import("stream.zig").Stream;
 
 pub const Stmt = struct {
     allocator: mem.Allocator,
@@ -81,12 +82,11 @@ pub const Stmt = struct {
     }
 
     // (in conn.preparedstatements).
-    pub fn prepare(self: *@This(), sql: []const u8) !void {
+    pub fn prepare(self: *@This(), stream: *Stream, sql: []const u8) !void {
         var conn = self.conn;
         const opts = &self.opts;
 
         try conn.reader.startFlow(opts.timeout_ms);
-
 
         const name = self.name;
 
@@ -216,13 +216,13 @@ pub const Stmt = struct {
             }
         }
 
-        return self.prepareForBind(param_count);
+        return self.prepareForBind(stream, param_count);
     }
 
     // We need to call Bind for every value we're binding. Rather than having
     // to check "is this the first call to bind" each time, we make it the caller's
     // responsibility to "prepareForBind" upfront.
-    pub fn prepareForBind(self: *@This(), param_count: u16) !void {
+    pub fn prepareForBind(self: *@This(), stream: *Stream, param_count: u16) !void {
         try self.conn.readyForQuery();
 
         const name = self.name;
@@ -231,35 +231,35 @@ pub const Stmt = struct {
         // 4 byte length placeholder - 0, 0, 0, 0
         // portal name (empty string, length 0) - 0
         // prepared statement name  + null terminator
-        const capacity = 1 + 4 + 1 + name.len + 1 + 2;
+        const n_times = param_count * 2;
+        const capacity = 6 + name.len + 1 + 2 + n_times + 2;
 
-        var buf: []u8 = undefined;
-        buf = try self.allocator.alloc(u8, capacity);
+        const buf = try self.allocator.alloc(u8, capacity);
         defer self.allocator.free(buf);
 
-        var writer = self.conn.stream.stream.writer(self.conn.io, buf);
-        var w = &writer.interface;
+        var writer = Io.Writer.fixed(buf);
 
         // length of buffer is guaranteed to be 128, so it's safe to use
         // writeAssumeCapacity (4 byte length placeholder, 1 byte empty portal)
-        try w.writeAll(&.{ 'B', 0, 0, 0, 0, 0 });
+        try writer.writeAll(&.{ 'B', 0, 0, 0, 0, 0 });
 
-        try w.writeAll(name);
-        try w.writeByte(0);
+        try writer.writeAll(name);
+        try writer.writeByte(0);
 
         // number of parameters types we're sending a
-        try w.writeInt(u16, param_count, .big);
+        try writer.writeInt(u16, param_count, .big);
 
         // the format (text or binary) of each parameter. We'll default to text
         // for now, and fill this in as we get the data
-        const n_times = param_count * 2;
         var i: u32 = 0;
         while (i < n_times) : (i += 1) {
-            try w.writeByte(0);
+            try writer.writeByte(0);
         }
 
         // number of parameters we're sending a
-        try w.writeInt(u16, param_count, .big);
+        try writer.writeInt(u16, param_count, .big);
+
+        try stream.writeAll(buf);
     }
 
     pub fn bind(self: *@This(), writer: *Io.Writer, value: anytype) !void {
@@ -277,23 +277,22 @@ pub const Stmt = struct {
         self.param_index = param_index + 1;
     }
 
-    pub fn execute(self: *@This(), writer: *Io.Writer) !*Result {
+    pub fn execute(self: *@This(), stream: *Stream) !*Result {
         assert(self.param_index == self.param_count);
 
-        // We haven't sent our `bind` message yet. We need to finish it, and then
-        // send it, along with our `Execute` and a final `Sync` message.
-
-        const conn = self.conn;
+        const buf = try self.allocator.alloc(u8, 1028);
+        defer self.allocator.free(buf);
+        var writer = Io.Writer.fixed(buf);
 
         // The last part of the bind message is telling PostgreSQL the format we
         // want to receive the result columns in.
-        try types.resultEncoding(self.result_state.oids[0..self.column_count], writer);
+        try types.resultEncoding(self.result_state.oids[0..self.column_count], &writer);
 
         // write the full payload length, which always starts at byte 1 (after
         // the 'B' message type)
         // Reaching directly into buf.buf is bad!
         // -1 because the length doesn't include the 'B'
-        std.mem.writeInt(u32, writer.buffer[1..5], @intCast(writer.end - 1), .big);
+        try writer.writeInt(u32, @intCast(writer.end - 1), .big);
 
         try writer.writeAll(&.{
             'E',
@@ -318,23 +317,22 @@ pub const Stmt = struct {
             4,
         });
 
-        try writer.flush();
-        {
-            const msg = conn.read() catch |err| {
-                if (err == error.PG) try conn.recoverFromError();
-                return err;
-            };
-            if (msg.type != '2') {
-                // expecting a BindComplete
-                return conn.unexpectedDBMessage();
-            }
+        try stream.writeAll(buf);
+
+        const msg = self.conn.read() catch |err| {
+            if (err == error.PG) try self.conn.recoverFromError();
+            return err;
+        };
+        if (msg.type != '2') {
+            // expecting a BindComplete
+            return self.conn.unexpectedDBMessage();
         }
 
-        try conn.peekForError();
+        try self.conn.peekForError();
 
         // our call to readyForQuery above changed the state, but as far as we're
         // concerned, we're still doing the query.
-        conn.state = .query;
+        self.conn.state = .query;
 
         const opts = &self.opts;
         const state = self.result_state;
@@ -342,7 +340,7 @@ pub const Stmt = struct {
 
         const result = try self.allocator.create(Result);
         result.* = .{
-            .conn = conn,
+            .conn = self.conn,
             .release_conn = opts.release_conn,
             .oids = state.oids[0..column_count],
             .values = state.values[0..column_count],

@@ -59,7 +59,6 @@ pub const Auth = struct {
 
         // write our startup message
         try protocol.StartupMessage.write(self.allocator, self.stream, self.opts);
-        std.debug.print("sent startup message\n", .{});
 
         const init_msg = try self.reader.next();
         switch (init_msg.type) {
@@ -70,7 +69,6 @@ pub const Auth = struct {
             },
             else => return AuthError.UnexpectedDBMessage,
         }
-        std.debug.print("read init message\n", .{});
 
         switch (try protocol.AuthenticationRequest.parse(init_msg.data)) {
             .ok => return,
@@ -80,7 +78,6 @@ pub const Auth = struct {
             .md5 => |salt| try self.md5PasswordAuth(salt),
             .password => try self.passwordAuth(self.opts.password orelse ""),
         }
-        std.debug.print("parsed auth request\n", .{});
 
         const final_msg = try self.reader.next();
         switch (final_msg.type) {
@@ -91,7 +88,6 @@ pub const Auth = struct {
             },
             else => return AuthError.UnexpectedDBMessage,
         }
-        std.debug.print("read final message\n", .{});
 
         switch (try protocol.AuthenticationRequest.parse(final_msg.data)) {
             .ok => return,
@@ -100,11 +96,11 @@ pub const Auth = struct {
     }
 
     fn saslAuth(self: *@This(), req: protocol.AuthenticationRequest.SASL) !void {
-        std.debug.print("handling sasl auth\n", .{});
         if (!req.scram_sha_256) {
             return AuthError.UnexpectedDBMessage;
         }
-        var sasl = try SASL.init(self.io, self.allocator);
+        var sasl = try SASL.init(self.allocator, self.io);
+        defer sasl.deinit();
 
         // send the client initial response
         try protocol.SASLInitialResponse.write(self.allocator, self.stream, sasl.client_first_message, "SCRAM-SHA-256");
@@ -124,6 +120,7 @@ pub const Auth = struct {
 
         // send the client final response
         const client_final_message = try sasl.clientFinalMessage(self.opts.password orelse "");
+        defer self.allocator.free(client_final_message);
         try protocol.SASLResponse.write(self.allocator, self.stream, client_final_message);
 
         // read the server final response
@@ -141,7 +138,6 @@ pub const Auth = struct {
     }
 
     fn md5PasswordAuth(self: *@This(), salt: []const u8) !void {
-        std.debug.print("handling md5 auth\n", .{});
         var hash: [16]u8 = undefined;
 
         var hasher = std.crypto.hash.Md5.init(.{});
@@ -176,7 +172,7 @@ const SASL = struct {
     const Base64Encoder = std.base64.standard.Encoder;
     const Base64Decoder = std.base64.standard.Decoder;
 
-    pub fn init(io: Io, allocator: mem.Allocator) !SASL {
+    pub fn init(allocator: mem.Allocator, io: Io) !SASL {
         var nonce: [18]u8 = undefined;
         std.Io.random(io, &nonce);
 
@@ -195,6 +191,18 @@ const SASL = struct {
             .allocator = allocator,
             .client_first_message = client_first_message,
         };
+    }
+
+    pub fn deinit(self: *@This()) void {
+        self.allocator.free(self.client_first_message);
+
+        if (self.server_response) |server_response| {
+            defer self.allocator.free(server_response.raw);
+        }
+
+        if (self.auth_message) |auth_message| {
+            defer self.allocator.free(auth_message);
+        }
     }
 
     pub fn serverResponse(self: *SASL, data: []const u8) !void {
@@ -252,14 +260,15 @@ const SASL = struct {
         const sr = self.server_response orelse return error.MissingServerResponse;
         const allocator = self.allocator;
 
-        const salt = blk: {
-            const s = try allocator.alloc(u8, try Base64Decoder.calcSizeForSlice(sr.base64_salt));
-            try Base64Decoder.decode(s, sr.base64_salt);
-            break :blk s;
-        };
+        const salt = try allocator.alloc(u8, try Base64Decoder.calcSizeForSlice(sr.base64_salt));
+        defer allocator.free(salt);
+        try Base64Decoder.decode(salt, sr.base64_salt);
 
         const unproved = try std.fmt.allocPrint(allocator, "c=biws,r={s}", .{sr.nonce});
+        defer allocator.free(unproved);
+
         const auth_message = try std.fmt.allocPrint(allocator, "{s},{s},{s}", .{ self.client_first_message[3..], sr.raw, unproved });
+
         const salted_password = blk: {
             var buf: [32]u8 = undefined;
             try std.crypto.pwhash.pbkdf2(&buf, password, salt, sr.iterations, std.crypto.auth.hmac.sha2.HmacSha256);

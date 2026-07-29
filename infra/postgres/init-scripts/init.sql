@@ -74,6 +74,9 @@ CREATE TABLE IF NOT EXISTS users (
   );
 ALTER TABLE users REPLICA IDENTITY FULL;
 
+CREATE TABLE simple_table (value text);
+ALTER TABLE simple_table REPLICA IDENTITY FULL;
+
 -- Read/Write application user
 GRANT USAGE ON SCHEMA public TO db_rw;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO db_rw;
