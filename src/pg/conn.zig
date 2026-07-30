@@ -10,7 +10,6 @@ const Auth = @import("auth.zig").Auth;
 const AuthError = @import("auth.zig").AuthError;
 const Error = @import("error.zig").Error;
 const Message = @import("reader.zig").Message;
-const Pool = @import("pool.zig").Pool;
 const Reader = @import("reader.zig").Reader;
 const Result = @import("result.zig").Result;
 const Stream = @import("stream.zig").Stream;
@@ -67,8 +66,6 @@ pub const Conn = struct {
 
     stream: Stream,
 
-    pool: ?*Pool = null,
-
     // The current transation state, this is whatever the last ReadyForQuery
     // message told us
     state: State,
@@ -116,11 +113,6 @@ pub const Conn = struct {
         column_names: bool = true,
 
         allocator: ?mem.Allocator = null,
-        // Whether a call to result.deinit() should automatically release the
-        // connection back to the pool. Meant to be used internally by pool.query()
-        // and the other pool utility wrappers, but applications might find it useful
-        // to use in their own helpers
-        release_conn: bool = false,
 
         // When not null, the prepared statement will be cached and re-used
         // by subsequent queries using the same name.
@@ -184,15 +176,6 @@ pub const Conn = struct {
         self.prepared_statements.deinit(self.allocator);
     }
 
-    pub fn release(self: *Conn) void {
-        var pool = self.pool orelse {
-            self.deinit();
-            return;
-        };
-        self.err = null;
-        pool.release(self);
-    }
-
     pub fn auth(self: *Conn) !void {
         var conn_auth = Auth.init(self.allocator, self.io, &self.reader, self.opts);
 
@@ -218,7 +201,6 @@ pub const Conn = struct {
 
     pub fn queryOpts(self: *Conn, sql: []const u8, opts: QueryOpts) !*Result {
         if (self.canQuery() == false) {
-            self.maybeRelease(opts.release_conn);
             return error.ConnectionBusy;
         }
 
@@ -248,7 +230,6 @@ pub const Conn = struct {
             // either this isn't supposed to be cached, or it is, but we don't
             // have it in our cache
             stmt = Stmt.init(self.allocator, self, opts) catch |err| {
-                self.maybeRelease(opts.release_conn);
                 return err;
             };
             errdefer stmt.endStmt();
@@ -274,7 +255,6 @@ pub const Conn = struct {
 
         return stmt.execute() catch |err| {
             stmt.endStmt();
-            self.maybeRelease(opts.release_conn);
             return err;
         };
     }
@@ -364,12 +344,6 @@ pub const Conn = struct {
             return true;
         }
         return false;
-    }
-
-    inline fn maybeRelease(self: *Conn, rel: bool) void {
-        if (rel) {
-            self.release();
-        }
     }
 
     pub fn readyForQuery(self: *Conn) !void {

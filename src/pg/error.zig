@@ -1,5 +1,8 @@
 const std = @import("std");
 
+const Io = std.Io;
+const testing = std.testing;
+
 pub const Error = struct {
     code: []const u8,
     message: []const u8,
@@ -68,59 +71,64 @@ pub const Error = struct {
     }
 };
 
-// test "Error: parse" {
-//     var buf = try proto.Buffer.init(t.allocator, 128);
-//     defer buf.deinit();
-//
-//     {
-//         // only required
-//         try buf.writeByte('C');
-//         try buf.write("10391A");
-//         try buf.writeByte(0);
-//
-//         try buf.writeByte('M');
-//         try buf.write("The Message");
-//         try buf.writeByte(0);
-//
-//         try buf.writeByte('S');
-//         try buf.write("FATAL");
-//         try buf.writeByte(0);
-//
-//         const err = Error.parse(buf.string());
-//         try t.expectString("10391A", err.code);
-//         try t.expectString("The Message", err.message);
-//         try t.expectString("FATAL", err.severity);
-//     }
-//
-//     {
-//         // all fields
-//         const fields = [_]u8{ 'S', 'V', 'C', 'M', 'D', 'H', 'P', 'p', 'q', 'W', 's', 't', 'c', 'd', 'n', 'F', 'L', 'R' };
-//         for (fields) |field| {
-//             try buf.writeByte(field);
-//             try buf.writeByte(field);
-//             try buf.write("-value");
-//             try buf.writeByte(0);
-//         }
-//
-//         const err = Error.parse(buf.string());
-//         try t.expectString("C-value", err.code);
-//         try t.expectString("M-value", err.message);
-//         try t.expectString("S-value", err.severity);
-//         try t.expectString("V-value", err.severity2.?);
-//         try t.expectString("D-value", err.detail.?);
-//         try t.expectString("H-value", err.hint.?);
-//         try t.expectString("P-value", err.position.?);
-//         try t.expectString("p-value", err.internal_position.?);
-//         try t.expectString("q-value", err.internal_query.?);
-//         try t.expectString("W-value", err.where.?);
-//         try t.expectString("s-value", err.schema.?);
-//         try t.expectString("t-value", err.table.?);
-//         try t.expectString("c-value", err.column.?);
-//         try t.expectString("d-value", err.data_type_name.?);
-//         try t.expectString("n-value", err.constraint.?);
-//         try t.expectString("F-value", err.file.?);
-//         try t.expectString("L-value", err.line.?);
-//         try t.expectString("R-value", err.routine.?);
-//     }
-// }
+test "Error: parse" {
+    const allocator = testing.allocator;
+
+    const buffer = try allocator.alloc(u8, 512);
+    defer allocator.free(buffer);
+    var writer = Io.Writer.fixed(buffer);
+
+    {
+        // only required
+        try writer.writeByte('C');
+        try writer.writeAll("10391A");
+        try writer.writeByte(0);
+
+        try writer.writeByte('M');
+        try writer.writeAll("The Message");
+        try writer.writeByte(0);
+
+        try writer.writeByte('S');
+        try writer.writeAll("FATAL");
+        try writer.writeByte(0);
+
+        const err = Error.init(buffer[0 .. writer.end]);
+        try testing.expectEqualStrings("10391A", err.code);
+        try testing.expectEqualStrings("The Message", err.message);
+        try testing.expectEqualStrings("FATAL", err.severity);
+    }
+
+    writer.end = 0;
+
+    {
+        // all fields
+        const fields = [_]u8{ 'S', 'V', 'C', 'M', 'D', 'H', 'P', 'p', 'q', 'W', 's', 't', 'c', 'd', 'n', 'F', 'L', 'R' };
+        for (fields) |field| {
+            try writer.writeByte(field);
+            try writer.writeByte(field);
+            try writer.writeAll("-value");
+            try writer.writeByte(0);
+        }
+
+        const err = Error.init(buffer[0 .. writer.end]);
+        try testing.expectEqualStrings("C-value", err.code);
+        try testing.expectEqualStrings("M-value", err.message);
+        try testing.expectEqualStrings("S-value", err.severity);
+        try testing.expectEqualStrings("V-value", err.severity2.?);
+        try testing.expectEqualStrings("D-value", err.detail.?);
+        try testing.expectEqualStrings("H-value", err.hint.?);
+        try testing.expectEqualStrings("P-value", err.position.?);
+        try testing.expectEqualStrings("p-value", err.internal_position.?);
+        try testing.expectEqualStrings("q-value", err.internal_query.?);
+        try testing.expectEqualStrings("W-value", err.where.?);
+        try testing.expectEqualStrings("s-value", err.schema.?);
+        try testing.expectEqualStrings("t-value", err.table.?);
+        try testing.expectEqualStrings("c-value", err.column.?);
+        try testing.expectEqualStrings("d-value", err.data_type_name.?);
+        try testing.expectEqualStrings("n-value", err.constraint.?);
+        try testing.expectEqualStrings("F-value", err.file.?);
+        try testing.expectEqualStrings("L-value", err.line.?);
+        try testing.expectEqualStrings("R-value", err.routine.?);
+    }
+}
 

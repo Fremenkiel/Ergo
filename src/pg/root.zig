@@ -7,12 +7,10 @@ const protocol = @import("protocol.zig");
 pub const packet = @import("packet.zig");
 pub const conn = @import("conn.zig");
 
-pub const Pool = @import("pool.zig").Pool;
+// pub const Pool = @import("pool.zig").Pool;
 pub const Error = @import("error.zig").Error;
 
 pub const Conn = conn.Conn;
-
-const t = @import("t.zig");
 
 test "tests:beforeAll" {
     std.testing.refAllDecls(@This());

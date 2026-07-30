@@ -327,7 +327,6 @@ pub const Stmt = struct {
         const result = try self.allocator.create(Result);
         result.* = .{
             .conn = self.conn,
-            .release_conn = opts.release_conn,
             .oids = state.oids[0..column_count],
             .values = state.values[0..column_count],
             .column_names = if (opts.column_names and state.names != null) state.names.?[0..column_count] else &[_][]const u8{},

@@ -11,7 +11,7 @@ const types = @import("types.zig");
 pub const PgClientError = error{
 PostgresReplicationError,
 WalConnectionNotInitialized,
-ConnectionPoolNotInitialized,
+DefaultConnectionNotInitialized,
 UnableToSendCopyDone,
 InvalidReadyForQueryMessage,
 InvalidCopyDoneMessage,
@@ -68,7 +68,7 @@ pub const PgClient = struct {
     allocator: mem.Allocator,
     io: Io,
 
-    pool_opts: pg.conn.Opts,
+    default_opts: pg.conn.Opts,
     wal_opts: pg.conn.Opts,
 
     last_lsn: u64,
@@ -77,7 +77,7 @@ pub const PgClient = struct {
     context: TransactionContext,
     table_reg: std.hash_map.HashMap(u32, TableDef, std.hash_map.AutoContext(u32), 80),
 
-    pool: ?*pg.Pool,
+    default_conn: ?*pg.Conn,
     wal_conn: ?*pg.Conn,
 
     pub fn init(io: Io, allocator: mem.Allocator, opts: pg.conn.Opts) !PgClient{
@@ -93,11 +93,11 @@ pub const PgClient = struct {
 
         wal_opts.startup_parameters.putAssumeCapacity("replication", "database");
 
-        var pool = try createConnPool(allocator, io, opts);
-        errdefer pool.deinit();
+        var default_conn = try createConn(allocator, io, opts);
+        errdefer default_conn.deinit();
 
-        var conn = try createWalConn(allocator, io, wal_opts);
-        errdefer conn.deinit();
+        var wal_conn = try createConn(allocator, io, wal_opts);
+        errdefer wal_conn.deinit();
 
         var changed_columns = std.StringHashMap(types.ChangedColumns).init(allocator);
         try changed_columns.ensureUnusedCapacity(16);
@@ -105,7 +105,7 @@ pub const PgClient = struct {
         return .{
             .allocator = allocator,
             .io = io,
-            .pool_opts = opts,
+            .default_opts = opts,
             .wal_opts = wal_opts,
             .last_lsn = 0,
             .last_timestamp = 0,
@@ -117,8 +117,8 @@ pub const PgClient = struct {
                 .changed_columns = changed_columns,
             },
             .table_reg = std.AutoHashMap(u32, TableDef).init(allocator),
-            .wal_conn = conn,
-            .pool = pool,
+            .wal_conn = wal_conn,
+            .default_conn = default_conn,
         };
     }
 
@@ -128,9 +128,9 @@ pub const PgClient = struct {
             self.allocator.destroy(wal_conn);
         }
 
-        if (self.pool) |pool| {
-            pool.deinit();
-            // self.allocator.destroy(pool);
+        if (self.default_conn) |default_conn| {
+            default_conn.deinit();
+            self.allocator.destroy(default_conn);
         }
 
         var it = self.table_reg.valueIterator();
@@ -151,6 +151,7 @@ pub const PgClient = struct {
 
     pub fn cancel(self: *@This()) void {
         if (self.wal_conn) |conn| conn.cancel();
+        if (self.default_conn) |conn| conn.cancel();
     }
 
     fn resetContext(self: *@This()) void {
@@ -164,6 +165,7 @@ pub const PgClient = struct {
     }
 
     pub fn startWALReader(self: *@This(), timeout_ms: i32) !void {
+        if (self.default_conn == null) return PgClientError.DefaultConnectionNotInitialized;
         if (self.wal_conn == null) return PgClientError.WalConnectionNotInitialized;
 
         const query = try std.fmt.allocPrint(self.allocator, "START_REPLICATION SLOT {s} LOGICAL 0/0 (proto_version '1', publication_names 'db_pub', messages 'true');", .{self.wal_opts.wal});
@@ -185,6 +187,7 @@ pub const PgClient = struct {
     }
 
     pub fn endWALReader(self: *@This()) !void {
+        if (self.default_conn == null) return PgClientError.DefaultConnectionNotInitialized;
         if (self.wal_conn == null) return PgClientError.WalConnectionNotInitialized;
 
         const query = try std.fmt.allocPrint(self.allocator, "DROP_REPLICATION SLOT {s};", .{self.wal_opts.wal});
@@ -394,14 +397,7 @@ pub const PgClient = struct {
                 const table_name = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{namespace, rel_name});
                 defer self.allocator.free(table_name);
 
-                const columns = self.readSchemaKeys(table_name) catch |err| switch (err) {
-                    PgClientError.ConnectionPoolNotInitialized => blk: {
-                        self.pool = try createConnPool(self.allocator, self.io, self.pool_opts);
-
-                        break :blk try self.readSchemaKeys(table_name);
-                    },
-                    else => return err,
-                };
+                const columns = try self.readSchemaKeys(table_name);
 
                 var i: u16 = 0;
                 while (i < num_columns) : (i += 1) {
@@ -636,18 +632,19 @@ pub const PgClient = struct {
     }
 
     fn readSchemaKeys(self: *@This(), table_name: []const u8) !std.ArrayList(ColumnDef) {
-        if (self.pool == null) return PgClientError.ConnectionPoolNotInitialized;
+        if (self.default_conn == null) return PgClientError.DefaultConnectionNotInitialized;
 
-        var conn = try self.pool.?.acquire();
-        defer conn.release();
-        var result = try conn.queryOpts(
+        const query = try std.fmt.allocPrint(self.allocator,
         \\ SELECT
         \\   a.attname AS column_name,
         \\   COALESCE((SELECT string_agg(c.contype::text, '') FROM pg_constraint c WHERE a.attnum = ANY(c.conkey) AND c.conrelid = a.attrelid), '') AS constraint_types
         \\ FROM pg_attribute a
-        \\ WHERE a.attrelid = $1::regclass AND a.attnum > 0 AND NOT a.attisdropped
+        \\ WHERE a.attrelid = '{s}'::regclass AND a.attnum > 0 AND NOT a.attisdropped
         \\ ORDER BY a.attnum;
-        , .{table_name}, .{ .column_names = true });
+        , .{ table_name });
+        defer self.allocator.free(query);
+
+        var result = try self.default_conn.?.queryOpts(query, .{ .column_names = true });
         defer result.deinit(self.allocator);
 
         var columns = std.ArrayList(ColumnDef).empty;
@@ -663,7 +660,7 @@ pub const PgClient = struct {
         return columns;
     }
 
-    pub fn createWalConn(allocator: mem.Allocator, io:  Io, opts: pg.conn.Opts) !*pg.Conn {
+    pub fn createConn(allocator: mem.Allocator, io:  Io, opts: pg.conn.Opts) !*pg.Conn {
         var conn = try allocator.create(pg.Conn);
         conn.* = pg.Conn.init(io, allocator, opts) catch |err| {
             std.debug.print("Failed to connect: {}\n", .{err});
@@ -681,10 +678,6 @@ pub const PgClient = struct {
         };
 
         return conn;
-    }
-
-    pub fn createConnPool(allocator: mem.Allocator, io: Io, opts: pg.conn.Opts) !*pg.Pool {
-        return try pg.Pool.init(io, allocator, .{ .size = 1, .connect = opts});
     }
 
     pub fn pgWalToClickHouseMs(pg_wal_us: u64) i64 {
@@ -722,7 +715,7 @@ fn setupMockClient(allocator: mem.Allocator, io: Io) !PgClient {
     return .{
         .allocator = allocator,
         .io = io,
-        .pool_opts = undefined,
+        .default_opts = undefined,
         .wal_opts = undefined,
         .last_lsn = 0,
         .last_timestamp = 0,
@@ -735,7 +728,7 @@ fn setupMockClient(allocator: mem.Allocator, io: Io) !PgClient {
         },
         .table_reg = table_reg,
         .wal_conn = null,
-        .pool = null,
+        .default_conn = null,
     };
 }
 
@@ -803,7 +796,7 @@ test "parsePgOutput maps RELATION correctly" {
     var client = PgClient{
         .allocator = allocator,
         .io = io,
-        .pool_opts = undefined,
+        .default_opts = undefined,
         .wal_opts = undefined,
         .last_lsn = 0,
         .last_timestamp = 0,
@@ -816,7 +809,7 @@ test "parsePgOutput maps RELATION correctly" {
         },
         .table_reg = .init(allocator),
         .wal_conn = null,
-        .pool = try PgClient.createConnPool(allocator, io, .{
+        .default_conn = try PgClient.createConn(allocator, io, .{
             .port = 5432,
             .host = "localhost",
             .wal = "wal_slot",
@@ -1120,11 +1113,11 @@ test "readSchemaKeys" {
         .allocator = allocator,
         .io = undefined,
         .context = undefined,
-        .pool_opts = undefined,
+        .default_opts = undefined,
         .wal_opts = undefined,
         .last_lsn = undefined,
         .last_timestamp = undefined,
-        .pool = try PgClient.createConnPool(allocator, io, .{
+        .default_conn = try PgClient.createConn(allocator, io, .{
             .port = 5432,
             .host = "localhost",
             .wal = "wal_slot",

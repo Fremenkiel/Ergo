@@ -305,75 +305,75 @@ pub fn readOptionalString(buf: []const u8) ?[]const u8 {
     return value;
 }
 
-// test "StartupMessage: write" {
-//     const allocator = testing.allocator;
-        //
-        // var buf: []u8 = undefined;
-        // buf = try allocator.alloc(u8, total_length);
-//     defer allocator.free(buf);
-//
-//     const s = @This(){ .username = "leto", .database = "ghanima" };
-//     try s.write(allocator, &buf);
-//
-//     var reader = Reader.init(buf.string());
-//     try testing.expectEqual(36, try reader.int32()); // payload length
-//     try testing.expectEqual(196608, try reader.int32()); // protocol version
-//     try testing.expectEqualStrings("user", try reader.string());
-//     try testing.expectEqualStrings("leto", try reader.string());
-//     try testing.expectEqualStrings("database", try reader.string());
-//     try testing.expectEqualStrings("ghanima", try reader.string());
-//     try testing.expectEqualSlices(u8, &.{0}, reader.rest());
-// }
-//
-// test "SASLResponse: write" {
-//     const io = testing.io;
-//
-//     const s = writeSASLResponse(io, stream, "the response");
-//
-//     var reader = Reader.init(buf.string());
-//     try testing.expectEqual('p', try reader.byte());
-//     try testing.expectEqual(16, try reader.int32()); // payload length
-//     try testing.expectEqualStrings("the response", reader.rest());
-// }
-//
-// test "SASLInitialResponse: write" {
-//     const io = testing.io;
-//
-//     const s = writeSASLInitialResponse(io, stream, "a sasl response", "SCRAM-SHA-256");
-//
-//     var reader = Reader.init(buf.string());
-//     try t.expectEqual('p', try reader.byte());
-//     try t.expectEqual(37, try reader.int32()); // payload length
-//     try t.expectString("SCRAM-SHA-256", try reader.string());
-//     try t.expectEqual(15, try reader.int32()); // length of response
-//     try t.expectString("a sasl response", reader.rest());
-// }
-//
-// test "Query: write" {
-//     const allocator = testing.allocator;
-//     const io = testing.io;
-//
-//     const q = writeQuery(allocator, io, stream, "select 1");
-//
-//     var reader = Reader.init(buf.string());
-//     try testing.expectEqual('Q', try reader.byte());
-//     try testing.expectEqual(13, try reader.int32()); // payload length
-//     try testing.expectEqualStrings("select 1", try reader.restAsString());
-// }
-//
-// test "PasswordMessage: write" {
-//     var buf = try proto.Buffer.init(t.allocator, 128);
-//     defer buf.deinit();
-//
-//     const pw = PasswordMessage{ .password = "gh@nim@" };
-//     try pw.write(&buf);
-//
-//     var reader = Reader.init(buf.string());
-//     try t.expectEqual('p', try reader.byte());
-//     try t.expectEqual(12, try reader.int32()); // payload length
-//     try t.expectString("gh@nim@", try reader.string());
-// }
-//
+test "StartupMessage: write" {
+    const allocator = testing.allocator;
+
+    var buf: []u8 = undefined;
+    buf = try allocator.alloc(u8, 512);
+    defer allocator.free(buf);
+
+    const s = @This(){ .username = "leto", .database = "ghanima" };
+    try s.write(allocator, &buf);
+
+    var reader = Reader.init(buf.string());
+    try testing.expectEqual(36, try reader.int32()); // payload length
+    try testing.expectEqual(196608, try reader.int32()); // protocol version
+    try testing.expectEqualStrings("user", try reader.string());
+    try testing.expectEqualStrings("leto", try reader.string());
+    try testing.expectEqualStrings("database", try reader.string());
+    try testing.expectEqualStrings("ghanima", try reader.string());
+    try testing.expectEqualSlices(u8, &.{0}, reader.rest());
+}
+
+test "SASLResponse: write" {
+    const io = testing.io;
+
+    const s = writeSASLResponse(io, stream, "the response");
+
+    var reader = Reader.init(buf.string());
+    try testing.expectEqual('p', try reader.byte());
+    try testing.expectEqual(16, try reader.int32()); // payload length
+    try testing.expectEqualStrings("the response", reader.rest());
+}
+
+test "SASLInitialResponse: write" {
+    const io = testing.io;
+
+    const s = writeSASLInitialResponse(io, stream, "a sasl response", "SCRAM-SHA-256");
+
+    var reader = Reader.init(buf.string());
+    try t.expectEqual('p', try reader.byte());
+    try t.expectEqual(37, try reader.int32()); // payload length
+    try t.expectString("SCRAM-SHA-256", try reader.string());
+    try t.expectEqual(15, try reader.int32()); // length of response
+    try t.expectString("a sasl response", reader.rest());
+}
+
+test "Query: write" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    const q = writeQuery(allocator, io, stream, "select 1");
+
+    var reader = Reader.init(buf.string());
+    try testing.expectEqual('Q', try reader.byte());
+    try testing.expectEqual(13, try reader.int32()); // payload length
+    try testing.expectEqualStrings("select 1", try reader.restAsString());
+}
+
+test "PasswordMessage: write" {
+    var buf = try proto.Buffer.init(t.allocator, 128);
+    defer buf.deinit();
+
+    const pw = PasswordMessage{ .password = "gh@nim@" };
+    try pw.write(&buf);
+
+    var reader = Reader.init(buf.string());
+    try t.expectEqual('p', try reader.byte());
+    try t.expectEqual(12, try reader.int32()); // payload length
+    try t.expectString("gh@nim@", try reader.string());
+}
+
 test "CommandComplete: parse" {
     const allocator = testing.allocator;
     {
@@ -434,158 +434,198 @@ test "CommandComplete: rowsAffected" {
         try testing.expectEqual(9392, try CommandComplete.parse(buf));
     }
 }
-//
-// test "AuthenticationRequest: invalid" {
-//     var buf = try proto.Buffer.init(t.allocator, 128);
-//     defer buf.deinit();
-//
-//     {
-//         // empty
-//         try t.expectError(error.NoMoreData, AuthenticationRequest.parse(buf.string()));
-//     }
-//
-//     {
-//         // less than minimum length
-//         try buf.write("123");
-//         try t.expectError(error.NoMoreData, AuthenticationRequest.parse(buf.string()));
-//     }
-//
-//     {
-//         // unknown auth type
-//         buf.reset();
-//         try buf.writeIntBig(u32, 99);
-//         try t.expectError(error.AuthNotSupported, AuthenticationRequest.parse(buf.string()));
-//     }
-// }
-//
-// test "AuthenticationRequest: ok" {
-//     var buf = try proto.Buffer.init(t.allocator, 128);
-//     defer buf.deinit();
-//
-//     try buf.writeIntBig(u32, 0);
-//     const request = try AuthenticationRequest.parse(buf.string());
-//     try t.expectEqual({}, request.ok);
-// }
-//
-// test "AuthenticationRequest: password" {
-//     var buf = try proto.Buffer.init(t.allocator, 128);
-//     defer buf.deinit();
-//
-//     try buf.writeIntBig(u32, 3);
-//     const request = try AuthenticationRequest.parse(buf.string());
-//     try t.expectEqual({}, request.password);
-// }
-//
-// test "AuthenticationRequest: md5" {
-//     var buf = try proto.Buffer.init(t.allocator, 128);
-//     defer buf.deinit();
-//
-//     try buf.writeIntBig(u32, 5);
-//     try buf.write("s@Lt");
-//     const request = try AuthenticationRequest.parse(buf.string());
-//     try t.expectString("s@Lt", request.md5);
-// }
-//
-// test "AuthenticationRequest: sasl with 1 mechanism" {
-//     var buf = try proto.Buffer.init(t.allocator, 128);
-//     defer buf.deinit();
-//
-//     {
-//         try buf.writeIntBig(u32, 10);
-//         try buf.write("SCRAM-SHA-256");
-//         try buf.writeByte(0);
-//
-//         const request = try AuthenticationRequest.parse(buf.string());
-//         try t.expectEqual(true, request.sasl.scram_sha_256);
-//         try t.expectEqual(false, request.sasl.scram_sha_256_plus);
-//     }
-//
-//     {
-//         buf.reset();
-//         try buf.writeIntBig(u32, 10);
-//         try buf.write("SCRAM-SHA-256-PLUS");
-//         try buf.writeByte(0);
-//
-//         const request = try AuthenticationRequest.parse(buf.string());
-//         try t.expectEqual(false, request.sasl.scram_sha_256);
-//         try t.expectEqual(true, request.sasl.scram_sha_256_plus);
-//     }
-// }
-//
-// test "AuthenticationRequest: sasl with multiple including unknown" {
-//     var buf = try proto.Buffer.init(t.allocator, 128);
-//     defer buf.deinit();
-//
-//     try buf.writeIntBig(u32, 10);
-//     try buf.write("SCRAM-SHA-256-PLUS");
-//     try buf.writeByte(0);
-//     try buf.write("SCRAM-SHA-256");
-//     try buf.writeByte(0);
-//     try buf.write("SCRAM-MD5");
-//     try buf.writeByte(0);
-//
-//     const request = try AuthenticationRequest.parse(buf.string());
-//     try t.expectEqual(true, request.sasl.scram_sha_256);
-//     try t.expectEqual(true, request.sasl.scram_sha_256_plus);
-// }
-//
-// test "AuthenticationSASLFinal: parse" {
-//     var buf = try proto.Buffer.init(t.allocator, 128);
-//     defer buf.deinit();
-//
-//     {
-//         // too short
-//         try t.expectError(error.NoMoreData, AuthenticationSASLFinal.parse(buf.string()));
-//
-//         try buf.write("123");
-//         try t.expectError(error.NoMoreData, AuthenticationSASLFinal.parse(buf.string()));
-//     }
-//
-//     {
-//         // wrong special sasl type
-//         buf.reset();
-//         try buf.writeIntBig(u32, 13);
-//         try t.expectError(error.NotSASLChallenge, AuthenticationSASLFinal.parse(buf.string()));
-//     }
-//
-//     {
-//         // success
-//         buf.reset();
-//         try buf.writeIntBig(u32, 12);
-//         try buf.write("some server data");
-//
-//         const final = try AuthenticationSASLFinal.parse(buf.string());
-//         try t.expectString("some server data", final.data);
-//     }
-// }
-//
-// test "AuthenticationSASLContinue: parse" {
-//     var buf = try proto.Buffer.init(t.allocator, 128);
-//     defer buf.deinit();
-//
-//     {
-//         // too short
-//         try t.expectError(error.NoMoreData, AuthenticationSASLContinue.parse(buf.string()));
-//
-//         try buf.write("123");
-//         try t.expectError(error.NoMoreData, AuthenticationSASLContinue.parse(buf.string()));
-//     }
-//
-//     {
-//         // wrong special sasl type
-//         buf.reset();
-//         try buf.writeIntBig(u32, 12);
-//         try t.expectError(error.NotSASLChallenge, AuthenticationSASLContinue.parse(buf.string()));
-//     }
-//
-//     {
-//         // success
-//         buf.reset();
-//         try buf.writeIntBig(u32, 11);
-//         try buf.write("r=a-nounce,s=the-S@lt,i=4096");
-//
-//         const c = try AuthenticationSASLContinue.parse(buf.string());
-//         try t.expectString("r=a-nounce,s=the-S@lt,i=4096", c.data);
-//     }
-// }
-//
+
+test "AuthenticationRequest: invalid" {
+    const allocator = testing.allocator;
+
+    const buffer = try allocator.alloc(u8, 512);
+    defer allocator.free(buffer);
+
+    var writer = Io.Writer.fixed(buffer);
+
+    {
+        // empty
+        try testing.expectError(error.NoMoreData, AuthenticationRequest.parse(buffer[0 .. writer.end]));
+    }
+
+    writer.end = 0;
+
+    {
+        // less than minimum length
+        try writer.writeAll("123");
+        try testing.expectError(error.NoMoreData, AuthenticationRequest.parse(buffer[0 .. writer.end]));
+    }
+
+    writer.end = 0;
+
+    {
+        // unknown auth type
+        try writer.writeInt(u32, 99, .big);
+        try testing.expectError(error.AuthNotSupported, AuthenticationRequest.parse(buffer[0 .. writer.end]));
+    }
+}
+
+test "AuthenticationRequest: ok" {
+    const allocator = testing.allocator;
+
+    const buffer = try allocator.alloc(u8, 512);
+    defer allocator.free(buffer);
+
+    var writer = Io.Writer.fixed(buffer);
+
+    try writer.writeInt(u32, 0, .big);
+    const request = try AuthenticationRequest.parse(buffer[0 .. writer.end]);
+    try testing.expectEqual({}, request.ok);
+}
+
+test "AuthenticationRequest: password" {
+    const allocator = testing.allocator;
+
+    const buffer = try allocator.alloc(u8, 512);
+    defer allocator.free(buffer);
+
+    var writer = Io.Writer.fixed(buffer);
+
+    try writer.writeInt(u32, 3, .big);
+    const request = try AuthenticationRequest.parse(buffer[0 .. writer.end]);
+    try testing.expectEqual({}, request.password);
+}
+
+test "AuthenticationRequest: md5" {
+    const allocator = testing.allocator;
+
+    const buffer = try allocator.alloc(u8, 512);
+    defer allocator.free(buffer);
+
+    var writer = Io.Writer.fixed(buffer);
+
+    try writer.writeInt(u32, 5, .big);
+    try writer.writeAll("s@Lt");
+    const request = try AuthenticationRequest.parse(buffer[0 .. writer.end]);
+    try testing.expectEqualStrings("s@Lt", request.md5);
+}
+
+test "AuthenticationRequest: sasl with 1 mechanism" {
+    const allocator = testing.allocator;
+
+    const buffer = try allocator.alloc(u8, 512);
+    defer allocator.free(buffer);
+
+    var writer = Io.Writer.fixed(buffer);
+
+    {
+        try writer.writeInt(u32, 10, .big);
+        try writer.writeAll("SCRAM-SHA-256");
+        try writer.writeByte(0);
+
+        const request = try AuthenticationRequest.parse(buffer[0 .. writer.end]);
+        try testing.expectEqual(true, request.sasl.scram_sha_256);
+        try testing.expectEqual(false, request.sasl.scram_sha_256_plus);
+    }
+
+    writer.end = 0;
+
+    {
+        try writer.writeInt(u32, 10, .big);
+        try writer.writeAll("SCRAM-SHA-256-PLUS");
+        try writer.writeByte(0);
+
+        const request = try AuthenticationRequest.parse(buffer[0 .. writer.end]);
+        try testing.expectEqual(false, request.sasl.scram_sha_256);
+        try testing.expectEqual(true, request.sasl.scram_sha_256_plus);
+    }
+}
+
+test "AuthenticationRequest: sasl with multiple including unknown" {
+    const allocator = testing.allocator;
+
+    const buffer = try allocator.alloc(u8, 512);
+    defer allocator.free(buffer);
+
+    var writer = Io.Writer.fixed(buffer);
+
+    try writer.writeInt(u32, 10, .big);
+    try writer.writeAll("SCRAM-SHA-256-PLUS");
+    try writer.writeByte(0);
+    try writer.writeAll("SCRAM-SHA-256");
+    try writer.writeByte(0);
+    try writer.writeAll("SCRAM-MD5");
+    try writer.writeByte(0);
+
+    const request = try AuthenticationRequest.parse(buffer[0 .. writer.end]);
+    try testing.expectEqual(true, request.sasl.scram_sha_256);
+    try testing.expectEqual(true, request.sasl.scram_sha_256_plus);
+}
+
+test "AuthenticationSASLFinal: parse" {
+    const allocator = testing.allocator;
+
+    const buffer = try allocator.alloc(u8, 512);
+    defer allocator.free(buffer);
+
+    var writer = Io.Writer.fixed(buffer);
+    
+    {
+        // too short
+        try testing.expectError(error.NoMoreData, AuthenticationSASLFinal.parse(buffer[0 .. writer.end]));
+
+        try writer.writeAll("123");
+        try testing.expectError(error.NoMoreData, AuthenticationSASLFinal.parse(buffer[0 .. writer.end]));
+    }
+
+    writer.end = 0;
+
+    {
+        // wrong special sasl type
+        try writer.writeInt(u32, 13, .big);
+        try testing.expectError(error.NotSASLChallenge, AuthenticationSASLFinal.parse(buffer[0 .. writer.end]));
+    }
+
+    writer.end = 0;
+
+    {
+        // success
+        try writer.writeInt(u32, 12, .big);
+        try writer.writeAll("some server data");
+
+        const final = try AuthenticationSASLFinal.parse(buffer[0 .. writer.end]);
+        try testing.expectEqualStrings("some server data", final);
+    }
+}
+
+test "AuthenticationSASLContinue: parse" {
+    const allocator = testing.allocator;
+
+    const buffer = try allocator.alloc(u8, 512);
+    defer allocator.free(buffer);
+
+    var writer = Io.Writer.fixed(buffer);
+
+    {
+        // too short
+        try testing.expectError(error.NoMoreData, AuthenticationSASLContinue.parse(buffer[0 .. writer.end]));
+
+        try writer.writeAll("123");
+        try testing.expectError(error.NoMoreData, AuthenticationSASLContinue.parse(buffer[0 .. writer.end]));
+    }
+    
+    writer.end = 0;
+
+    {
+        // wrong special sasl type
+        try writer.writeInt(u32, 12, .big);
+        try testing.expectError(error.NotSASLChallenge, AuthenticationSASLContinue.parse(buffer[0 .. writer.end]));
+    }
+
+    writer.end = 0;
+
+    {
+        // success
+        try writer.writeInt(u32, 11, .big);
+        try writer.writeAll("r=a-nounce,s=the-S@lt,i=4096");
+
+        const c = try AuthenticationSASLContinue.parse(buffer[0 .. writer.end]);
+        try testing.expectEqualStrings("r=a-nounce,s=the-S@lt,i=4096", c);
+    }
+}
+

@@ -54,7 +54,7 @@ pub fn WalStream(comptime PgClient: type, comptime ChClient: type) type {
         pub fn startStreaming(self: *@This()) !void {
             self.pg_client.startWALReader(read_timeout_ms) catch |err| switch (err) {
                 pg_client.PgClientError.WalConnectionNotInitialized => {
-                    self.pg_client.*.wal_conn = try PgClient.createWalConn(self.allocator, self.io, self.pg_client.*.wal_opts);
+                    self.pg_client.*.wal_conn = try PgClient.createConn(self.allocator, self.io, self.pg_client.*.wal_opts);
 
                     try self.pg_client.startWALReader(read_timeout_ms);
                 },
@@ -174,10 +174,11 @@ const MockPgClient = struct {
     responses: []pg_client.ReadResponse,
     read_response_index: ?u8,
 
-    pool_opts: void,
+    default_opts: void,
     wal_opts: void,
 
     wal_conn: *bool,
+    default_conn: *bool,
 
     pub fn init(allocator: mem.Allocator, io: Io, responses: []pg_client.ReadResponse) !MockPgClient {
         const conn = try allocator.create(bool);
@@ -187,7 +188,8 @@ const MockPgClient = struct {
             .io = io,
             .responses = responses,
             .read_response_index = null,
-            .pool_opts = {},
+            .default_opts = {},
+            .default_conn = undefined,
             .wal_opts = {},
             .wal_conn = conn,
         };
@@ -236,7 +238,7 @@ const MockPgClient = struct {
         return self.responses[self.read_response_index.?];
     }
 
-    pub fn createWalConn(allocator: mem.Allocator, io: Io, opts: anytype) !*bool {
+    pub fn createConn(allocator: mem.Allocator, io: Io, opts: anytype) !*bool {
         _ = io;
         _ = opts;
 

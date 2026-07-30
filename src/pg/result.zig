@@ -23,10 +23,6 @@ pub const Result = struct {
     // number_of_columns on each row)
     values: []State.Value,
 
-    // When true, result.deinit() will call conn.release()
-    // Used when the result came directly from the pool.query() helper.
-    release_conn: bool,
-
     pub fn deinit(self: *@This(), allocator: mem.Allocator) void {
         // value.data references the buffer of the reader, this buffer is potentially
         // reused and potentially discarded. There are at least a few very good
@@ -41,10 +37,6 @@ pub const Result = struct {
             // recover from this anyways)
             self.conn.state = .fail;
         };
-
-        if (self.release_conn) {
-            self.conn.release();
-        }
 
         allocator.destroy(self);
     }
