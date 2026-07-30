@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const conn = @import("conn.zig");
 pub const openssl = @import("openssl");
@@ -48,6 +49,7 @@ pub fn freeSSLContext(ctx: ?*openssl.SSL_CTX) void {
 }
 
 pub fn printSSLError() void {
+    if (builtin.is_test) return;
     const bio = openssl.BIO_new(openssl.BIO_s_mem());
     defer _ = openssl.BIO_free(bio);
     openssl.ERR_print_errors(bio);

@@ -73,9 +73,6 @@ pub const Conn = struct {
     // message told us
     state: State,
 
-    // A buffer used for writing to PG. This can grow dynamically as needed.
-    buf: []u8,
-
     // Used to read data from PG. Has its own buffer which can grow dynamically
     reader: Reader,
 
@@ -140,11 +137,8 @@ pub const Conn = struct {
         }
         errdefer ssl.freeSSLContext(ssl_ctx);
 
-        var stream = try Stream.connect(io, allocator, opts, ssl_ctx);
-        errdefer stream.close();
-
-        const buf = try allocator.alloc(u8, @max(opts.write_buffer orelse 2048, 128));
-        errdefer allocator.free(buf);
+        var stream = try Stream.init(allocator, io, opts, ssl_ctx);
+        errdefer stream.deinit(allocator);
 
         const reader = try Reader.init(allocator, opts.read_buffer orelse 4096, stream);
         errdefer reader.deinit();
@@ -157,7 +151,6 @@ pub const Conn = struct {
 
         return .{
             .err = null,
-            .buf = buf,
             .ssl_ctx = ssl_ctx,
             .reader = reader,
             .stream = stream,
@@ -177,18 +170,16 @@ pub const Conn = struct {
     }
 
     pub fn deinit(self: *Conn) void {
-        const allocator = self.allocator;
         if (self.err_data) |err_data| {
-            allocator.free(err_data);
+            self.allocator.free(err_data);
         }
-        self.allocator.free(self.buf);
         self.reader.deinit();
-        allocator.free(self.param_oids);
-        self.result_state.deinit(allocator);
+        self.allocator.free(self.param_oids);
+        self.result_state.deinit(self.allocator);
 
         sendTerminate(&self.stream, self.io);
         ssl.freeSSLContext(self.ssl_ctx);
-        self.stream.close();
+        self.stream.deinit(self.allocator);
 
         self.prepared_statements.deinit(self.allocator);
     }
@@ -225,21 +216,6 @@ pub const Conn = struct {
         }
     }
 
-    // pub fn prepare(self: *Conn, sql: []const u8) !Stmt {
-    //     return self.prepareOpts(sql, .{});
-    // }
-    //
-    // pub fn prepareOpts(self: *Conn, sql: []const u8, opts: QueryOpts) !Stmt {
-    //     var stmt = try Stmt.init(self.allocator, self, opts);
-    //     errdefer stmt.endStmt();
-    //     try stmt.prepare(sql);
-    //     return stmt;
-    // }
-
-    pub fn query(self: *Conn, sql: []const u8) !*Result {
-        return self.queryOpts(sql, .{});
-    }
-
     pub fn queryOpts(self: *Conn, sql: []const u8, opts: QueryOpts) !*Result {
         if (self.canQuery() == false) {
             self.maybeRelease(opts.release_conn);
@@ -248,7 +224,12 @@ pub const Conn = struct {
 
         var cached = false;
         var stmt: Stmt = undefined;
+        defer stmt.deinit();
+
         const name = opts.cache_name;
+
+        const buf = try self.allocator.alloc(u8, 1028);
+        defer self.allocator.free(buf);
 
         if (name) |n| {
             if (self.prepared_statements.getPtr(n)) |describe| {
@@ -259,7 +240,7 @@ pub const Conn = struct {
                 try self.reader.startFlow(opts.timeout_ms);
                 // Send a "SYNC" command
                 try self.write(&.{ 'S', 0, 0, 0, 4 });
-                try stmt.prepareForBind(&self.stream, @intCast(describe.param_oids.len));
+                try stmt.prepareForBind(@intCast(describe.param_oids.len));
             }
         }
 
@@ -273,7 +254,7 @@ pub const Conn = struct {
             errdefer stmt.endStmt();
 
             if (name) |n| {
-                try stmt.prepare(&self.stream, sql);
+                try stmt.prepare(sql);
 
                 const owned_name = try self.allocator.dupe(u8, n);
                 try self.prepared_statements.put(self.allocator, owned_name, .{
@@ -281,7 +262,7 @@ pub const Conn = struct {
                     .result_state = stmt.result_state,
                 });
             } else {
-                stmt.prepare(&self.stream, sql) catch |err| {
+                stmt.prepare(sql) catch |err| {
                     if (self.err_data) |err_msg| {
                         std.debug.print("Error: {s}\n", .{err_msg});
                     }
@@ -291,73 +272,19 @@ pub const Conn = struct {
             }
         }
 
-        return stmt.execute(&self.stream) catch |err| {
+        return stmt.execute() catch |err| {
             stmt.endStmt();
             self.maybeRelease(opts.release_conn);
             return err;
         };
     }
 
-    // Execute a query that does not return rows
-    // pub fn exec(self: *Conn, sql: []const u8, values: anytype) !?i64 {
-    //     return self.execOpts(sql, values, .{});
-    // }
-    //
-    // pub fn execOpts(self: *Conn, sql: []const u8, values: anytype, opts: QueryOpts) !?i64 {
-    //     if (self.canQuery() == false) {
-    //         return error.ConnectionBusy;
-    //     }
-    //
-    //     if (values.len == 0) {
-    //         try self.reader.startFlow(opts.timeout_ms);
-    //         defer self.reader.endFlow() catch {
-    //             // this can only fail in extreme conditions (OOM) and it will only impact
-    //             // the next query (and if the app is using the pool, the pool will try to
-    //             // recover from this anyways)
-    //             self.state = .fail;
-    //         };
-    //         try protocol.Query.write(self.allocator, &self.stream, sql);
-    //         self.state = .query;
-    //     } else {
-    //         // TODO: there's some optimization opportunities here, since we know
-    //         // we aren't expecting any result. We don't have to ask PG to DESCRIBE
-    //         // the returned columns (there should be none). This is very significant
-    //         // as it would remove 1 back-and-forth. We could just:
-    //         //    Parse + Bind + Exec + Sync
-    //         // Instead of having to do:
-    //         //    Parse + Describe + Sync  ... read response ...  Bind + Exec + Sync
-    //         const result = try self.queryOpts(sql, values, opts);
-    //         result.deinit(self.allocator);
-    //     }
-    //
-    //     // affected can be null, so we need a separate boolean to track if we
-    //     // actually have a response.
-    //     var affected: ?i64 = null;
-    //     while (true) {
-    //         const msg = self.read() catch |err| {
-    //             if (err == error.PG) try self.recoverFromError();
-    //             return err;
-    //         };
-    //         switch (msg.type) {
-    //             'C' => {
-    //                 affected = try protocol.CommandComplete.parse(msg.data);
-    //             },
-    //             'Z' => return affected,
-    //             'T' => affected = 0,
-    //             'D' => affected = (affected orelse 0) + 1,
-    //             else => return self.unexpectedDBMessage(),
-    //         }
-    //     }
-    // }
-
-    // Should not be called directly
     pub fn peekForError(self: *Conn) !void {
         const data = (try self.reader.peekForError()) orelse return;
         try self.readyForQuery();
         return self.setErr(data);
     }
 
-    // Should not be called directly
     pub fn read(self: *Conn) !Message {
         var reader = &self.reader;
         while (true) {
@@ -415,11 +342,6 @@ pub const Conn = struct {
     fn setErr(self: *Conn, data: []const u8) error{ PG, OutOfMemory } {
         const allocator = self.allocator;
 
-        // The proto.Error that we're about to create is going to reference data.
-        // But data is owned by our Reader and its lifetime doesn't necessarily match
-        // what we want here. So we're going to dupe it and make the connection own
-        // the data so it can tie its lifecycle to the error.
-
         // That means clearing out any previous duped error data we had
         if (self.err_data) |err_data| {
             allocator.free(err_data);
@@ -450,7 +372,6 @@ pub const Conn = struct {
         }
     }
 
-    // should not be called directly
     pub fn readyForQuery(self: *Conn) !void {
         const msg = try self.read();
         if (msg.type != 'Z') {
@@ -468,91 +389,91 @@ pub const Conn = struct {
 };
 
 const t = @import("t.zig");
-// test "Conn: auth trust (no pass)" {
-//     const allocator = testing.allocator;
-//     const io = testing.io;
-//
-//     const opts: Opts = .{
-//         .host = "localhost",
-//         .database = "db",
-//         .username = "db_np",
-//         .application_name = "Ergo test",
-//         .startup_parameters = .init(allocator),
-//     };
-//
-//     var conn = try Conn.init(io, allocator, opts);
-//     defer conn.deinit();
-//     try conn.auth();
-// }
-//
-// test "Conn: auth unknown user" {
-//     const allocator = testing.allocator;
-//     const io = testing.io;
-//
-//     const opts: Opts = .{
-//         .host = "localhost",
-//         .database = "db",
-//         .username = "does_not_exist",
-//         .application_name = "Ergo test",
-//         .startup_parameters = .init(allocator),
-//     };
-//
-//     var conn = try Conn.init(io, allocator, opts);
-//     defer conn.deinit();
-//     try testing.expectError(error.PG, conn.auth());
-//     try testing.expectEqual(true, std.mem.find(u8, conn.err.?.message, "user \"does_not_exist\"") != null);
-// }
-//
-// test "Conn: auth cleartext password" {
-//     const allocator = testing.allocator;
-//     const io = testing.io;
-//
-//     {
-//         const opts: Opts = .{
-//             .host = "localhost",
-//             .database = "db",
-//             .username = "db_ro",
-//             .application_name = "Ergo test",
-//             .startup_parameters = .init(allocator),
-//         };
-//
-//         var conn = try Conn.init(io, allocator, opts);
-//         defer conn.deinit();
-//         try testing.expectError(error.PG, conn.auth());
-//         try testing.expectEqualStrings("empty password returned by client", conn.err.?.message);
-//     }
-//
-//     {
-//         const opts: Opts = .{
-//             .host = "localhost",
-//             .database = "db",
-//             .username = "db_ro",
-//             .password = "wrong",
-//             .application_name = "Ergo test",
-//             .startup_parameters = .init(allocator),
-//         };
-//
-//         var conn = try Conn.init(io, allocator, opts);
-//         defer conn.deinit();
-//         try testing.expectError(error.PG, conn.auth());
-//         try testing.expectEqualStrings("password authentication failed for user \"db_ro\"", conn.err.?.message);
-//     }
-//
-//     {
-//         const opts: Opts = .{
-//             .host = "localhost",
-//             .database = "db",
-//             .username = "db_ro",
-//             .password = "12345678",
-//             .application_name = "Ergo test",
-//             .startup_parameters = .init(allocator),
-//         };
-//
-//         var conn = try Conn.init(io, allocator, opts);
-//         defer conn.deinit();
-//         try conn.auth();
-//     }
-// }
+test "Conn: auth trust (no pass)" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    const opts: Opts = .{
+        .host = "localhost",
+        .database = "db",
+        .username = "db_np",
+        .application_name = "Ergo test",
+        .startup_parameters = .init(allocator),
+    };
+
+    var conn = try Conn.init(io, allocator, opts);
+    defer conn.deinit();
+    try conn.auth();
+}
+
+test "Conn: auth unknown user" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    const opts: Opts = .{
+        .host = "localhost",
+        .database = "db",
+        .username = "does_not_exist",
+        .application_name = "Ergo test",
+        .startup_parameters = .init(allocator),
+    };
+
+    var conn = try Conn.init(io, allocator, opts);
+    defer conn.deinit();
+    try testing.expectError(error.PG, conn.auth());
+    try testing.expectEqual(true, std.mem.find(u8, conn.err.?.message, "user \"does_not_exist\"") != null);
+}
+
+test "Conn: auth cleartext password" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    {
+        const opts: Opts = .{
+            .host = "localhost",
+            .database = "db",
+            .username = "db_ro",
+            .application_name = "Ergo test",
+            .startup_parameters = .init(allocator),
+        };
+
+        var conn = try Conn.init(io, allocator, opts);
+        defer conn.deinit();
+        try testing.expectError(error.PG, conn.auth());
+        try testing.expectEqualStrings("empty password returned by client", conn.err.?.message);
+    }
+
+    {
+        const opts: Opts = .{
+            .host = "localhost",
+            .database = "db",
+            .username = "db_ro",
+            .password = "wrong",
+            .application_name = "Ergo test",
+            .startup_parameters = .init(allocator),
+        };
+
+        var conn = try Conn.init(io, allocator, opts);
+        defer conn.deinit();
+        try testing.expectError(error.PG, conn.auth());
+        try testing.expectEqualStrings("password authentication failed for user \"db_ro\"", conn.err.?.message);
+    }
+
+    {
+        const opts: Opts = .{
+            .host = "localhost",
+            .database = "db",
+            .username = "db_ro",
+            .password = "12345678",
+            .application_name = "Ergo test",
+            .startup_parameters = .init(allocator),
+        };
+
+        var conn = try Conn.init(io, allocator, opts);
+        defer conn.deinit();
+        try conn.auth();
+    }
+}
 
 test "Conn: auth scram-sha-256 password" {
     const allocator = testing.allocator;
@@ -612,8 +533,8 @@ test "PG: query column names" {
     const opts: Opts = .{
         .host = "localhost",
         .database = "db",
-        .username = "postgres",
-        .password = "postgres",
+        .username = "db_rw",
+        .password = "12345678",
         .application_name = "Ergo test",
         .startup_parameters = .init(allocator),
     };
@@ -621,8 +542,15 @@ test "PG: query column names" {
     var c = try t.connect(allocator, io, opts);
     defer c.deinit();
     {
-        var result = try c.query("select 1 as id, 'leto' as name");
-        try testing.expectEqual(0, result.column_names.len);
+        var result = try c.queryOpts(
+        \\ SELECT
+        \\   a.attname AS column_name,
+        \\   COALESCE((SELECT string_agg(c.contype::text, '') FROM pg_constraint c WHERE a.attnum = ANY(c.conkey) AND c.conrelid = a.attrelid), '') AS constraint_types
+        \\ FROM pg_attribute a
+        \\ WHERE a.attrelid = 'addresses'::regclass AND a.attnum > 0 AND NOT a.attisdropped
+        \\ ORDER BY a.attnum;
+        , .{ .column_names = true });
+        try testing.expectEqual(2, result.column_names.len);
         try result.drain();
         result.deinit(allocator);
     }
@@ -636,110 +564,109 @@ test "PG: query column names" {
     }
 }
 
-// test "Conn: TLS required" {
-//     const allocator = testing.allocator;
-//     const io = testing.io;
-//
-//     {
-//         const opts: Opts = .{
-//             .host = "localhost",
-//             .database = "db",
-//             .username = "db_ro_ssl",
-//             .application_name = "Ergo test",
-//             .startup_parameters = .init(allocator),
-//             .tls = .off,
-//         };
-//
-//         var c = try Conn.init(io, allocator, opts);
-//         defer c.deinit();
-//         try testing.expectError(error.PG, c.auth());
-//         try testing.expectEqual(true, std.mem.find(u8, c.err.?.message, "no encryption") != null);
-//     }
-//
-//     {
-//         const opts: Opts = .{
-//             .host = "localhost",
-//             .database = "db",
-//             .username = "db_ro_ssl",
-//             .password = "12345678",
-//             .application_name = "Ergo test",
-//             .startup_parameters = .init(allocator),
-//             .tls = .require,
-//         };
-//
-//         var c = try t.connect(allocator, io, opts);
-//         defer c.deinit();
-//     }
-// }
-//
-// test "Conn: TLS verify-full" {
-//     const allocator = testing.allocator;
-//     const io = testing.io;
-//
-//     {
-//         const opts: Opts = .{
-//             .host = "localhost",
-//             .database = "db",
-//             .application_name = "Ergo test",
-//             .startup_parameters = .init(allocator),
-//             .tls = Opts.TLS{ .verify_full = null },
-//         };
-//
-//         try testing.expectError(error.SSLCertificationVerificationError, Conn.init(io, allocator, opts));
-//     }
-//
-//     {
-//         const opts: Opts = .{
-//             .host = "localhost",
-//             .database = "db",
-//             .username = "db_ro_ssl",
-//             .password = "12345678",
-//             .application_name = "Ergo test",
-//             .startup_parameters = .init(allocator),
-//             .tls = Opts.TLS{ .verify_full = "infra/postgres/certs/ca.crt" },
-//         };
-//
-//         var c = try t.connect(allocator, io, opts);
-//         defer c.deinit();
-//     }
-// }
-//
-// test "Conn: query is cancelable" {
-//     const allocator = testing.allocator;
-//     const io = testing.io;
-//
-//     const S = struct {
-//         fn sleepQuery(c: *Conn) !void {
-//             var result = try c.query("select pg_sleep(3)", .{});
-//             result.deinit(allocator);
-//         }
-//     };
-//
-//     const opts: Opts = .{
-//         .host = "localhost",
-//         .database = "db",
-//         .username = "postgres",
-//         .password = "postgres",
-//         .application_name = "Ergo test",
-//         .startup_parameters = .init(allocator),
-//     };
-//
-//     var c = try t.connect(allocator, io, opts);
-//     defer c.deinit();
-//
-//     // Run the query concurrently, let it reach its blocking read, then cancel.
-//     var future = try io.concurrent(S.sleepQuery, .{&c});
-//     try io.sleep(.fromMilliseconds(50), .awake);
-//
-//     const start = std.Io.Clock.Timestamp.now(io, .awake);
-//     const result = future.cancel(io);
-//     const elapsed_ms = start.untilNow(io).raw.toMilliseconds();
-//
-//     try testing.expectError(error.Timeout, result);
-//     try testing.expectEqual(true, elapsed_ms < 1500); // prompt, not blocked until pg_sleep ends
-//     try testing.expectEqual(Conn.State.fail, c.state);
-//     try testing.expectError(error.ConnectionBusy, c.exec("select 1", .{}));
-// }
+test "Conn: TLS required" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    {
+        const opts: Opts = .{
+            .host = "localhost",
+            .database = "db",
+            .username = "db_ro_ssl",
+            .application_name = "Ergo test",
+            .startup_parameters = .init(allocator),
+            .tls = .off,
+        };
+
+        var c = try Conn.init(io, allocator, opts);
+        defer c.deinit();
+        try testing.expectError(error.PG, c.auth());
+        try testing.expectEqual(true, std.mem.find(u8, c.err.?.message, "no encryption") != null);
+    }
+
+    {
+        const opts: Opts = .{
+            .host = "localhost",
+            .database = "db",
+            .username = "db_ro_ssl",
+            .password = "12345678",
+            .application_name = "Ergo test",
+            .startup_parameters = .init(allocator),
+            .tls = .require,
+        };
+
+        var c = try t.connect(allocator, io, opts);
+        defer c.deinit();
+    }
+}
+
+test "Conn: TLS verify-full" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    {
+        const opts: Opts = .{
+            .host = "localhost",
+            .database = "db",
+            .application_name = "Ergo test",
+            .startup_parameters = .init(allocator),
+            .tls = Opts.TLS{ .verify_full = null },
+        };
+
+        try testing.expectError(error.SSLCertificationVerificationError, Conn.init(io, allocator, opts));
+    }
+
+    {
+        const opts: Opts = .{
+            .host = "localhost",
+            .database = "db",
+            .username = "db_ro_ssl",
+            .password = "12345678",
+            .application_name = "Ergo test",
+            .startup_parameters = .init(allocator),
+            .tls = Opts.TLS{ .verify_full = "infra/postgres/certs/ca.crt" },
+        };
+
+        var c = try t.connect(allocator, io, opts);
+        defer c.deinit();
+    }
+}
+
+test "Conn: query is cancelable" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    const S = struct {
+        fn sleepQuery(c: *Conn) !void {
+            var result = try c.queryOpts("select pg_sleep(3)", .{});
+            result.deinit(allocator);
+        }
+    };
+
+    const opts: Opts = .{
+        .host = "localhost",
+        .database = "db",
+        .username = "postgres",
+        .password = "postgres",
+        .application_name = "Ergo test",
+        .startup_parameters = .init(allocator),
+    };
+
+    var c = try t.connect(allocator, io, opts);
+    defer c.deinit();
+
+    // Run the query concurrently, let it reach its blocking read, then cancel.
+    var future = try io.concurrent(S.sleepQuery, .{&c});
+    try io.sleep(.fromMilliseconds(50), .awake);
+
+    const start = std.Io.Clock.Timestamp.now(io, .awake);
+    const result = future.cancel(io);
+    const elapsed_ms = start.untilNow(io).raw.toMilliseconds();
+
+    try testing.expectError(error.Timeout, result);
+    try testing.expectEqual(true, elapsed_ms < 1500); // prompt, not blocked until pg_sleep ends
+    try testing.expectEqual(Conn.State.fail, c.state);
+}
 
 fn expectNumeric(allocator: mem.Allocator, numeric: types.Numeric, expected: []const u8) !void {
     var strbuf: [50]u8 = undefined;
@@ -759,13 +686,3 @@ fn expectNumeric(allocator: mem.Allocator, numeric: types.Numeric, expected: []c
         try t.expectDelta(try std.fmt.parseFloat(f64, expected), numeric.toFloat(), 0.000001);
     }
 }
-
-const DummyStruct = struct {
-    id: i32,
-    name: []const u8,
-};
-
-const DummyEnum = enum {
-    val1,
-    val2,
-};

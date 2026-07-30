@@ -12,6 +12,8 @@ pub const Error = @import("error.zig").Error;
 
 pub const Conn = conn.Conn;
 
+const t = @import("t.zig");
+
 test "tests:beforeAll" {
     std.testing.refAllDecls(@This());
 }

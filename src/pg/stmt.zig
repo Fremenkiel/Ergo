@@ -2,6 +2,7 @@ const std = @import("std");
 
 const Io = std.Io;
 const mem = std.mem;
+const testing = std.testing;
 
 const assert = std.debug.assert;
 
@@ -17,6 +18,9 @@ pub const Stmt = struct {
     opts: Conn.QueryOpts,
 
     conn: *Conn,
+
+    buffer: []u8,
+    writer: Io.Writer,
 
     // Every call to stmt.bind increments this value. Important because the Bind
     // message contains all the parameter meta data first, then the serialized
@@ -47,10 +51,15 @@ pub const Stmt = struct {
     name: []const u8,
 
     pub fn init(allocator: mem.Allocator, conn: *Conn, opts: Conn.QueryOpts) !Stmt {
+        const buffer = try allocator.alloc(u8, 1028);
+        const writer = Io.Writer.fixed(buffer);
+
         return .{
             .conn = conn,
             .opts = opts,
             .allocator = allocator,
+            .buffer = buffer,
+            .writer = writer,
             .param_index = 0,
             .param_count = 0,
             .param_oids = conn.param_oids,
@@ -61,10 +70,15 @@ pub const Stmt = struct {
     }
 
     pub fn fromDescribe(allocator: mem.Allocator, conn: *Conn, describe: *Describe, opts: Conn.QueryOpts) !Stmt {
+        const buffer = try allocator.alloc(u8, 1028);
+        const writer = Io.Writer.fixed(buffer);
+
         return .{
             .conn = conn,
             .opts = opts,
             .allocator = allocator,
+            .buffer = buffer,
+            .writer = writer,
             .param_index = 0,
             .param_count = @intCast(describe.param_oids.len),
             .param_oids = describe.param_oids,
@@ -78,64 +92,48 @@ pub const Stmt = struct {
     // stmt.execute() returns a result, stmt.deinit() must not be called (all
     // ownership is passed to the result).
     pub fn deinit(self: *@This()) void {
-        self.allocator.free(self.param_oids);
+        self.allocator.free(self.buffer);
+    }
+
+    fn writeAllFromBuffer(self: *@This()) !void {
+        try self.conn.write(self.buffer[0 .. self.writer.end]);
+        self.writer.end = 0;
+    }
+
+    fn writePrepareCommands(self: *@This(), sql: []const u8) !void {
+        const bind_payload_len = 8 + sql.len + self.name.len;
+        const describe_payload_len = 6 + self.name.len;
+
+        // PARSE
+        try self.writer.writeByte('P');
+        try self.writer.writeInt(u32, @intCast(bind_payload_len), .big);
+        try self.writer.writeAll(self.name);
+        try self.writer.writeByte(0);
+        try self.writer.writeAll(sql);
+        // null terminate sql string, and we'll be specifying 0 parameter types
+        try self.writer.writeAll(&.{ 0, 0, 0 });
+
+        // DESCRIBE
+        try self.writer.writeByte('D');
+        try self.writer.writeInt(u32, @intCast(describe_payload_len), .big);
+        try self.writer.writeByte('S'); // Describe a prepared statement
+        try self.writer.writeAll(self.name);
+        try self.writer.writeByte(0); // null terminate our name
+
+        // SYNC
+        try self.writer.writeAll(&.{ 'S', 0, 0, 0, 4 });
+
+        try self.writeAllFromBuffer();
     }
 
     // (in conn.preparedstatements).
-    pub fn prepare(self: *@This(), stream: *Stream, sql: []const u8) !void {
+    pub fn prepare(self: *@This(), sql: []const u8) !void {
         var conn = self.conn;
         const opts = &self.opts;
 
         try conn.reader.startFlow(opts.timeout_ms);
 
-        const name = self.name;
-
-        // This function will issue 3 commands: Parse, Describe, Sync
-        // We need the response from describe to put together our Bind message.
-        // Specifically, describe will tell us the type of the return columns, and
-        // in Bind, we tell the server how we want it to encode each column (text
-        // or binary) and to do that, we need to know what they are.
-        {
-            // Build the payload from our 3 commands
-
-            // We can calculate exactly how many bytes our 3 messages are going to be
-            // and make sure our buffer is big enough, thus avoiding some unecessary
-            // bound checking
-            const bind_payload_len = 8 + sql.len + name.len;
-            const describe_payload_len = 6 + name.len;
-            const sync_payload_len = 4;
-
-            // the +3 for the initial byte message for each of the 3 messages
-            const total_length = 3 + bind_payload_len + describe_payload_len + sync_payload_len;
-
-            var buf: []u8 = undefined;
-            buf = try self.allocator.alloc(u8, total_length);
-            defer self.allocator.free(buf);
-
-            var writer = Io.Writer.fixed(buf);
-            var w = &writer;
-
-            // PARSE
-            try w.writeByte('P');
-            try w.writeInt(u32, @intCast(bind_payload_len), .big);
-            try w.writeAll(name);
-            try w.writeByte(0);
-            try w.writeAll(sql);
-            // null terminate sql string, and we'll be specifying 0 parameter types
-            try w.writeAll(&.{ 0, 0, 0 });
-
-            // DESCRIBE
-            try w.writeByte('D');
-            try w.writeInt(u32, @intCast(describe_payload_len), .big);
-            try w.writeByte('S'); // Describe a prepared statement
-            try w.writeAll(name);
-            try w.writeByte(0); // null terminate our name
-
-            // SYNC
-            try w.writeAll(&.{ 'S', 0, 0, 0, 4 });
-
-            try conn.write(buf);
-        }
+        try self.writePrepareCommands(sql);
 
         // no longer idle, we're now in a query
         conn.state = .query;
@@ -216,13 +214,13 @@ pub const Stmt = struct {
             }
         }
 
-        return self.prepareForBind(stream, param_count);
+        return self.prepareForBind(param_count);
     }
 
     // We need to call Bind for every value we're binding. Rather than having
     // to check "is this the first call to bind" each time, we make it the caller's
     // responsibility to "prepareForBind" upfront.
-    pub fn prepareForBind(self: *@This(), stream: *Stream, param_count: u16) !void {
+    pub fn prepareForBind(self: *@This(), param_count: u16) !void {
         try self.conn.readyForQuery();
 
         const name = self.name;
@@ -232,34 +230,26 @@ pub const Stmt = struct {
         // portal name (empty string, length 0) - 0
         // prepared statement name  + null terminator
         const n_times = param_count * 2;
-        const capacity = 6 + name.len + 1 + 2 + n_times + 2;
-
-        const buf = try self.allocator.alloc(u8, capacity);
-        defer self.allocator.free(buf);
-
-        var writer = Io.Writer.fixed(buf);
 
         // length of buffer is guaranteed to be 128, so it's safe to use
         // writeAssumeCapacity (4 byte length placeholder, 1 byte empty portal)
-        try writer.writeAll(&.{ 'B', 0, 0, 0, 0, 0 });
+        try self.writer.writeAll(&.{ 'B', 0, 0, 0, 0, 0 });
 
-        try writer.writeAll(name);
-        try writer.writeByte(0);
+        try self.writer.writeAll(name);
+        try self.writer.writeByte(0);
 
         // number of parameters types we're sending a
-        try writer.writeInt(u16, param_count, .big);
+        try self.writer.writeInt(u16, param_count, .big);
 
         // the format (text or binary) of each parameter. We'll default to text
         // for now, and fill this in as we get the data
         var i: u32 = 0;
         while (i < n_times) : (i += 1) {
-            try writer.writeByte(0);
+            try self.writer.writeByte(0);
         }
 
         // number of parameters we're sending a
-        try writer.writeInt(u16, param_count, .big);
-
-        try stream.writeAll(buf);
+        try self.writer.writeInt(u16, param_count, .big);
     }
 
     pub fn bind(self: *@This(), writer: *Io.Writer, value: anytype) !void {
@@ -277,24 +267,20 @@ pub const Stmt = struct {
         self.param_index = param_index + 1;
     }
 
-    pub fn execute(self: *@This(), stream: *Stream) !*Result {
+    pub fn execute(self: *@This()) !*Result {
         assert(self.param_index == self.param_count);
-
-        const buf = try self.allocator.alloc(u8, 1028);
-        defer self.allocator.free(buf);
-        var writer = Io.Writer.fixed(buf);
 
         // The last part of the bind message is telling PostgreSQL the format we
         // want to receive the result columns in.
-        try types.resultEncoding(self.result_state.oids[0..self.column_count], &writer);
+        try types.resultEncoding(self.result_state.oids[0..self.column_count], &self.writer);
 
         // write the full payload length, which always starts at byte 1 (after
         // the 'B' message type)
         // Reaching directly into buf.buf is bad!
         // -1 because the length doesn't include the 'B'
-        try writer.writeInt(u32, @intCast(writer.end - 1), .big);
+        mem.writeInt(u32, self.buffer[1 .. 5], @intCast(self.writer.end - 1), .big);
 
-        try writer.writeAll(&.{
+        try self.writer.writeAll(&.{
             'E',
             // message length
             0,
@@ -317,7 +303,7 @@ pub const Stmt = struct {
             4,
         });
 
-        try stream.writeAll(buf);
+        try self.writeAllFromBuffer();
 
         const msg = self.conn.read() catch |err| {
             if (err == error.PG) try self.conn.recoverFromError();
@@ -365,3 +351,46 @@ pub const Stmt = struct {
         result_state: Result.State,
     };
 };
+
+// test "writePrepareCommands: ensure correct output" {
+//     const allocator = testing.allocator;
+//     const io = testing.io;
+//
+//     var buffer = try allocator.alloc(u8, 1028);
+//     defer allocator.free(buffer);
+//
+//     var writer = Io.Writer.fixed(buffer);
+//
+//     var conn: Conn = .{
+//         .ssl_ctx = undefined,
+//         .allocator = allocator,
+//         .err = undefined,
+//         .result_state = undefined,
+//         .err_data = undefined,
+//         .io = io,
+//         .opts = undefined,
+//         .param_oids = undefined,
+//         .prepared_statements = undefined,
+//         .reader = undefined,
+//         .state = undefined,
+//         .stream = .{
+//             .ssl = null,
+//             .io = io,
+//             .valid = true,
+//             .stream = .{
+//             }
+//         },
+//         .pool = undefined,
+//     };
+//     var stmt = try Stmt.init(allocator, &conn, .{ .column_names = true });
+//
+//     try stmt.writePrepareCommands(
+//         \\ SELECT
+//         \\   a.attname AS column_name,
+//         \\   COALESCE((SELECT string_agg(c.contype::text, '') FROM pg_constraint c WHERE a.attnum = ANY(c.conkey) AND c.conrelid = a.attrelid), '') AS constraint_types
+//         \\ FROM pg_attribute a
+//         \\ WHERE a.attrelid = 'addresses'::regclass AND a.attnum > 0 AND NOT a.attisdropped
+//         \\ ORDER BY a.attnum;
+//         );
+//
+// }

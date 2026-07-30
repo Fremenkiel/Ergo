@@ -1588,7 +1588,6 @@ pub fn resultEncoding(oids: []i32, writer: *Io.Writer) !void {
         return writer.writeAll(&.{ 0, 0 }); // we are specifying 0 return types
     }
 
-    std.debug.print("oid len: {d}\n", .{oids.len});
     try writer.writeInt(u16, @intCast(oids.len), .big);
     for (oids) |oid| {
         try writer.writeAll(resultEncodingFor(oid));

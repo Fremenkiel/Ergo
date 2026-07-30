@@ -15,15 +15,19 @@ const Reader = @import("reader.zig").Reader;
 const printSSLError = @import("ssl.zig").printSSLError;
 
 pub const Stream = struct {
-    valid: bool,
-    ssl: ?*openssl.SSL,
-    stream: Io.net.Stream,
     io: Io,
 
-    pub fn connect(io: Io, allocator: mem.Allocator, opts: conn.Opts, ctx_: ?*openssl.SSL_CTX) !Stream {
+    stream: Io.net.Stream,
+    buffer: []u8,
+    writer: *Io.Writer,
+
+    valid: bool,
+    ssl: ?*openssl.SSL,
+
+    pub fn init(allocator: mem.Allocator, io: Io, opts: conn.Opts, ctx_: ?*openssl.SSL_CTX) !Stream {
         const is_unix = opts.host.len > 0 and opts.host[0] == '/';
 
-        const stream = try blk: {
+        const io_stream = try blk: {
             if (is_unix) {
                 if (comptime Io.net.has_unix_sockets == false or std.posix.AF == void) {
                     return error.UnixPathNotSupported;
@@ -35,24 +39,38 @@ pub const Stream = struct {
             const hostname: Io.net.HostName = try .init(opts.host);
             break :blk hostname.connect(io, port, .{ .mode = .stream });
         };
-        errdefer stream.close(io);
+        errdefer io_stream.close(io);
 
         if (is_unix == false) {
-            try setKeepalive(stream.socket.handle, opts);
+            try setKeepalive(io_stream.socket.handle, opts);
         }
 
-        var ssl: ?*openssl.SSL = null;
+        const buffer = try allocator.alloc(u8, 1028);
+        errdefer allocator.free(buffer);
+        
+        var writer = io_stream.writer(io, buffer);
+        const w = &writer.interface; 
+
+        var stream: Stream = .{
+            .ssl = null,
+            .valid = true,
+            .stream = io_stream,
+            .buffer = buffer,
+            .writer = w,
+            .io = io,
+        };
+
         if (ctx_) |ctx| {
             // PostgreSQL TLS starts off as a plain connection which we upgrade
-            try writeStream(stream, io, &.{ 0, 0, 0, 8, 4, 210, 22, 47 });
+            try stream.writeStream(&.{ 0, 0, 0, 8, 4, 210, 22, 47 });
             var buf = [1]u8{0};
-            _ = try readStream(stream, io, &buf);
+            _ = try stream.readStream(&buf);
             if (buf[0] != 'S') {
                 return error.SSLNotSupportedByServer;
             }
 
-            ssl = openssl.SSL_new(ctx) orelse return error.SSLNewFailed;
-            errdefer openssl.SSL_free(ssl);
+            stream.ssl = openssl.SSL_new(ctx) orelse return error.SSLNewFailed;
+            errdefer openssl.SSL_free(stream.ssl);
 
             if (isHostName(opts.host)) {
                 // don't send this for an ip address
@@ -66,26 +84,28 @@ pub const Stream = struct {
                     allocator.free(h);
                 };
 
-                if (openssl.SSL_set_tlsext_host_name(ssl, h.ptr) != 1) {
+                if (openssl.SSL_set_tlsext_host_name(stream.ssl, h.ptr) != 1) {
                     return error.SSLHostNameFailed;
                 }
             }
             switch (opts.tls) {
-                .verify_full => openssl.SSL_set_verify(ssl, openssl.SSL_VERIFY_PEER, null),
+                .verify_full => openssl.SSL_set_verify(stream.ssl, openssl.SSL_VERIFY_PEER, null),
                 else => {},
             }
 
-            if (openssl.SSL_set_fd(ssl, stream.socket.handle) != 1) {
+            if (openssl.SSL_set_fd(stream.ssl, io_stream.socket.handle) != 1) {
                 return error.SSLSetFdFailed;
             }
 
             {
-                const ret = openssl.SSL_connect(ssl);
+                const ret = openssl.SSL_connect(stream.ssl);
                 if (ret != 1) {
-                    const verification_code = openssl.SSL_get_verify_result(ssl);
+                    const verification_code = openssl.SSL_get_verify_result(stream.ssl);
                     printSSLError();
                     if (verification_code != openssl.X509_V_OK) {
-                        std.debug.print("ssl verification error: {s}\n", .{openssl.X509_verify_cert_error_string(verification_code)});
+                        if (!builtin.is_test) {
+                            std.log.err("ssl verification error: {s}\n", .{openssl.X509_verify_cert_error_string(verification_code)});
+                        }
                         return error.SSLCertificationVerificationError;
                     }
                     return error.SSLConnectFailed;
@@ -93,15 +113,10 @@ pub const Stream = struct {
             }
         }
 
-        return .{
-            .ssl = ssl,
-            .valid = true,
-            .stream = stream,
-            .io = io,
-        };
+        return stream;
     }
 
-    pub fn close(self: *@This()) void {
+    pub fn deinit(self: *@This(), allocator: mem.Allocator) void {
         if (self.ssl) |ssl| {
             if (self.valid) {
                 _ = openssl.SSL_shutdown(ssl);
@@ -110,10 +125,23 @@ pub const Stream = struct {
             openssl.SSL_free(ssl);
         }
         self.stream.close(self.io);
+        allocator.free(self.buffer);
     }
 
     pub fn shutdown(self: *const @This(), how: ShutdownHow) !void {
         return sockShutdown(self.stream.socket.handle, how);
+    }
+
+    fn writeStream(self: *@This(), data: []const u8) !void {
+        var writer = self.stream.writer(self.io, self.buffer);
+        var w = &writer.interface;
+
+        w.writeAll(data) catch |err| switch (err) {
+            error.WriteFailed => return writer.err orelse err,
+        };
+        w.flush() catch |err| switch (err) {
+            error.WriteFailed => return writer.err orelse err,
+        };
     }
 
     pub fn writeAll(self: *@This(), data: []const u8) !void {
@@ -125,7 +153,17 @@ pub const Stream = struct {
             }
             return;
         }
-        return writeStream(self.stream, self.io, data);
+        return self.writeStream(data);
+    }
+
+    fn readStream(self: *@This(), buf: []u8) !usize {
+        var vecs: [1][]u8 = .{buf};
+        var reader = self.stream.reader(self.io, &.{});
+        const r = &reader.interface;
+        return r.readVec(&vecs) catch |err| switch (err) {
+            error.ReadFailed => return reader.err orelse err,
+            else => return err,
+        };
     }
 
     pub fn read(self: *Stream, buf: []u8) !usize {
@@ -139,7 +177,7 @@ pub const Stream = struct {
             return read_len;
         }
 
-        return readStream(self.stream, self.io, buf);
+        return self.readStream(buf);
     }
 
     pub fn readWithTimeout(self: *@This(), buffer: []u8, timeout_ms: i32) !usize {
@@ -221,28 +259,6 @@ fn sockShutdown(sock: posix.socket_t, how: ShutdownHow) !void {
     }
 }
 
-fn readStream(stream: Io.net.Stream, io: Io, buf: []u8) !usize {
-    var vecs: [1][]u8 = .{buf};
-    var reader = stream.reader(io, &.{});
-    const r = &reader.interface;
-    return r.readVec(&vecs) catch |err| switch (err) {
-        error.ReadFailed => return reader.err orelse err,
-        else => return err,
-    };
-}
-
-fn writeStream(stream: Io.net.Stream, io: Io, data: []const u8) !void {
-    var buf: [1024]u8 = undefined;
-    var writer = stream.writer(io, &buf);
-    const w = &writer.interface;
-    w.writeAll(data) catch |err| switch (err) {
-        error.WriteFailed => return writer.err orelse err,
-    };
-    w.flush() catch |err| switch (err) {
-        error.WriteFailed => return writer.err orelse err,
-    };
-}
-
 // Sends a best-effort Terminate ('X') message, shielded from cancellation so
 // teardown can't be interrupted.
 pub fn sendTerminate(stream: *Stream, io: Io) void {
@@ -259,22 +275,27 @@ fn isHostName(host: []const u8) bool {
     return std.mem.findNone(u8, host, "0123456789.") != null;
 }
 
-// test "cancel stream while read" {
-//     const allocator = testing.allocator;
-//     const io = testing.io;
-//
-//     var stream = try Stream.connect(io, allocator, .{ .port = 5432, .host = "localhost" }, null);
-//     defer stream.close();
-//
-//     const pipes = try Io.Threaded.pipe2(.{ .CLOEXEC = true });
-//     defer {
-//         Io.Threaded.closeFd(pipes[0]);
-//         Io.Threaded.closeFd(pipes[1]);
-//     }
-//
-//     stream.stream.socket.handle = pipes[0];
-//
-//     var buf: [256]u8 = undefined;
-//
-//     try testing.expectError(error.Timeout, stream.readWithTimeout(&buf, 250));
-// }
+test "cancel stream while read" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    var stream = try Stream.init(allocator, io, .{ 
+        .port = 5432,
+        .host = "localhost",
+        .database = "db",
+        .application_name = "Ergo test",
+        .startup_parameters = .init(allocator) }, null);
+    defer allocator.free(stream.buffer);
+
+    const pipes = try Io.Threaded.pipe2(.{ .CLOEXEC = true });
+    defer {
+        Io.Threaded.closeFd(pipes[0]);
+        Io.Threaded.closeFd(pipes[1]);
+    }
+
+    stream.stream.socket.handle = pipes[0];
+
+    var buf: [256]u8 = undefined;
+
+    try testing.expectError(error.Timeout, stream.readWithTimeout(&buf, 250));
+}
