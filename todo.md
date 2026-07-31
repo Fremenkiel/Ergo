@@ -18,3 +18,5 @@ w.Write needs SSL handling
 Make sure prepareForBind works:
 Drop pool
 Implement SCRAM-SHA-256-PLUS
+
+Cache table schema and figure out a indicator of the schema having changed, to cut down on reads.
