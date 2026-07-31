@@ -48,6 +48,7 @@ pub const Stream = struct {
     pub fn init(allocator: mem.Allocator) *Stream {
         const s = allocator.create(Stream) catch unreachable;
         s.* = .{
+            .allocator = allocator,
             .closed = false,
             .read_index = 0,
             .to_read = .empty,

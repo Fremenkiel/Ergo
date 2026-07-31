@@ -199,7 +199,7 @@ pub const Conn = struct {
         }
     }
 
-    pub fn queryOpts(self: *Conn, sql: []const u8, opts: QueryOpts) !*Result {
+    pub fn query(self: *Conn, sql: []const u8, opts: QueryOpts) !*Result {
         if (self.canQuery() == false) {
             return error.ConnectionBusy;
         }
@@ -516,7 +516,7 @@ test "PG: query column names" {
     var c = try t.connect(allocator, io, opts);
     defer c.deinit();
     {
-        var result = try c.queryOpts(
+        var result = try c.query(
         \\ SELECT
         \\   a.attname AS column_name,
         \\   COALESCE((SELECT string_agg(c.contype::text, '') FROM pg_constraint c WHERE a.attnum = ANY(c.conkey) AND c.conrelid = a.attrelid), '') AS constraint_types
@@ -530,7 +530,7 @@ test "PG: query column names" {
     }
 
     {
-        var result = try c.queryOpts("select 1 as id, 'leto' as name", .{ .column_names = true });
+        var result = try c.query("select 1 as id, 'leto' as name", .{ .column_names = true });
         defer result.deinit(allocator);
         try testing.expectEqual(2, result.column_names.len);
         try testing.expectEqualStrings("id", result.column_names[0]);
@@ -612,7 +612,7 @@ test "Conn: query is cancelable" {
 
     const S = struct {
         fn sleepQuery(c: *Conn) !void {
-            var result = try c.queryOpts("select pg_sleep(3)", .{});
+            var result = try c.query("select pg_sleep(3)", .{});
             result.deinit(allocator);
         }
     };

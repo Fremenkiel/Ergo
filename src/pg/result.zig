@@ -260,7 +260,7 @@ pub const Row = struct {
         }
 };
 
-// const t = @import("t.zig");
+const t = @import("t.zig");
 // test "Result: ints" {
 //     const allocator = std.testing.allocator;
 //     var c = try t.connect(.{});
@@ -514,27 +514,36 @@ pub const Row = struct {
 //     try t.expectEqualSlice(u8, &.{ 252, 190, 191, 15, 185, 150, 67, 185, 152, 24, 103, 43, 198, 137, 205, 168 }, row.get([]u8, 0));
 //     try t.expectEqualSlice(u8, &.{ 174, 47, 71, 95, 128, 112, 65, 183, 186, 51, 134, 187, 168, 137, 123, 222 }, row.get([]u8, 1));
 // }
-//
-// test "Result: lsn" {
-//     const allocator = std.testing.allocator;
-//     var c = try t.connect(.{});
-//     defer c.deinit();
-//     const sql = "select $1::pg_lsn + 1";
-//     var result = try c.query(sql, .{32788447688});
-//     defer result.deinit(allocator);
-//
-//     const row = (try result.nextUnsafe()).?;
-//     try testing.expectEqual(32788447689, row.get(i64, 0));
-// }
-//
+
+test "Result: lsn" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    var c = try t.connect(allocator, io, .{ .host = "localhost", .username = "db_rw", .password = "12345678", .database = "db", .application_name = "Ergo test", .startup_parameters = .init(allocator) });
+    defer c.deinit();
+
+    const sql = try std.fmt.allocPrint(allocator, "SELECT {d}::pg_lsn + 1", .{32788447688});
+    defer allocator.free(sql);
+
+    var result = try c.query(sql, .{});
+    defer result.deinit(allocator);
+
+    const row = (try result.next()).?;
+    try testing.expectEqual(32788447689, row.get(i64, 0));
+}
+
 // test "Result: safe" {
-//     const allocator = std.testing.allocator;
-//     var c = try t.connect(.{});
+//     const allocator = testing.allocator;
+//     const io = testing.io;
+//
+//     var c = try t.connect(allocator, io, .{ .host = "localhost", .username = "db_wr", .database = "db", .application_name = "Ergo test", .startup_parameters = .init(allocator) });
 //     defer c.deinit();
-//     const sql = "select $1::int, $2::int";
+//
+//     const sql = try std.fmt.allocPrint(allocator, "SELECT {?}::int, {?}::int", .{ @as(?i32, 321), @as(?i32, null) });
+//     defer allocator.free(sql);
 //
 //     {
-//         var result = try c.query(sql, .{ @as(?i32, 321), @as(?i32, null) });
+//         var result = try c.query(sql, .{});
 //         defer result.deinit(allocator);
 //         const row = (try result.next()).?;
 //         try testing.expectEqual(321, try row.get(i32, 0));

@@ -29,9 +29,9 @@ fn assert(check: bool, err: anyerror) !void {
     if (!check) return err;
 }
 
-pub const StartupMessage = TStartupMessage(Stream);
+pub const StartupMessage = StartupMessageT(Stream);
 
-pub fn TStartupMessage(comptime ProtocolStream: type) type {
+pub fn StartupMessageT(comptime ProtocolStream: type) type {
     return struct {
         const startup_message_protocol: []const u8 = &[_]u8{ 0, 3, 0, 0 };
 
@@ -86,9 +86,9 @@ pub fn TStartupMessage(comptime ProtocolStream: type) type {
     };
 }
 
-pub const SASLResponse = TSASLResponse(Stream);
+pub const SASLResponse = SASLResponseT(Stream);
 
-pub fn TSASLResponse(comptime ProtocolStream: type) type {
+pub fn SASLResponseT(comptime ProtocolStream: type) type {
     return struct {
         pub fn write(allocator: mem.Allocator, stream: *ProtocolStream, data: []const u8) !void {
             // 4 +   N
@@ -116,9 +116,9 @@ pub fn TSASLResponse(comptime ProtocolStream: type) type {
     };
 }
 
-pub const SASLInitialResponse = TSASLInitialResponse(Stream);
+pub const SASLInitialResponse = SASLInitialResponseT(Stream);
 
-pub fn TSASLInitialResponse(comptime ProtocolStream: type) type {
+pub fn SASLInitialResponseT(comptime ProtocolStream: type) type {
     return struct {
         pub fn write(allocator: mem.Allocator, stream: *ProtocolStream, response: []const u8, mechanism: []const u8) !void {
             // 4 +   M          + 1 + 4             + R
@@ -154,65 +154,73 @@ pub fn TSASLInitialResponse(comptime ProtocolStream: type) type {
     };
 }
 
-pub const Query = struct {
-    pub fn write(allocator: mem.Allocator, stream: *Stream, sql: []const u8) !void {
-        try assert(sql.len > 0, ProtocolError.InvalidData);
-        
-        // 4   + S    + 1
-        // len + $sql + 0
-        const payload_len = 5 + sql.len;
+pub const Query = QueryT(Stream);
 
-        // +1 for the type field, 'Q'
-        const total_length = payload_len + 1;
-        try assert(total_length == @sizeOf(u8) + @sizeOf(u32) + sql.len + @sizeOf(u8), ProtocolError.InvalidMessageLength);
+pub fn QueryT(comptime ProtocolStream: type) type {
+    return struct {
+        pub fn write(allocator: mem.Allocator, stream: *ProtocolStream, sql: []const u8) !void {
+            try assert(sql.len > 0, ProtocolError.InvalidData);
 
-        var buf: []u8 = undefined;
-        buf = try allocator.alloc(u8, total_length);
-        defer allocator.free(buf);
-        try assert(buf.len == total_length, ProtocolError.InvalidBufferLength);
+            // 4   + S    + 1
+            // len + $sql + 0
+            const payload_len = 5 + sql.len;
 
-        var writer = Io.Writer.fixed(buf);
+            // +1 for the type field, 'Q'
+            const total_length = payload_len + 1;
+            try assert(total_length == @sizeOf(u8) + @sizeOf(u32) + sql.len + @sizeOf(u8), ProtocolError.InvalidMessageLength);
 
-        try writer.writeByte('Q');
-        try writer.writeInt(u32, @intCast(payload_len), .big);
-        try writer.writeAll(sql);
-        try writer.writeByte(0);
+            var buf: []u8 = undefined;
+            buf = try allocator.alloc(u8, total_length);
+            defer allocator.free(buf);
+            try assert(buf.len == total_length, ProtocolError.InvalidBufferLength);
 
-        try assert(buf[0] == 'Q', ProtocolError.InvalidMessageType);
-        try assert(buf[buf.len - 1] == 0, ProtocolError.InvalidStringDelimitor);
+            var writer = Io.Writer.fixed(buf);
 
-        try stream.writeAll(buf);
-    }
-};
+            try writer.writeByte('Q');
+            try writer.writeInt(u32, @intCast(payload_len), .big);
+            try writer.writeAll(sql);
+            try writer.writeByte(0);
 
-pub const PasswordMessage = struct {
-    pub fn write(allocator: mem.Allocator, stream: *Stream, password: []const u8) !void {
-        // +4 since the payload length includes the length itself
-        // +1 for null terminated string
-        const payload_len = password.len + 5;
+            try assert(buf[0] == 'Q', ProtocolError.InvalidMessageType);
+            try assert(buf[buf.len - 1] == 0, ProtocolError.InvalidStringDelimitor);
 
-        // +1 for the type field, 'p'
-        const total_length = payload_len + 1;
-        try assert(total_length == @sizeOf(u8) + @sizeOf(u32) + password.len + @sizeOf(u8), ProtocolError.InvalidMessageLength);
+            try stream.writeAll(buf);
+        }
+    };
+}
 
-        var buf: []u8 = undefined;
-        buf = try allocator.alloc(u8, total_length);
-        defer allocator.free(buf);
-        try assert(buf.len == total_length, ProtocolError.InvalidBufferLength);
+pub const PasswordMessage = PasswordMessageT(Stream);
 
-        var writer = Io.Writer.fixed(buf);
+pub fn PasswordMessageT(comptime ProtocolStream: type) type {
+    return struct {
+        pub fn write(allocator: mem.Allocator, stream: *ProtocolStream, password: []const u8) !void {
+            // +4 since the payload length includes the length itself
+            // +1 for null terminated string
+            const payload_len = password.len + 5;
 
-        try writer.writeByte('p');
-        try writer.writeInt(u32, @intCast(payload_len), .big);
-        try writer.writeAll(password);
-        try writer.writeByte(0);
+            // +1 for the type field, 'p'
+            const total_length = payload_len + 1;
+            try assert(total_length == @sizeOf(u8) + @sizeOf(u32) + password.len + @sizeOf(u8), ProtocolError.InvalidMessageLength);
 
-        try assert(buf[0] == 'p', ProtocolError.InvalidMessageType);
-        try assert(buf[buf.len - 1] == 0, ProtocolError.InvalidStringDelimitor);
+            var buf: []u8 = undefined;
+            buf = try allocator.alloc(u8, total_length);
+            defer allocator.free(buf);
+            try assert(buf.len == total_length, ProtocolError.InvalidBufferLength);
 
-        try stream.writeAll(buf);
-    }
-};
+            var writer = Io.Writer.fixed(buf);
+
+            try writer.writeByte('p');
+            try writer.writeInt(u32, @intCast(payload_len), .big);
+            try writer.writeAll(password);
+            try writer.writeByte(0);
+
+            try assert(buf[0] == 'p', ProtocolError.InvalidMessageType);
+            try assert(buf[buf.len - 1] == 0, ProtocolError.InvalidStringDelimitor);
+
+            try stream.writeAll(buf);
+        }
+    };
+}
 
 pub const CommandComplete = struct {
     pub fn parse(data: []const u8) !?i64 {
@@ -366,14 +374,13 @@ const MockStream = struct {
     }
 };
 
-const TestStartupMessage = TStartupMessage(MockStream);
-
 test "StartupMessage: write" {
     const allocator = testing.allocator;
 
     var mock_stream = try MockStream.init(allocator);
     defer mock_stream.deinit();
 
+    const TestStartupMessage = StartupMessageT(MockStream);
     try TestStartupMessage.write(allocator, &mock_stream, .{ .username = "james", .database = "doe", .host = "localhost", .application_name = "Ergo test", .startup_parameters = .init(allocator) });
 
     var reader = Io.Reader.fixed(mock_stream.toString());
@@ -398,14 +405,13 @@ test "StartupMessage: write" {
     try testing.expectError(error.EndOfStream, reader.take(1));
 }
 
-const TestSASLResponse = TSASLResponse(MockStream);
-
 test "SASLResponse: write" {
     const allocator = testing.allocator;
 
     var mock_stream = try MockStream.init(allocator);
     defer mock_stream.deinit();
 
+    const TestSASLResponse = SASLResponseT(MockStream);
     try TestSASLResponse.write(allocator, &mock_stream, "the response");
 
     var reader = Io.Reader.fixed(mock_stream.toString());
@@ -420,56 +426,75 @@ test "SASLResponse: write" {
     try testing.expectError(error.EndOfStream, reader.takeByte());
 }
 
-const TestSASLInitialResponse = TSASLInitialResponse(MockStream);
-
 test "SASLInitialResponse: write" {
     const allocator = testing.allocator;
 
     var mock_stream = try MockStream.init(allocator);
     defer mock_stream.deinit();
 
+    const TestSASLInitialResponse = SASLInitialResponseT(MockStream);
     try TestSASLInitialResponse.write(allocator, &mock_stream, "a sasl response", "SCRAM-SHA-256");
 
     var reader = Io.Reader.fixed(mock_stream.toString());
 
     const message_type = try reader.takeByte();
     const payload_len = try reader.takeInt(u32, .big);
-    const payload = try reader.take(@as(usize, @intCast(payload_len)) - @sizeOf(@TypeOf(payload_len)));
+    const mechanism = try reader.takeDelimiter(0);
     const response_len = try reader.takeInt(u32, .big);
-    const response = try reader.take(@as(usize, @intCast(response_len)) - @sizeOf(@TypeOf(response_len)));
+    const response = try reader.take(response_len);
 
     try testing.expectEqual('p', message_type);
     try testing.expectEqual(37, payload_len);
-    try testing.expectEqualStrings("SCRAM-SHA-256", payload);
+    try testing.expectEqualStrings("SCRAM-SHA-256", mechanism.?);
     try testing.expectEqual(15, response_len);
     try testing.expectEqualStrings("a sasl response", response);
     try testing.expectError(error.EndOfStream, reader.takeByte());
+
+    try testing.expectEqual(@sizeOf(@TypeOf(payload_len)) + mechanism.?.len + @sizeOf(u8) + @sizeOf(@TypeOf(response_len)) + response.len, payload_len);
 }
 
-// test "Query: write" {
-//     const allocator = testing.allocator;
-//     const io = testing.io;
-//
-//     const q = writeQuery(allocator, io, stream, "select 1");
-//
-//     var reader = Reader.init(buf.string());
-//     try testing.expectEqual('Q', try reader.byte());
-//     try testing.expectEqual(13, try reader.int32()); // payload length
-//     try testing.expectEqualStrings("select 1", try reader.restAsString());
-// }
-//
-// test "PasswordMessage: write" {
-//     var buf = try proto.Buffer.init(t.allocator, 128);
-//     defer buf.deinit();
-//
-//     const pw = PasswordMessage{ .password = "gh@nim@" };
-//     try pw.write(&buf);
-//
-//     var reader = Reader.init(buf.string());
-//     try t.expectEqual('p', try reader.byte());
-//     try t.expectEqual(12, try reader.int32()); // payload length
-//     try t.expectString("gh@nim@", try reader.string());
-// }
+test "Query: write" {
+    const allocator = testing.allocator;
+
+    var mock_stream = try MockStream.init(allocator);
+    defer mock_stream.deinit();
+
+    const TestQuery = QueryT(MockStream);
+    try TestQuery.write(allocator, &mock_stream, "select 1");
+
+    var reader = Io.Reader.fixed(mock_stream.toString());
+
+    const message_type = try reader.takeByte();
+    const payload_len = try reader.takeInt(u32, .big);
+    const query = try reader.takeDelimiter(0);
+
+    try testing.expectEqual('Q', message_type);
+    try testing.expectEqual(13, payload_len);
+    try testing.expectEqualStrings("select 1", query.?);
+    try testing.expectError(error.EndOfStream, reader.takeByte());
+}
+
+test "PasswordMessage: write" {
+    const allocator = testing.allocator;
+
+    var mock_stream = try MockStream.init(allocator);
+    defer mock_stream.deinit();
+
+    const TestPasswordMessage = PasswordMessageT(MockStream);
+    try TestPasswordMessage.write(allocator, &mock_stream, "gh@nim@");
+
+    var reader = Io.Reader.fixed(mock_stream.toString());
+
+    const message_type = try reader.takeByte();
+    const payload_len = try reader.takeInt(u32, .big);
+    const password = try reader.takeDelimiter(0);
+
+    try testing.expectEqual('p', message_type);
+    try testing.expectEqual(12, payload_len);
+    try testing.expectEqualStrings("gh@nim@", password.?);
+    try testing.expectError(error.EndOfStream, reader.takeByte());
+
+}
 
 test "CommandComplete: parse" {
     const allocator = testing.allocator;

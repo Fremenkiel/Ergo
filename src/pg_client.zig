@@ -644,7 +644,7 @@ pub const PgClient = struct {
         , .{ table_name });
         defer self.allocator.free(query);
 
-        var result = try self.default_conn.?.queryOpts(query, .{ .column_names = true });
+        var result = try self.default_conn.?.query(query, .{ .column_names = true });
         defer result.deinit(self.allocator);
 
         var columns = std.ArrayList(ColumnDef).empty;
