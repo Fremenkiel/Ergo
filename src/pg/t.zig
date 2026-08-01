@@ -6,11 +6,11 @@ const mem = std.mem;
 const Conn = @import("conn.zig").Conn;
 const Opts = @import("conn.zig").Opts;
 
-const test_opts: Opts = .{
+pub const test_opts: Opts = .{
     .port = 5432,
     .host = "localhost",
-    .username = "postgres",
-    .password = "postgres",
+    .username = "db_rw",
+    .password = "12345678",
     .database = "db",
     .application_name = "Ergo",
     .timeout_ms = 10_000,

@@ -230,7 +230,7 @@ pub const Row = struct {
                     if (value.is_null) {
                         return null;
                     }
-                    return self.get(opt.child, col);
+                    return try self.get(opt.child, col);
                 },
                 .@"struct", .@"union" => blk: {
                     if (@hasDecl(T, "fromPgzRow") == true) {
@@ -410,147 +410,168 @@ const t = @import("t.zig");
 //     }
 // }
 //
-// test "Result: text and bytea" {
-//     const allocator = std.testing.allocator;
-//     var c = try t.connect(.{});
-//     defer c.deinit();
-//     const sql = "select $1::text, $2::bytea";
-//
-//     {
-//         // empty
-//         var result = try c.query(sql, .{ "", "" });
-//         defer result.deinit(allocator);
-//         const row = (try result.nextUnsafe()).?;
-//         try t.expectString("", row.get([]u8, 0));
-//         try t.expectString("", row.get(?[]u8, 0).?);
-//         try t.expectString("", row.get([]u8, 1));
-//         try t.expectString("", row.get(?[]u8, 1).?);
-//         try result.drain();
-//     }
-//
-//     {
-//         // not empty
-//         var result = try c.query(sql, .{ "it's over 9000!!!", "i will Not fear" });
-//         defer result.deinit(allocator);
-//         const row = (try result.nextUnsafe()).?;
-//         try t.expectString("it's over 9000!!!", row.get([]u8, 0));
-//         try t.expectString("it's over 9000!!!", row.get(?[]const u8, 0).?);
-//         try t.expectString("i will Not fear", row.get([]const u8, 1));
-//         try t.expectString("i will Not fear", row.get(?[]u8, 1).?);
-//         try result.drain();
-//     }
-//
-//     {
-//         // as an array
-//         var result = try c.query(sql, .{ [_]u8{ 'a', 'c', 'b' }, [_]u8{ 'z', 'z', '3' } });
-//         defer result.deinit(allocator);
-//         const row = (try result.nextUnsafe()).?;
-//         try t.expectString("acb", row.get([]const u8, 0));
-//         try t.expectString("acb", row.get(?[]u8, 0).?);
-//         try t.expectString("zz3", row.get([]const u8, 1));
-//         try t.expectString("zz3", row.get(?[]u8, 1).?);
-//         try result.drain();
-//     }
-//
-//     {
-//         // as a slice
-//         const s1 = try t.allocator.alloc(u8, 4);
-//         defer t.allocator.free(s1);
-//         @memcpy(s1, "Leto");
-//
-//         var result = try c.query(sql, .{ s1, constString() });
-//         defer result.deinit(allocator);
-//         const row = (try result.nextUnsafe()).?;
-//         try t.expectString("Leto", row.get([]u8, 0));
-//         try t.expectString("Leto", row.get(?[]u8, 0).?);
-//         try t.expectString("Ghanima", row.get([]u8, 1));
-//         try t.expectString("Ghanima", row.get(?[]u8, 1).?);
-//         try result.drain();
-//     }
-//
-//     {
-//         // null
-//         var result = try c.query(sql, .{ null, null });
-//         defer result.deinit(allocator);
-//         const row = (try result.nextUnsafe()).?;
-//         try testing.expectEqual(null, row.get(?[]u8, 0));
-//         try testing.expectEqual(null, row.get(?[]u8, 1));
-//         try result.drain();
-//     }
-// }
-//
-// fn constString() []const u8 {
-//     return "Ghanima";
-// }
-//
-// test "Result: optional" {
-//     const allocator = std.testing.allocator;
-//     var c = try t.connect(.{});
-//     defer c.deinit();
-//     const sql = "select $1::int, $2::int";
-//
-//     {
-//         // int max
-//         var result = try c.query(sql, .{ @as(?i32, 321), @as(?i32, null) });
-//         defer result.deinit(allocator);
-//         const row = (try result.nextUnsafe()).?;
-//         try testing.expectEqual(321, row.get(i32, 0));
-//
-//         try testing.expectEqual(321, row.get(?i32, 0));
-//         try testing.expectEqual(null, row.get(?i32, 1));
-//         try testing.expectEqual(null, result.next());
-//     }
-// }
-//
-// test "Result: UUID" {
-//     const allocator = std.testing.allocator;
-//     var c = try t.connect(.{});
-//     defer c.deinit();
-//     const sql = "select $1::uuid, $2::uuid";
-//     var result = try c.query(sql, .{ "fcbebf0f-b996-43b9-9818-672bc689cda8", &[_]u8{ 174, 47, 71, 95, 128, 112, 65, 183, 186, 51, 134, 187, 168, 137, 123, 222 } });
-//     defer result.deinit(allocator);
-//
-//     const row = (try result.nextUnsafe()).?;
-//     try t.expectEqualSlice(u8, &.{ 252, 190, 191, 15, 185, 150, 67, 185, 152, 24, 103, 43, 198, 137, 205, 168 }, row.get([]u8, 0));
-//     try t.expectEqualSlice(u8, &.{ 174, 47, 71, 95, 128, 112, 65, 183, 186, 51, 134, 187, 168, 137, 123, 222 }, row.get([]u8, 1));
-// }
+fn constString() []const u8 {
+    return "Ghanima";
+}
 
-test "Result: lsn" {
+test "Result: text and bytea" {
     const allocator = testing.allocator;
     const io = testing.io;
 
-    var c = try t.connect(allocator, io, .{ .host = "localhost", .username = "db_rw", .password = "12345678", .database = "db", .application_name = "Ergo test", .startup_parameters = .init(allocator) });
+    var c = try t.connect(allocator, io, t.test_opts);
     defer c.deinit();
 
-    const sql = try std.fmt.allocPrint(allocator, "SELECT {d}::pg_lsn + 1", .{32788447688});
+    {
+        // empty
+        const sql = try std.fmt.allocPrint(allocator, "SELECT '{s}'::text, '{s}'::bytea", .{ "", "" });
+        defer allocator.free(sql);
+
+        var result = try c.query(sql, .{});
+        defer result.deinit(allocator);
+        const row = (try result.next()).?;
+        try testing.expectEqualStrings("", try row.get([]u8, 0));
+        try testing.expectEqualStrings("", (try row.get(?[]u8, 0)).?);
+        try testing.expectEqualStrings("", try row.get([]u8, 1));
+        try testing.expectEqualStrings("", (try row.get(?[]u8, 1)).?);
+        try result.drain();
+    }
+
+    {
+        // not empty
+        const sql = try std.fmt.allocPrint(allocator, "SELECT '{s}'::text, '{s}'::bytea", .{ "it's over 9000!!!", "i will Not fear" });
+        defer allocator.free(sql);
+
+        var result = try c.query(sql, .{});
+        defer result.deinit(allocator);
+        const row = (try result.next()).?;
+        try testing.expectEqualStrings("it's over 9000!!!", try row.get([]u8, 0));
+        try testing.expectEqualStrings("it's over 9000!!!", (try row.get(?[]const u8, 0)).?);
+        try testing.expectEqualStrings("i will Not fear", try row.get([]const u8, 1));
+        try testing.expectEqualStrings("i will Not fear", (try row.get(?[]u8, 1)).?);
+        try result.drain();
+    }
+
+    {
+        // as an array
+        const sql = try std.fmt.allocPrint(allocator, "SELECT '{s}'::text, '{s}'::bytea", .{ [_]u8{ 'a', 'c', 'b' }, [_]u8{ 'z', 'z', '3' } });
+        defer allocator.free(sql);
+
+        var result = try c.query(sql, .{});
+        defer result.deinit(allocator);
+        const row = (try result.next()).?;
+        try testing.expectEqualStrings("acb", try row.get([]const u8, 0));
+        try testing.expectEqualStrings("acb", (try row.get(?[]u8, 0)).?);
+        try testing.expectEqualStrings("zz3", try row.get([]const u8, 1));
+        try testing.expectEqualStrings("zz3", (try row.get(?[]u8, 1)).?);
+        try result.drain();
+    }
+
+    {
+        // as a slice
+        const s1 = try allocator.alloc(u8, 4);
+        defer allocator.free(s1);
+        @memcpy(s1, "Leto");
+
+        const sql = try std.fmt.allocPrint(allocator, "SELECT '{s}'::text, '{s}'::bytea", .{ s1, constString() });
+        defer allocator.free(sql);
+
+        var result = try c.query(sql, .{});
+        defer result.deinit(allocator);
+        const row = (try result.next()).?;
+        try testing.expectEqualStrings("Leto", try row.get([]u8, 0));
+        try testing.expectEqualStrings("Leto", (try row.get(?[]u8, 0)).?);
+        try testing.expectEqualStrings("Ghanima", try row.get([]u8, 1));
+        try testing.expectEqualStrings("Ghanima", (try row.get(?[]u8, 1)).?);
+        try result.drain();
+    }
+
+    {
+        // null
+        const sql = try std.fmt.allocPrint(allocator, "SELECT {any}::text, {any}::bytea", .{ null, null });
+        defer allocator.free(sql);
+
+        var result = try c.query(sql, .{});
+        defer result.deinit(allocator);
+        const row = (try result.next()).?;
+        try testing.expectEqual(null, try row.get(?[]u8, 0));
+        try testing.expectEqual(null, try row.get(?[]u8, 1));
+        try result.drain();
+    }
+}
+
+test "Result: optional" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    var c = try t.connect(allocator, io, t.test_opts);
+    defer c.deinit();
+
+    const sql = try std.fmt.allocPrint(allocator, "select {?}::int, {?}::int", .{ @as(?i32, 321), @as(?i32, null) });
     defer allocator.free(sql);
 
     var result = try c.query(sql, .{});
     defer result.deinit(allocator);
 
     const row = (try result.next()).?;
-    try testing.expectEqual(32788447689, row.get(i64, 0));
+    try testing.expectEqual(321, try row.get(i32, 0));
+
+    try testing.expectEqual(321, try row.get(?i32, 0));
+    try testing.expectEqual(null, try row.get(?i32, 1));
+    try testing.expectEqual(null, result.next());
 }
 
-// test "Result: safe" {
-//     const allocator = testing.allocator;
-//     const io = testing.io;
-//
-//     var c = try t.connect(allocator, io, .{ .host = "localhost", .username = "db_wr", .database = "db", .application_name = "Ergo test", .startup_parameters = .init(allocator) });
-//     defer c.deinit();
-//
-//     const sql = try std.fmt.allocPrint(allocator, "SELECT {?}::int, {?}::int", .{ @as(?i32, 321), @as(?i32, null) });
-//     defer allocator.free(sql);
-//
-//     {
-//         var result = try c.query(sql, .{});
-//         defer result.deinit(allocator);
-//         const row = (try result.next()).?;
-//         try testing.expectEqual(321, try row.get(i32, 0));
-//         try testing.expectEqual(error.InvalidType, row.get(bool, 0));
-//
-//         try testing.expectEqual(321, try row.get(?i32, 0));
-//         try testing.expectEqual(null, try row.get(?i32, 1));
-//         try testing.expectEqual(null, result.next());
-//     }
-// }
+test "Result: UUID" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    var c = try t.connect(allocator, io, t.test_opts);
+    defer c.deinit();
+
+    const sql = try std.fmt.allocPrint(allocator, "SELECT '{s}'::uuid, '{x}'::uuid", .{ "fcbebf0f-b996-43b9-9818-672bc689cda8", &[_]u8{ 174, 47, 71, 95, 128, 112, 65, 183, 186, 51, 134, 187, 168, 137, 123, 222 } });
+    defer allocator.free(sql);
+
+    var result = try c.query(sql, .{});
+    defer result.deinit(allocator);
+
+    const row = (try result.next()).?;
+    try testing.expectEqualSlices(u8, &.{ 252, 190, 191, 15, 185, 150, 67, 185, 152, 24, 103, 43, 198, 137, 205, 168 }, try row.get([]u8, 0));
+    try testing.expectEqualSlices(u8, &.{ 174, 47, 71, 95, 128, 112, 65, 183, 186, 51, 134, 187, 168, 137, 123, 222 }, try row.get([]u8, 1));
+}
+
+test "Result: lsn" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    var c = try t.connect(allocator, io, t.test_opts);
+    defer c.deinit();
+
+    const sql = try std.fmt.allocPrint(allocator, "SELECT '0/{x}'::pg_lsn + 1", .{ 461045760 });
+    defer allocator.free(sql);
+
+    var result = try c.query(sql, .{});
+    defer result.deinit(allocator);
+
+    const row = (try result.next()).?;
+    try testing.expectEqual(461045761, try row.get(i64, 0));
+}
+
+test "Result: safe" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    var c = try t.connect(allocator, io, t.test_opts );
+    defer c.deinit();
+
+    const sql = try std.fmt.allocPrint(allocator, "SELECT {?}::int, {?}::int", .{ @as(?i32, 321), @as(?i32, null) });
+    defer allocator.free(sql);
+
+    var result = try c.query(sql, .{});
+    defer result.deinit(allocator);
+    const row = (try result.next()).?;
+    try testing.expectEqual(321, try row.get(i32, 0));
+    try testing.expectEqual(error.InvalidType, row.get(bool, 0));
+
+    try testing.expectEqual(321, try row.get(?i32, 0));
+    try testing.expectEqual(null, try row.get(?i32, 1));
+    try testing.expectEqual(null, result.next());
+}

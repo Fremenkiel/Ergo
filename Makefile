@@ -35,7 +35,8 @@ test-ch:
 test-pg:
 	zig build pg_test -Dopenssl=true \
   -Dopenssl_lib_path=/opt/homebrew/opt/openssl@3/lib \
-  -Dopenssl_include_path=/opt/homebrew/opt/openssl@3/include
+  -Dopenssl_include_path=/opt/homebrew/opt/openssl@3/include \
+	-freference-trace=10
 
 build:
 	zig build -Dopenssl=true \
