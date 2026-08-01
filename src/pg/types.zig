@@ -1637,24 +1637,23 @@ fn isExpectedId(comptime expected_oids: []const i32, actual: i32) bool {
     return false;
 }
 
+test "UUID: toString" {
+    try testing.expectError(error.InvalidUUID, UUID.toString(&.{ 73, 190, 142, 9, 170, 250, 176, 16, 73, 21 }));
 
-// test "UUID: toString" {
-//     try testing.expectError(error.InvalidUUID, UUID.toString(&.{ 73, 190, 142, 9, 170, 250, 176, 16, 73, 21 }));
-//
-//     const s = try UUID.toString(&.{ 183, 204, 40, 47, 236, 67, 73, 190, 142, 9, 170, 250, 176, 16, 73, 21 });
-//     try testing.expectEqualStrings("b7cc282f-ec43-49be-8e09-aafab0104915", &s);
-// }
-//
-// test "UUID: toBytes" {
-//     try testing.expectError(error.InvalidUUID, UUID.toBytes(""));
-//
-//     {
-//         const s = try UUID.toBytes("166B4751-D702-4FB9-9A2A-CD6B69ED18D6");
-//         try testing.expectEqualStrings(u8, &.{ 22, 107, 71, 81, 215, 2, 79, 185, 154, 42, 205, 107, 105, 237, 24, 214 }, &s);
-//     }
-//
-//     {
-//         const s = try UUID.toBytes("166b4751-d702-4fb9-9a2a-cd6b69ed18d7");
-//         try testing.expectEqualStrings(u8, &.{ 22, 107, 71, 81, 215, 2, 79, 185, 154, 42, 205, 107, 105, 237, 24, 215 }, &s);
-//     }
-// }
+    const s = try UUID.toString(&.{ 183, 204, 40, 47, 236, 67, 73, 190, 142, 9, 170, 250, 176, 16, 73, 21 });
+    try testing.expectEqualStrings("b7cc282f-ec43-49be-8e09-aafab0104915", &s);
+}
+
+test "UUID: toBytes" {
+    try testing.expectError(error.InvalidUUID, UUID.toBytes(""));
+
+    {
+        const s = try UUID.toBytes("166B4751-D702-4FB9-9A2A-CD6B69ED18D6");
+        try testing.expectEqualSlices(u8, &.{ 22, 107, 71, 81, 215, 2, 79, 185, 154, 42, 205, 107, 105, 237, 24, 214 }, &s);
+    }
+
+    {
+        const s = try UUID.toBytes("166b4751-d702-4fb9-9a2a-cd6b69ed18d7");
+        try testing.expectEqualSlices(u8, &.{ 22, 107, 71, 81, 215, 2, 79, 185, 154, 42, 205, 107, 105, 237, 24, 215 }, &s);
+    }
+}

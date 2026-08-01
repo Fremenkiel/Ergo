@@ -53,6 +53,19 @@ pub const Opts = struct {
     };
 };
 
+pub const State = enum {
+    idle,
+
+    // something bad happened
+    fail,
+
+    // we're doing a query
+    query,
+
+    // we're in a transaction
+    transaction,
+};
+
 pub const Conn = struct {
     // If we own the ssl context (which only happens if the connection is
     // created directly and NOT through a pool), then we have to free it
@@ -95,19 +108,6 @@ pub const Conn = struct {
 
     opts: Opts,
 
-    const State = enum {
-        idle,
-
-        // something bad happened
-        fail,
-
-        // we're doing a query
-        query,
-
-        // we're in a transaction
-        transaction,
-    };
-
     pub const QueryOpts = struct {
         timeout_ms: ?i32 = null,
         column_names: bool = true,
@@ -119,7 +119,7 @@ pub const Conn = struct {
         cache_name: ?[]const u8 = null,
     };
 
-    pub fn init(io: Io, allocator: mem.Allocator, opts: Opts) !Conn {
+    pub fn init(io: Io, allocator: mem.Allocator, opts: Opts) !@This() {
         var ssl_ctx: ?*openssl.SSL_CTX = null;
         switch (opts.tls) {
             .off => {},
@@ -139,7 +139,7 @@ pub const Conn = struct {
         errdefer result_state.deinit(allocator);
 
         const param_oids = try allocator.alloc(i32, opts.result_state_size);
-        errdefer param_oids.deinit(allocator);
+        errdefer param_oids.free(allocator);
 
         return .{
             .err = null,
@@ -157,11 +157,11 @@ pub const Conn = struct {
         };
     }
 
-    pub fn cancel(self: *Conn) void {
+    pub fn cancel(self: *@This()) void {
         self.stream.shutdown(.recv) catch {};
     }
 
-    pub fn deinit(self: *Conn) void {
+    pub fn deinit(self: *@This()) void {
         if (self.err_data) |err_data| {
             self.allocator.free(err_data);
         }
@@ -176,7 +176,7 @@ pub const Conn = struct {
         self.prepared_statements.deinit(self.allocator);
     }
 
-    pub fn auth(self: *Conn) !void {
+    pub fn auth(self: *@This()) !void {
         var conn_auth = Auth.init(self.allocator, self.io, &self.reader, self.opts);
 
         conn_auth.auth() catch |err| {
@@ -199,7 +199,7 @@ pub const Conn = struct {
         }
     }
 
-    pub fn query(self: *Conn, sql: []const u8, opts: QueryOpts) !*Result {
+    pub fn query(self: *@This(), sql: []const u8, opts: QueryOpts) !*Result {
         if (self.canQuery() == false) {
             return error.ConnectionBusy;
         }
@@ -259,13 +259,13 @@ pub const Conn = struct {
         };
     }
 
-    pub fn peekForError(self: *Conn) !void {
+    pub fn peekForError(self: *@This()) !void {
         const data = (try self.reader.peekForError()) orelse return;
         try self.readyForQuery();
         return self.setErr(data);
     }
 
-    pub fn read(self: *Conn) !Message {
+    pub fn read(self: *@This()) !Message {
         var reader = &self.reader;
         while (true) {
             const msg = reader.next() catch |err| {
@@ -285,7 +285,6 @@ pub const Conn = struct {
                 'S' => {}, // TODO: ParameterStatus,
                 'N' => {}, // TODO: NoticeResponse
                 'E' => {
-                    std.debug.print("err msg: {s}\n", .{ msg.data});
                     return self.setErr(msg.data);
                 },
                 else => return msg,
@@ -293,14 +292,14 @@ pub const Conn = struct {
         }
     }
 
-    pub fn write(self: *Conn, data: []const u8) !void {
+    pub fn write(self: *@This(), data: []const u8) !void {
         self.stream.writeAll(data) catch |err| {
             self.state = .fail;
             return err;
         };
     }
 
-    pub fn sendStandbyStatusUpdate(self: *Conn, last_lsn: u64, server_timestamp: i64) !void {
+    pub fn sendStandbyStatusUpdate(self: *@This(), last_lsn: u64, server_timestamp: i64) !void {
         var buf: [34]u8 = undefined;
         buf[0] = 'r';
         std.mem.writeInt(u64, buf[1..9], last_lsn, .big); // received
@@ -319,7 +318,7 @@ pub const Conn = struct {
     }
 
 
-    fn setErr(self: *Conn, data: []const u8) error{ PG, OutOfMemory } {
+    fn setErr(self: *@This(), data: []const u8) error{ PG, OutOfMemory } {
         const allocator = self.allocator;
 
         // That means clearing out any previous duped error data we had
@@ -333,12 +332,12 @@ pub const Conn = struct {
         return error.PG;
     }
 
-    pub fn unexpectedDBMessage(self: *Conn) error{UnexpectedDBMessage} {
+    pub fn unexpectedDBMessage(self: *@This()) error{UnexpectedDBMessage} {
         self.state = .fail;
         return error.UnexpectedDBMessage;
     }
 
-    fn canQuery(self: *const Conn) bool {
+    fn canQuery(self: *const @This()) bool {
         const state = self.state;
         if (state == .idle or state == .transaction) {
             return true;
@@ -346,7 +345,7 @@ pub const Conn = struct {
         return false;
     }
 
-    pub fn readyForQuery(self: *Conn) !void {
+    pub fn readyForQuery(self: *@This()) !void {
         const msg = try self.read();
         if (msg.type != 'Z') {
             return self.unexpectedDBMessage();
@@ -355,7 +354,7 @@ pub const Conn = struct {
 
     // Drain the trailing ReadyForQuery after a server error so the connection
     // stays usable. Best-effort, but never swallow a cancellation.
-    pub fn recoverFromError(self: *Conn) error{Canceled}!void {
+    pub fn recoverFromError(self: *@This()) error{Canceled}!void {
         self.readyForQuery() catch |err| {
             if (err == error.Canceled) return error.Canceled;
         };
@@ -639,7 +638,7 @@ test "Conn: query is cancelable" {
 
     try testing.expectError(error.Timeout, result);
     try testing.expectEqual(true, elapsed_ms < 1500); // prompt, not blocked until pg_sleep ends
-    try testing.expectEqual(Conn.State.fail, c.state);
+    try testing.expectEqual(State.fail, c.state);
 }
 
 fn expectNumeric(allocator: mem.Allocator, numeric: types.Numeric, expected: []const u8) !void {

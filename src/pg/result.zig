@@ -261,155 +261,204 @@ pub const Row = struct {
 };
 
 const t = @import("t.zig");
-// test "Result: ints" {
-//     const allocator = std.testing.allocator;
-//     var c = try t.connect(.{});
-//     defer c.deinit();
-//     const sql = "select $1::smallint, $2::int, $3::bigint";
-//
-//     {
-//         // int max
-//         var result = try c.query(sql, .{ @as(i16, 32767), @as(i32, 2147483647), @as(i64, 9223372036854775807) });
-//         defer result.deinit(allocator);
-//         const row = (try result.nextUnsafe()).?;
-//         try testing.expectEqual(32767, row.get(i16, 0));
-//         try testing.expectEqual(2147483647, row.get(i32, 1));
-//         try testing.expectEqual(9223372036854775807, row.get(i64, 2));
-//
-//         try testing.expectEqual(32767, row.get(?i16, 0));
-//         try testing.expectEqual(2147483647, row.get(?i32, 1));
-//         try testing.expectEqual(9223372036854775807, row.get(?i64, 2));
-//
-//         try testing.expectEqual(null, result.next());
-//     }
-//
-//     {
-//         // int min
-//         var result = try c.query(sql, .{ @as(i16, -32768), @as(i32, -2147483648), @as(i64, -9223372036854775808) });
-//         defer result.deinit(allocator);
-//         const row = (try result.nextUnsafe()).?;
-//         try testing.expectEqual(-32768, row.get(i16, 0));
-//         try testing.expectEqual(-2147483648, row.get(i32, 1));
-//         try testing.expectEqual(-9223372036854775808, row.get(i64, 2));
-//         try result.drain();
-//     }
-//
-//     {
-//         // int null
-//         var result = try c.query(sql, .{ null, null, null });
-//         defer result.deinit(allocator);
-//         defer result.drain() catch unreachable;
-//         const row = (try result.nextUnsafe()).?;
-//         try testing.expectEqual(null, row.get(?i16, 0));
-//         try testing.expectEqual(null, row.get(?i32, 1));
-//         try testing.expectEqual(null, row.get(?i64, 2));
-//     }
-//
-//     {
-//         // uint within limit
-//         var result = try c.query(sql, .{ @as(u16, 32767), @as(u32, 2147483647), @as(u64, 9223372036854775807) });
-//         defer result.deinit(allocator);
-//         const row = (try result.nextUnsafe()).?;
-//         try testing.expectEqual(32767, row.get(i16, 0));
-//         try testing.expectEqual(2147483647, row.get(i32, 1));
-//         try testing.expectEqual(9223372036854775807, row.get(i64, 2));
-//
-//         try testing.expectEqual(32767, row.get(?i16, 0));
-//         try testing.expectEqual(2147483647, row.get(?i32, 1));
-//         try testing.expectEqual(9223372036854775807, row.get(?i64, 2));
-//         try result.drain();
-//     }
-//
-//     {
-//         // u16 outside of limit
-//         try t.expectError(error.IntWontFit, c.query(sql, .{ @as(u16, 32768), @as(u32, 0), @as(u64, 0) }));
-//         // u32 outside of limit
-//         try t.expectError(error.IntWontFit, c.query(sql, .{ @as(u16, 0), @as(u32, 2147483648), @as(u64, 0) }));
-//         // u64 outside of limit
-//         try t.expectError(error.IntWontFit, c.query(sql, .{ @as(u16, 0), @as(u32, 0), @as(u64, 9223372036854775808) }));
-//     }
-// }
-//
-// test "Result: floats" {
-//     const allocator = std.testing.allocator;
-//     var c = try t.connect(.{});
-//     defer c.deinit();
-//     const sql = "select $1::float4, $2::float8";
-//
-//     {
-//         // positive float
-//         var result = try c.query(sql, .{ @as(f32, 1.23456), @as(f64, 1093.229183) });
-//         defer result.deinit(allocator);
-//         const row = (try result.nextUnsafe()).?;
-//         try testing.expectEqual(1.23456, row.get(f32, 0));
-//         try testing.expectEqual(1093.229183, row.get(f64, 1));
-//
-//         try testing.expectEqual(1.23456, row.get(?f32, 0));
-//         try testing.expectEqual(1093.229183, row.get(?f64, 1));
-//
-//         try testing.expectEqual(null, result.next());
-//     }
-//
-//     {
-//         // negative float
-//         var result = try c.query(sql, .{ @as(f32, -392.31), @as(f64, -99991.99992) });
-//         defer result.deinit(allocator);
-//         const row = (try result.nextUnsafe()).?;
-//         try testing.expectEqual(-392.31, row.get(f32, 0));
-//         try testing.expectEqual(-99991.99992, row.get(f64, 1));
-//         try testing.expectEqual(null, result.next());
-//     }
-//
-//     {
-//         // null float
-//         var result = try c.query(sql, .{ null, null });
-//         defer result.deinit(allocator);
-//         const row = (try result.nextUnsafe()).?;
-//         try testing.expectEqual(null, row.get(?f32, 0));
-//         try testing.expectEqual(null, row.get(?f64, 1));
-//         try testing.expectEqual(null, result.next());
-//     }
-// }
-//
-// test "Result: bool" {
-//     const allocator = std.testing.allocator;
-//     var c = try t.connect(.{});
-//     defer c.deinit();
-//     const sql = "select $1::bool";
-//
-//     {
-//         // true
-//         var result = try c.query(sql, .{true});
-//         defer result.deinit(allocator);
-//         defer result.drain() catch unreachable;
-//         const row = (try result.nextUnsafe()).?;
-//         try testing.expectEqual(true, row.get(bool, 0));
-//         try testing.expectEqual(true, row.get(?bool, 0));
-//         try testing.expectEqual(null, result.next());
-//     }
-//
-//     {
-//         // false
-//         var result = try c.query(sql, .{false});
-//         defer result.deinit(allocator);
-//         defer result.drain() catch unreachable;
-//         const row = (try result.nextUnsafe()).?;
-//         try testing.expectEqual(false, row.get(bool, 0));
-//         try testing.expectEqual(false, row.get(?bool, 0));
-//         try testing.expectEqual(null, result.next());
-//     }
-//
-//     {
-//         // null
-//         var result = try c.query(sql, .{null});
-//         defer result.deinit(allocator);
-//         defer result.drain() catch unreachable;
-//         const row = (try result.nextUnsafe()).?;
-//         try testing.expectEqual(null, row.get(?bool, 0));
-//         try testing.expectEqual(null, result.next());
-//     }
-// }
-//
+test "Result: ints" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    var c = try t.connect(allocator, io, t.test_opts);
+    defer c.deinit();
+
+    {
+        // int max
+        const sql = "SELECT 32767::smallint, 2147483647::int, 9223372036854775807::bigint";
+
+        var result = try c.query(sql, .{});
+        defer result.deinit(allocator);
+
+        const row = (try result.next()).?;
+
+        try testing.expectEqual(32767, row.get(i16, 0));
+        try testing.expectEqual(2147483647, row.get(i32, 1));
+        try testing.expectEqual(9223372036854775807, row.get(i64, 2));
+
+        try testing.expectEqual(32767, row.get(?i16, 0));
+        try testing.expectEqual(2147483647, row.get(?i32, 1));
+        try testing.expectEqual(9223372036854775807, row.get(?i64, 2));
+
+        try testing.expectEqual(null, result.next());
+    }
+
+    {
+        // int min
+        const sql = "SELECT '-32768'::smallint, '-2147483648'::int, '-9223372036854775808'::bigint";
+
+        var result = try c.query(sql, .{});
+        defer result.deinit(allocator);
+
+        const row = (try result.next()).?;
+
+        try testing.expectEqual(-32768, row.get(i16, 0));
+        try testing.expectEqual(-2147483648, row.get(i32, 1));
+        try testing.expectEqual(-9223372036854775808, row.get(i64, 2));
+        try result.drain();
+    }
+
+    {
+        // int null
+        const sql = "SELECT null::smallint, null::int, null::bigint";
+
+        var result = try c.query(sql, .{});
+        defer result.deinit(allocator);
+
+        defer result.drain() catch unreachable;
+        const row = (try result.next()).?;
+        
+        try testing.expectEqual(null, row.get(?i16, 0));
+        try testing.expectEqual(null, row.get(?i32, 1));
+        try testing.expectEqual(null, row.get(?i64, 2));
+    }
+
+    {
+        // uint within limit
+        const sql = "SELECT 32767::smallint, 2147483647::int, 9223372036854775807::bigint";
+
+        var result = try c.query(sql, .{});
+        defer result.deinit(allocator);
+
+        const row = (try result.next()).?;
+
+        try testing.expectEqual(32767, row.get(i16, 0));
+        try testing.expectEqual(2147483647, row.get(i32, 1));
+        try testing.expectEqual(9223372036854775807, row.get(i64, 2));
+
+        try testing.expectEqual(32767, row.get(?i16, 0));
+        try testing.expectEqual(2147483647, row.get(?i32, 1));
+        try testing.expectEqual(9223372036854775807, row.get(?i64, 2));
+        try result.drain();
+    }
+
+    {
+        // u16 outside of limit
+        try testing.expectError(error.PG, c.query("SELECT 32768::smallint, 0::int, 0::bigint", .{}));
+        // u32 outside of limit
+        try testing.expectError(error.PG, c.query("SELECT 0::smallint, 2147483648::int, 0::bigint", .{}));
+        // u64 outside of limit
+        try testing.expectError(error.PG, c.query("SELECT 0::smallint, 0::int, 9223372036854775808::bigint", .{}));
+    }
+}
+
+test "Result: floats" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    var c = try t.connect(allocator, io, t.test_opts);
+    defer c.deinit();
+
+    {
+        // positive float
+        const sql = try std.fmt.allocPrint(allocator, "SELECT {d}::float4, {d}::float8", .{ @as(f32, 1.23456), @as(f64, 1093.229183) });
+        defer allocator.free(sql);
+
+        var result = try c.query(sql, .{});
+        defer result.deinit(allocator);
+
+        const row = (try result.next()).?;
+
+        try testing.expectEqual(1.23456, row.get(f32, 0));
+        try testing.expectEqual(1093.229183, row.get(f64, 1));
+
+        try testing.expectEqual(1.23456, row.get(?f32, 0));
+        try testing.expectEqual(1093.229183, row.get(?f64, 1));
+
+        try testing.expectEqual(null, result.next());
+    }
+
+    {
+        // negative float
+        const sql = try std.fmt.allocPrint(allocator, "SELECT {d}::float4, {d}::float8", .{ @as(f32, -392.31), @as(f64, -99991.99992) });
+        defer allocator.free(sql);
+
+        var result = try c.query(sql, .{});
+        defer result.deinit(allocator);
+
+        const row = (try result.next()).?;
+
+        try testing.expectEqual(-392.31, row.get(f32, 0));
+        try testing.expectEqual(-99991.99992, row.get(f64, 1));
+        try testing.expectEqual(null, result.next());
+    }
+
+    {
+        // null float
+        const sql = try std.fmt.allocPrint(allocator, "SELECT {s}::float4, {s}::float8", .{ "null", "null" });
+        defer allocator.free(sql);
+
+        var result = try c.query(sql, .{});
+        defer result.deinit(allocator);
+
+        const row = (try result.next()).?;
+
+        try testing.expectEqual(null, row.get(?f32, 0));
+        try testing.expectEqual(null, row.get(?f64, 1));
+        try testing.expectEqual(null, result.next());
+    }
+}
+
+test "Result: bool" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    var c = try t.connect(allocator, io, t.test_opts);
+    defer c.deinit();
+
+    {
+        // true
+        const sql = try std.fmt.allocPrint(allocator, "SELECT {s}::bool", .{ "true" });
+        defer allocator.free(sql);
+
+        var result = try c.query(sql, .{});
+        defer result.deinit(allocator);
+
+        defer result.drain() catch unreachable;
+        const row = (try result.next()).?;
+
+        try testing.expectEqual(true, row.get(bool, 0));
+        try testing.expectEqual(true, row.get(?bool, 0));
+        try testing.expectEqual(null, result.next());
+    }
+
+    {
+        // false
+        const sql = try std.fmt.allocPrint(allocator, "SELECT {s}::bool", .{ "false" });
+        defer allocator.free(sql);
+
+        var result = try c.query(sql, .{});
+        defer result.deinit(allocator);
+
+        defer result.drain() catch unreachable;
+        const row = (try result.next()).?;
+
+        try testing.expectEqual(false, row.get(bool, 0));
+        try testing.expectEqual(false, row.get(?bool, 0));
+        try testing.expectEqual(null, result.next());
+    }
+
+    {
+        // null
+        const sql = try std.fmt.allocPrint(allocator, "SELECT {s}::bool", .{ "null" });
+        defer allocator.free(sql);
+
+        var result = try c.query(sql, .{});
+        defer result.deinit(allocator);
+
+        defer result.drain() catch unreachable;
+        const row = (try result.next()).?;
+
+        try testing.expectEqual(null, row.get(?bool, 0));
+        try testing.expectEqual(null, result.next());
+    }
+}
+
 fn constString() []const u8 {
     return "Ghanima";
 }
@@ -438,14 +487,14 @@ test "Result: text and bytea" {
 
     {
         // not empty
-        const sql = try std.fmt.allocPrint(allocator, "SELECT '{s}'::text, '{s}'::bytea", .{ "it's over 9000!!!", "i will Not fear" });
+        const sql = try std.fmt.allocPrint(allocator, "SELECT '{s}'::text, '{s}'::bytea", .{ "its over 9000!!!", "i will Not fear" });
         defer allocator.free(sql);
 
         var result = try c.query(sql, .{});
         defer result.deinit(allocator);
         const row = (try result.next()).?;
-        try testing.expectEqualStrings("it's over 9000!!!", try row.get([]u8, 0));
-        try testing.expectEqualStrings("it's over 9000!!!", (try row.get(?[]const u8, 0)).?);
+        try testing.expectEqualStrings("its over 9000!!!", try row.get([]u8, 0));
+        try testing.expectEqualStrings("its over 9000!!!", (try row.get(?[]const u8, 0)).?);
         try testing.expectEqualStrings("i will Not fear", try row.get([]const u8, 1));
         try testing.expectEqualStrings("i will Not fear", (try row.get(?[]u8, 1)).?);
         try result.drain();
