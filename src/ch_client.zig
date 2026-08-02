@@ -34,7 +34,7 @@ pub const ChClient = struct {
     allocator: mem.Allocator,
     io: std.Io,
 
-    config: ch.ClickHouseConfig,
+    config: ch.ChConfig,
     os_user: []const u8,
 
     stream: ?net.Stream,
@@ -48,10 +48,10 @@ pub const ChClient = struct {
     write_buf: [4096]u8 = undefined,
 
     current_block: ch.block.Block,
-    server_info: ?ch.server_info.ServerInfo,
+    server_info: ?ch.protocol.ServerInfo,
     last_error: ?*ch.ch_error.Error,
 
-    pub fn init(allocator: mem.Allocator, io: std.Io, config: ch.ClickHouseConfig, os_user: []const u8) ChClient {
+    pub fn init(allocator: mem.Allocator, io: std.Io, config: ch.ChConfig, os_user: []const u8) ChClient {
         return .{
             .allocator = allocator,
             .io = io,
@@ -144,7 +144,7 @@ pub const ChClient = struct {
     }
 
     fn sendHello(self: *ChClient) !void {
-        if (self.writer == null) return ch.ClickHouseError.ConnectionFailed;
+        if (self.writer == null) return ch.ChError.ConnectionFailed;
 
         try ch.packet.writeClientPacketHeader(self.writer.?, .Hello);
         try ch.protocol.ClientHello.write(self.writer.?, self.config.application_name);
@@ -162,15 +162,15 @@ pub const ChClient = struct {
     }
 
     fn readServerHello(self: *ChClient) !void {
-        if (self.reader == null) return ch.ClickHouseError.ConnectionFailed;
+        if (self.reader == null) return ch.ChError.ConnectionFailed;
 
         const server_packet = try ch.protocol.readVarInt(self.reader.?);
 
         if (server_packet != @intFromEnum(ch.packet.ServerPacket.Hello)) {
-            return ch.ClickHouseError.ProtocolError;
+            return ch.ChError.ProtocolError;
         }
 
-        self.server_info = try ch.server_info.ServerInfo.read(self.allocator, self.reader.?);
+        self.server_info = try ch.protocol.ServerInfo.read(self.allocator, self.reader.?);
     }
 
     pub fn readBlock(self: *ChClient) !void {
@@ -276,7 +276,7 @@ pub const ChClient = struct {
                         stack,
                     );
 
-                    return ch.ClickHouseError.QueryFailed;
+                    return ch.ChError.QueryFailed;
                 },
                 else => {
                 }
@@ -354,7 +354,7 @@ pub const ChClient = struct {
                         stack,
                     );
 
-                    return ch.ClickHouseError.QueryFailed;
+                    return ch.ChError.QueryFailed;
                 },
                 else => {},
             }
@@ -850,7 +850,7 @@ test "processQueryResponse ensure correct read | Exception" {
 
     try std.testing.expectEqual(0, client.current_block.columns.len);
     try std.testing.expectEqual(client.writer.?.end, client.reader.?.seek);
-    try std.testing.expectEqual(@as(ch.ClickHouseError, ch.ClickHouseError.QueryFailed), return_error.?);
+    try std.testing.expectEqual(@as(ch.ChError, ch.ChError.QueryFailed), return_error.?);
 
     try std.testing.expect(client.last_error != null);
     try std.testing.expectEqual(ch.ch_error.ErrorCode.ServerError, client.last_error.?.code);

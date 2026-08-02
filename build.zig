@@ -17,7 +17,7 @@ pub fn build(b: *std.Build) void {
 
     // CH Module
     const ch_module = b.createModule(.{
-        .root_source_file = b.path("src/ch/ch.zig"),
+        .root_source_file = b.path("src/ch/root.zig"),
         .target = target,
         .optimize = optimize,
     });

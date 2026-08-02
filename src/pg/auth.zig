@@ -6,7 +6,10 @@ const testing = std.testing;
 
 const conn = @import("conn.zig");
 const protocol = @import("protocol.zig");
+const root = @import("root.zig");
 
+const PgConfig = root.PgConfig;
+const PgError = root.PgError;
 const Reader = @import("reader.zig").Reader;
 const Stream = @import("stream.zig").Stream;
 
@@ -19,12 +22,6 @@ const Stream = @import("stream.zig").Stream;
 //     (we expect our caller to clone the value)
 // a normal zig error on any other error
 
-pub const AuthError = error {
-UnableToAuthenticate,
-UnexpectedDBMessage,
-InvalidSASLFlow,
-};
-
 pub const Auth = struct {
     allocator: mem.Allocator,
     io: Io,
@@ -32,11 +29,11 @@ pub const Auth = struct {
     reader: *Reader,
     stream: *Stream,
 
-    opts: conn.Opts,
+    opts: PgConfig,
 
     err_data: ?[]const u8,
 
-    pub fn init(allocator: mem.Allocator, io: Io, reader: *Reader, opts: conn.Opts) Auth {
+    pub fn init(allocator: mem.Allocator, io: Io, reader: *Reader, opts: PgConfig) Auth {
         return .{
             .allocator = allocator,
             .io = io,
@@ -65,9 +62,9 @@ pub const Auth = struct {
             'R' => {},
             'E' => {
                 self.err_data = init_msg.data;
-                return AuthError.UnableToAuthenticate;
+                return PgError.UnableToAuthenticate;
             },
-            else => return AuthError.UnexpectedDBMessage,
+            else => return PgError.UnexpectedDBMessage,
         }
 
         switch (try protocol.AuthenticationRequest.parse(init_msg.data)) {
@@ -84,20 +81,20 @@ pub const Auth = struct {
             'R' => {},
             'E' => {
                 self.err_data = final_msg.data;
-                return AuthError.UnableToAuthenticate;
+                return PgError.UnableToAuthenticate;
             },
-            else => return AuthError.UnexpectedDBMessage,
+            else => return PgError.UnexpectedDBMessage,
         }
 
         switch (try protocol.AuthenticationRequest.parse(final_msg.data)) {
             .ok => return,
-            else => return AuthError.UnexpectedDBMessage,
+            else => return PgError.UnexpectedDBMessage,
         }
     }
 
     fn saslAuth(self: *@This(), req: protocol.AuthenticationRequest.SASL) !void {
         if (!req.scram_sha_256) {
-            return AuthError.UnexpectedDBMessage;
+            return PgError.UnexpectedDBMessage;
         }
         var sasl = try SASL.init(self.allocator, self.io);
         defer sasl.deinit();
@@ -111,9 +108,9 @@ pub const Auth = struct {
             'R' => {},
             'E' => {
                 self.err_data = init_msg.data;
-                return AuthError.UnableToAuthenticate;
+                return PgError.UnableToAuthenticate;
             },
-            else => return AuthError.InvalidSASLFlow,
+            else => return PgError.InvalidSASLFlow,
         }
         const continue_data = try protocol.AuthenticationSASLContinue.parse(init_msg.data);
         try sasl.serverResponse(continue_data);
@@ -129,9 +126,9 @@ pub const Auth = struct {
             'R' => {},
             'E' => {
                 self.err_data = msg.data;
-                return AuthError.UnableToAuthenticate;
+                return PgError.UnableToAuthenticate;
             },
-            else => return AuthError.InvalidSASLFlow,
+            else => return PgError.InvalidSASLFlow,
         }
         const final_data = try protocol.AuthenticationSASLFinal.parse(msg.data);
         try sasl.verifyServerFinal(final_data);

@@ -5,23 +5,15 @@ const mem = std.mem;
 const testing = std.testing;
 
 const conn = @import("conn.zig");
+const root = @import("root.zig");
+
+const PgConfig = root.PgConfig;
+const PgError = root.PgError;
 const Stream = @import("stream.zig").Stream;
 
 const user_key = "user";
 const database_key = "database";
 const application_name_key = "application_name";
-
-const ProtocolError = error {
-InvalidData,
-InvalidMessageLength,
-InvalidBufferLength,
-InvalidMessageType,
-InvalidStringDelimitor,
-InvalidAffectedCount,
-AuthNotSupported,
-InvalidResponseCode,
-InvalidWrite,
-};
 
 // Custom assert to ensure correct error testing. 
 // Should be replaced with native zig handling if implemented.
@@ -35,7 +27,7 @@ pub fn StartupMessageT(comptime ProtocolStream: type) type {
     return struct {
         const startup_message_protocol: []const u8 = &[_]u8{ 0, 3, 0, 0 };
 
-        pub fn write(allocator: mem.Allocator, stream: *ProtocolStream, opts: conn.Opts) !void {
+        pub fn write(allocator: mem.Allocator, stream: *ProtocolStream, opts: PgConfig) !void {
             var payload_len: u64 = 4 + 1; // len + end zero
             payload_len += startup_message_protocol.len;
             payload_len += user_key.len + opts.username.len + 2;
@@ -96,12 +88,12 @@ pub fn SASLResponseT(comptime ProtocolStream: type) type {
             const payload_len = 4 + data.len;
 
             const total_length = payload_len + 1;
-            try assert(total_length == @sizeOf(u8) + @sizeOf(u32) + data.len, ProtocolError.InvalidMessageLength);
+            try assert(total_length == @sizeOf(u8) + @sizeOf(u32) + data.len, PgError.InvalidMessageLength);
 
             var buf: []u8 = undefined;
             buf = try allocator.alloc(u8, total_length);
             defer allocator.free(buf);
-            try assert(buf.len == total_length, ProtocolError.InvalidBufferLength);
+            try assert(buf.len == total_length, PgError.InvalidBufferLength);
 
             var writer = Io.Writer.fixed(buf);
 
@@ -109,7 +101,7 @@ pub fn SASLResponseT(comptime ProtocolStream: type) type {
             try writer.writeInt(u32, @intCast(payload_len), .big);
             try writer.writeAll(data);
 
-            try assert(buf[0] == 'p', ProtocolError.InvalidMessageType);
+            try assert(buf[0] == 'p', PgError.InvalidMessageType);
 
             try stream.writeAll(buf);
         }
@@ -126,12 +118,12 @@ pub fn SASLInitialResponseT(comptime ProtocolStream: type) type {
             const payload_len = 9 + mechanism.len + response.len;
 
             const total_length = payload_len + 1;
-            try assert(total_length == @sizeOf(u8) + @sizeOf(u32) + mechanism.len + @sizeOf(u8) + @sizeOf(u32) + response.len, ProtocolError.InvalidMessageLength);
+            try assert(total_length == @sizeOf(u8) + @sizeOf(u32) + mechanism.len + @sizeOf(u8) + @sizeOf(u32) + response.len, PgError.InvalidMessageLength);
 
             var buf: []u8 = undefined;
             buf = try allocator.alloc(u8, total_length);
             defer allocator.free(buf);
-            try assert(buf.len == total_length, ProtocolError.InvalidBufferLength);
+            try assert(buf.len == total_length, PgError.InvalidBufferLength);
 
             var writer = Io.Writer.fixed(buf);
 
@@ -142,12 +134,12 @@ pub fn SASLInitialResponseT(comptime ProtocolStream: type) type {
             try writer.writeInt(u32, @intCast(response.len), .big);
             try writer.writeAll(response);
 
-            try assert(buf[0] == 'p', ProtocolError.InvalidMessageType);
+            try assert(buf[0] == 'p', PgError.InvalidMessageType);
 
             // -1 for index offset, +1 for the next byte.
-            try assert(buf[@sizeOf(u8) + @sizeOf(u32) + mechanism.len] == 0, ProtocolError.InvalidStringDelimitor);
+            try assert(buf[@sizeOf(u8) + @sizeOf(u32) + mechanism.len] == 0, PgError.InvalidStringDelimitor);
 
-            try assert(writer.end == total_length, ProtocolError.InvalidWrite);
+            try assert(writer.end == total_length, PgError.InvalidWrite);
 
             try stream.writeAll(buf);
         }
@@ -159,7 +151,7 @@ pub const Query = QueryT(Stream);
 pub fn QueryT(comptime ProtocolStream: type) type {
     return struct {
         pub fn write(allocator: mem.Allocator, stream: *ProtocolStream, sql: []const u8) !void {
-            try assert(sql.len > 0, ProtocolError.InvalidData);
+            try assert(sql.len > 0, PgError.InvalidData);
 
             // 4   + S    + 1
             // len + $sql + 0
@@ -167,12 +159,12 @@ pub fn QueryT(comptime ProtocolStream: type) type {
 
             // +1 for the type field, 'Q'
             const total_length = payload_len + 1;
-            try assert(total_length == @sizeOf(u8) + @sizeOf(u32) + sql.len + @sizeOf(u8), ProtocolError.InvalidMessageLength);
+            try assert(total_length == @sizeOf(u8) + @sizeOf(u32) + sql.len + @sizeOf(u8), PgError.InvalidMessageLength);
 
             var buf: []u8 = undefined;
             buf = try allocator.alloc(u8, total_length);
             defer allocator.free(buf);
-            try assert(buf.len == total_length, ProtocolError.InvalidBufferLength);
+            try assert(buf.len == total_length, PgError.InvalidBufferLength);
 
             var writer = Io.Writer.fixed(buf);
 
@@ -181,8 +173,8 @@ pub fn QueryT(comptime ProtocolStream: type) type {
             try writer.writeAll(sql);
             try writer.writeByte(0);
 
-            try assert(buf[0] == 'Q', ProtocolError.InvalidMessageType);
-            try assert(buf[buf.len - 1] == 0, ProtocolError.InvalidStringDelimitor);
+            try assert(buf[0] == 'Q', PgError.InvalidMessageType);
+            try assert(buf[buf.len - 1] == 0, PgError.InvalidStringDelimitor);
 
             try stream.writeAll(buf);
         }
@@ -200,12 +192,12 @@ pub fn PasswordMessageT(comptime ProtocolStream: type) type {
 
             // +1 for the type field, 'p'
             const total_length = payload_len + 1;
-            try assert(total_length == @sizeOf(u8) + @sizeOf(u32) + password.len + @sizeOf(u8), ProtocolError.InvalidMessageLength);
+            try assert(total_length == @sizeOf(u8) + @sizeOf(u32) + password.len + @sizeOf(u8), PgError.InvalidMessageLength);
 
             var buf: []u8 = undefined;
             buf = try allocator.alloc(u8, total_length);
             defer allocator.free(buf);
-            try assert(buf.len == total_length, ProtocolError.InvalidBufferLength);
+            try assert(buf.len == total_length, PgError.InvalidBufferLength);
 
             var writer = Io.Writer.fixed(buf);
 
@@ -214,8 +206,8 @@ pub fn PasswordMessageT(comptime ProtocolStream: type) type {
             try writer.writeAll(password);
             try writer.writeByte(0);
 
-            try assert(buf[0] == 'p', ProtocolError.InvalidMessageType);
-            try assert(buf[buf.len - 1] == 0, ProtocolError.InvalidStringDelimitor);
+            try assert(buf[0] == 'p', PgError.InvalidMessageType);
+            try assert(buf[buf.len - 1] == 0, PgError.InvalidStringDelimitor);
 
             try stream.writeAll(buf);
         }
@@ -224,9 +216,9 @@ pub fn PasswordMessageT(comptime ProtocolStream: type) type {
 
 pub const CommandComplete = struct {
     pub fn parse(data: []const u8) !?i64 {
-        try assert(data.len > 0, ProtocolError.InvalidData);
+        try assert(data.len > 0, PgError.InvalidData);
 
-        try assert(data[data.len - 1] == 0, ProtocolError.InvalidStringDelimitor);
+        try assert(data[data.len - 1] == 0, PgError.InvalidStringDelimitor);
 
         const buf = data[0 .. data.len - 1];
 
@@ -243,7 +235,7 @@ pub const CommandComplete = struct {
             return null;
         }
 
-        return std.fmt.parseInt(i64, buf[(i + 1)..], 10) catch ProtocolError.InvalidAffectedCount;
+        return std.fmt.parseInt(i64, buf[(i + 1)..], 10) catch PgError.InvalidAffectedCount;
     }
 };
 
@@ -259,7 +251,7 @@ pub const AuthenticationRequest = union(enum) {
     };
 
     pub fn parse(data: []const u8) !AuthenticationRequest {
-        try assert(data.len >= 4, ProtocolError.InvalidData);
+        try assert(data.len >= 4, PgError.InvalidData);
 
         var reader = Io.Reader.fixed(data);
 
@@ -270,17 +262,17 @@ pub const AuthenticationRequest = union(enum) {
             5 => {
                 // 4           + 4 + 4
                 // payload_len + 5 + $salt
-                try assert(data.len == 8, ProtocolError.InvalidData);
+                try assert(data.len == 8, PgError.InvalidData);
                 const md5 = try reader.take(data.len - reader.seek);
 
-                try assert(@sizeOf(@TypeOf(code)) + md5.len == data.len, ProtocolError.InvalidMessageLength);
+                try assert(@sizeOf(@TypeOf(code)) + md5.len == data.len, PgError.InvalidMessageLength);
 
                 return .{ .md5 = md5 };
             },
             10 => {
                 var sasl = SASL{};
 
-                try assert(@sizeOf(@TypeOf(code)) - reader.seek == 0, ProtocolError.InvalidMessageLength);
+                try assert(@sizeOf(@TypeOf(code)) - reader.seek == 0, PgError.InvalidMessageLength);
 
                 while (try readOptionalString(&reader)) |auth_mechanism| {
                     if (std.ascii.eqlIgnoreCase(auth_mechanism, "SCRAM-SHA-256")) {
@@ -291,22 +283,22 @@ pub const AuthenticationRequest = union(enum) {
                 }
                 return .{ .sasl = sasl };
             },
-            else => return ProtocolError.AuthNotSupported,
+            else => return PgError.AuthNotSupported,
         }
     }
 };
 
 pub const AuthenticationSASLFinal = struct {
     pub fn parse(data: []const u8) ![]const u8 {
-        try assert(data.len > 4, ProtocolError.InvalidData);
+        try assert(data.len > 4, PgError.InvalidData);
 
         const code = std.mem.readInt(u32, data[0..4][0..4], .big);
 
-        try assert(code == 12, ProtocolError.InvalidResponseCode);
+        try assert(code == 12, PgError.InvalidResponseCode);
 
         const msg = data[4..];
 
-        try assert(@sizeOf(@TypeOf(code)) + msg.len == data.len, ProtocolError.InvalidMessageLength);
+        try assert(@sizeOf(@TypeOf(code)) + msg.len == data.len, PgError.InvalidMessageLength);
 
         return msg;
     }
@@ -314,15 +306,15 @@ pub const AuthenticationSASLFinal = struct {
 
 pub const AuthenticationSASLContinue = struct {
     pub fn parse(data: []const u8) ![]const u8 {
-        try assert(data.len > 4, ProtocolError.InvalidData);
+        try assert(data.len > 4, PgError.InvalidData);
 
         const code = std.mem.readInt(u32, data[0..4][0..4], .big);
 
-        try assert(code == 11, ProtocolError.InvalidResponseCode);
+        try assert(code == 11, PgError.InvalidResponseCode);
 
         const msg = data[4..];
 
-        try assert(@sizeOf(@TypeOf(code)) + msg.len == data.len, ProtocolError.InvalidMessageLength);
+        try assert(@sizeOf(@TypeOf(code)) + msg.len == data.len, PgError.InvalidMessageLength);
 
         return msg;
     }
@@ -335,52 +327,19 @@ pub fn readOptionalString(reader: *Io.Reader) !?[]const u8 {
         return null;
     };
 
-    try assert(value == null or value.?.len <= reader.end, ProtocolError.InvalidData);
+    try assert(value == null or value.?.len <= reader.end, PgError.InvalidData);
 
     return value;
 }
 
-const MockStream = struct {
-    allocator: mem.Allocator,
-
-    buffer: []u8,
-    writer: Io.Writer,
-
-    pub fn init(allocator: mem.Allocator) !MockStream {
-        const buffer = try allocator.alloc(u8, 512);
-        const writer = Io.Writer.fixed(buffer);
-
-        return .{
-            .allocator = allocator,
-            .buffer = buffer,
-            .writer = writer,
-        };
-    }
-
-    pub fn deinit(self: *@This()) void {
-        self.allocator.free(self.buffer);
-    }
-
-    pub fn writeAll(self: *@This(), str: []u8) !void {
-        try self.writer.writeAll(str);
-    }
-
-    pub fn toString(self: *@This()) []const u8 {
-        return self.buffer[0 .. self.writer.end];
-    }
-
-    pub fn reset(self: *@This()) void {
-        self.writer.end = 0;
-    }
-};
-
+const t = @import("t.zig");
 test "StartupMessage: write" {
     const allocator = testing.allocator;
 
-    var mock_stream = try MockStream.init(allocator);
+    var mock_stream = try t.Stream.init(allocator, null);
     defer mock_stream.deinit();
 
-    const TestStartupMessage = StartupMessageT(MockStream);
+    const TestStartupMessage = StartupMessageT(t.Stream);
     try TestStartupMessage.write(allocator, &mock_stream, .{ .username = "james", .database = "doe", .host = "localhost", .application_name = "Ergo test", .startup_parameters = .init(allocator) });
 
     var reader = Io.Reader.fixed(mock_stream.toString());
@@ -408,10 +367,10 @@ test "StartupMessage: write" {
 test "SASLResponse: write" {
     const allocator = testing.allocator;
 
-    var mock_stream = try MockStream.init(allocator);
+    var mock_stream = try t.Stream.init(allocator, null);
     defer mock_stream.deinit();
 
-    const TestSASLResponse = SASLResponseT(MockStream);
+    const TestSASLResponse = SASLResponseT(t.Stream);
     try TestSASLResponse.write(allocator, &mock_stream, "the response");
 
     var reader = Io.Reader.fixed(mock_stream.toString());
@@ -429,10 +388,10 @@ test "SASLResponse: write" {
 test "SASLInitialResponse: write" {
     const allocator = testing.allocator;
 
-    var mock_stream = try MockStream.init(allocator);
+    var mock_stream = try t.Stream.init(allocator, null);
     defer mock_stream.deinit();
 
-    const TestSASLInitialResponse = SASLInitialResponseT(MockStream);
+    const TestSASLInitialResponse = SASLInitialResponseT(t.Stream);
     try TestSASLInitialResponse.write(allocator, &mock_stream, "a sasl response", "SCRAM-SHA-256");
 
     var reader = Io.Reader.fixed(mock_stream.toString());
@@ -456,10 +415,10 @@ test "SASLInitialResponse: write" {
 test "Query: write" {
     const allocator = testing.allocator;
 
-    var mock_stream = try MockStream.init(allocator);
+    var mock_stream = try t.Stream.init(allocator, null);
     defer mock_stream.deinit();
 
-    const TestQuery = QueryT(MockStream);
+    const TestQuery = QueryT(t.Stream);
     try TestQuery.write(allocator, &mock_stream, "select 1");
 
     var reader = Io.Reader.fixed(mock_stream.toString());
@@ -477,10 +436,10 @@ test "Query: write" {
 test "PasswordMessage: write" {
     const allocator = testing.allocator;
 
-    var mock_stream = try MockStream.init(allocator);
+    var mock_stream = try t.Stream.init(allocator, null);
     defer mock_stream.deinit();
 
-    const TestPasswordMessage = PasswordMessageT(MockStream);
+    const TestPasswordMessage = PasswordMessageT(t.Stream);
     try TestPasswordMessage.write(allocator, &mock_stream, "gh@nim@");
 
     var reader = Io.Reader.fixed(mock_stream.toString());
@@ -500,7 +459,7 @@ test "CommandComplete: parse" {
     const allocator = testing.allocator;
     {
         // not a string (not null terminated)
-        try testing.expectError(ProtocolError.InvalidStringDelimitor, CommandComplete.parse("123"));
+        try testing.expectError(PgError.InvalidStringDelimitor, CommandComplete.parse("123"));
     }
 
     {
@@ -526,7 +485,7 @@ test "CommandComplete: rowsAffected" {
     var writer = Io.Writer.fixed(buf);
 
     {
-        try testing.expectError(ProtocolError.InvalidData, CommandComplete.parse(buf[0 .. writer.end]));
+        try testing.expectError(PgError.InvalidData, CommandComplete.parse(buf[0 .. writer.end]));
     }
 
     writer.end = 0;
@@ -534,7 +493,7 @@ test "CommandComplete: rowsAffected" {
     {
         try writer.writeAll("DROP ROLE");
 
-        try testing.expectError(ProtocolError.InvalidStringDelimitor, CommandComplete.parse(buf[0 .. writer.end]));
+        try testing.expectError(PgError.InvalidStringDelimitor, CommandComplete.parse(buf[0 .. writer.end]));
     }
 
     {
@@ -574,7 +533,7 @@ test "AuthenticationRequest: invalid" {
 
     {
         // empty
-        try testing.expectError(ProtocolError.InvalidData, AuthenticationRequest.parse(buffer[0 .. writer.end]));
+        try testing.expectError(PgError.InvalidData, AuthenticationRequest.parse(buffer[0 .. writer.end]));
     }
 
     writer.end = 0;
@@ -582,7 +541,7 @@ test "AuthenticationRequest: invalid" {
     {
         // less than minimum length
         try writer.writeAll("123");
-        try testing.expectError(ProtocolError.InvalidData, AuthenticationRequest.parse(buffer[0 .. writer.end]));
+        try testing.expectError(PgError.InvalidData, AuthenticationRequest.parse(buffer[0 .. writer.end]));
     }
 
     writer.end = 0;
@@ -631,7 +590,7 @@ test "AuthenticationRequest: md5" {
     {
         try writer.writeInt(u32, 5, .big);
         try writer.writeAll("s@L");
-        try testing.expectError(ProtocolError.InvalidData, AuthenticationRequest.parse(buffer[0 .. writer.end]));
+        try testing.expectError(PgError.InvalidData, AuthenticationRequest.parse(buffer[0 .. writer.end]));
     }
 
     writer.end = 0;
@@ -707,10 +666,10 @@ test "AuthenticationSASLFinal: parse" {
 
     {
         // too short
-        try testing.expectError(ProtocolError.InvalidData, AuthenticationSASLFinal.parse(buffer[0 .. writer.end]));
+        try testing.expectError(PgError.InvalidData, AuthenticationSASLFinal.parse(buffer[0 .. writer.end]));
 
         try writer.writeAll("123");
-        try testing.expectError(ProtocolError.InvalidData, AuthenticationSASLFinal.parse(buffer[0 .. writer.end]));
+        try testing.expectError(PgError.InvalidData, AuthenticationSASLFinal.parse(buffer[0 .. writer.end]));
     }
 
     writer.end = 0;
@@ -718,7 +677,7 @@ test "AuthenticationSASLFinal: parse" {
     {
         // wrong special sasl type
         try writer.writeInt(u32, 13, .big);
-        try testing.expectError(ProtocolError.InvalidData, AuthenticationSASLFinal.parse(buffer[0 .. writer.end]));
+        try testing.expectError(PgError.InvalidData, AuthenticationSASLFinal.parse(buffer[0 .. writer.end]));
     }
 
     writer.end = 0;
@@ -726,7 +685,7 @@ test "AuthenticationSASLFinal: parse" {
     {
         // wrong special sasl type
         try writer.writeAll("13425");
-        try testing.expectError(ProtocolError.InvalidResponseCode, AuthenticationSASLFinal.parse(buffer[0 .. writer.end]));
+        try testing.expectError(PgError.InvalidResponseCode, AuthenticationSASLFinal.parse(buffer[0 .. writer.end]));
     }
 
     writer.end = 0;
@@ -751,10 +710,10 @@ test "AuthenticationSASLContinue: parse" {
 
     {
         // too short
-        try testing.expectError(ProtocolError.InvalidData, AuthenticationSASLContinue.parse(buffer[0 .. writer.end]));
+        try testing.expectError(PgError.InvalidData, AuthenticationSASLContinue.parse(buffer[0 .. writer.end]));
 
         try writer.writeAll("123");
-        try testing.expectError(ProtocolError.InvalidData, AuthenticationSASLContinue.parse(buffer[0 .. writer.end]));
+        try testing.expectError(PgError.InvalidData, AuthenticationSASLContinue.parse(buffer[0 .. writer.end]));
     }
 
     writer.end = 0;
@@ -762,7 +721,7 @@ test "AuthenticationSASLContinue: parse" {
     {
         // wrong special sasl type
         try writer.writeInt(u32, 12, .big);
-        try testing.expectError(ProtocolError.InvalidData, AuthenticationSASLContinue.parse(buffer[0 .. writer.end]));
+        try testing.expectError(PgError.InvalidData, AuthenticationSASLContinue.parse(buffer[0 .. writer.end]));
     }
 
     writer.end = 0;
@@ -770,7 +729,7 @@ test "AuthenticationSASLContinue: parse" {
     {
         // wrong special sasl type
         try writer.writeInt(u32, 1234, .big);
-        try testing.expectError(ProtocolError.InvalidData, AuthenticationSASLContinue.parse(buffer[0 .. writer.end]));
+        try testing.expectError(PgError.InvalidData, AuthenticationSASLContinue.parse(buffer[0 .. writer.end]));
     }
 
     writer.end = 0;

@@ -2,11 +2,12 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const conn = @import("conn.zig");
-pub const openssl = @import("openssl");
+const openssl = @import("openssl");
 
 const Conn = conn.Conn;
+const PgConfig = @import("root.zig").PgConfig;
 
-pub fn initializeSSLContext(config: conn.Opts.TLS) !*openssl.SSL_CTX {
+pub fn initializeSSLContext(config: PgConfig.TLS) !*openssl.SSL_CTX {
     const ctx = openssl.SSL_CTX_new(openssl.TLS_client_method()) orelse {
         return error.SSLContextNew;
     };

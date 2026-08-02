@@ -6,6 +6,7 @@ const testing = std.testing;
 const assert = std.debug.assert;
 
 const pg = @import("pg");
+const t = @import("t.zig");
 const types = @import("types.zig");
 
 pub const PgClientError = error{
@@ -68,8 +69,8 @@ pub const PgClient = struct {
     allocator: mem.Allocator,
     io: Io,
 
-    default_opts: pg.conn.Opts,
-    wal_opts: pg.conn.Opts,
+    default_opts: pg.PgConfig,
+    wal_opts: pg.PgConfig,
 
     last_lsn: u64,
     last_timestamp: i64,
@@ -80,7 +81,7 @@ pub const PgClient = struct {
     default_conn: ?*pg.Conn,
     wal_conn: ?*pg.Conn,
 
-    pub fn init(io: Io, allocator: mem.Allocator, opts: pg.conn.Opts) !PgClient{
+    pub fn init(io: Io, allocator: mem.Allocator, opts: pg.PgConfig) !PgClient{
         var wal_opts = opts;
 
         wal_opts.startup_parameters = .init(allocator);
@@ -651,16 +652,16 @@ pub const PgClient = struct {
         const column_name_index = result.columnIndex("column_name").?;
         const constraint_types_index = result.columnIndex("constraint_types").?;
         while (try result.next()) |row| {
-            const column_name_raw = try row.get([]const u8, column_name_index);
+            const column_name_raw = try row.get(column_name_index);
             const column_name = try self.allocator.dupe(u8, column_name_raw);
 
-            const constraint_types = try row.get([]const u8, constraint_types_index);
+            const constraint_types = try row.get(constraint_types_index);
             try columns.append(self.allocator, .{ .name = column_name, .is_key = mem.containsAtLeast(u8, constraint_types, 1, "p") });
         }
         return columns;
     }
 
-    pub fn createConn(allocator: mem.Allocator, io:  Io, opts: pg.conn.Opts) !*pg.Conn {
+    pub fn createConn(allocator: mem.Allocator, io:  Io, opts: pg.PgConfig) !*pg.Conn {
         var conn = try allocator.create(pg.Conn);
         conn.* = pg.Conn.init(io, allocator, opts) catch |err| {
             std.debug.print("Failed to connect: {}\n", .{err});
@@ -1102,7 +1103,7 @@ test "parseTupleData" {
     try testing.expectEqualStrings("", client.context.user_id);
 }
 
-test "readSchemaKeys" {
+test "readSchemaKeys: ensure correct read" {
     const allocator = testing.allocator;
     const io = testing.io;
 
@@ -1133,7 +1134,7 @@ test "readSchemaKeys" {
     };
     defer client.deinit();
 
-    var columns = try client.readSchemaKeys("users");
+    var columns = try client.readSchemaKeys("all_types");
     defer {
         for (columns.items) |col| {
             allocator.free(col.name);
@@ -1141,16 +1142,53 @@ test "readSchemaKeys" {
         columns.deinit(allocator);
     }
 
-    try testing.expectEqual(6, columns.items.len);
+    try testing.expectEqual(43, columns.items.len);
 
-    for (columns.items) |item|  {
-        if (mem.eql(u8, "id", item.name)) { try testing.expectEqual(true, item.is_key); }
-        else if (mem.eql(u8, "address_id", item.name)) { try testing.expectEqual(false, item.is_key); }
-        else if (mem.eql(u8, "age", item.name)) { try testing.expectEqual(false, item.is_key); }
-        else if (mem.eql(u8, "email_address", item.name)) { try testing.expectEqual(false, item.is_key); }
-        else if (mem.eql(u8, "gender", item.name)) { try testing.expectEqual(false, item.is_key); }
-        else if (mem.eql(u8, "name", item.name)) { try testing.expectEqual(false, item.is_key); }
-    }
+    for (columns.items) |item| if (std.meta.stringToEnum(t.AllTypesColumn, item.name)) |field| switch (field) {
+        .id => try testing.expectEqual(true, item.is_key),
+        .col_int2 => try testing.expectEqual(false, item.is_key),
+        .col_int2_arr => try testing.expectEqual(false, item.is_key),
+        .col_int4 => try testing.expectEqual(false, item.is_key),
+        .col_int4_arr => try testing.expectEqual(false, item.is_key),
+        .col_int8 => try testing.expectEqual(false, item.is_key),
+        .col_int8_arr => try testing.expectEqual(false, item.is_key),
+        .col_float4 => try testing.expectEqual(false, item.is_key),
+        .col_float4_arr => try testing.expectEqual(false, item.is_key),
+        .col_float8 => try testing.expectEqual(false, item.is_key),
+        .col_float8_arr => try testing.expectEqual(false, item.is_key),
+        .col_bool => try testing.expectEqual(false, item.is_key),
+        .col_bool_arr => try testing.expectEqual(false, item.is_key),
+        .col_text => try testing.expectEqual(false, item.is_key),
+        .col_text_arr => try testing.expectEqual(false, item.is_key),
+        .col_bytea => try testing.expectEqual(false, item.is_key),
+        .col_bytea_arr => try testing.expectEqual(false, item.is_key),
+        .col_enum => try testing.expectEqual(false, item.is_key),
+        .col_enum_arr => try testing.expectEqual(false, item.is_key),
+        .col_uuid => try testing.expectEqual(false, item.is_key),
+        .col_uuid_arr => try testing.expectEqual(false, item.is_key),
+        .col_numeric => try testing.expectEqual(false, item.is_key),
+        .col_numeric_arr => try testing.expectEqual(false, item.is_key),
+        .col_timestamp => try testing.expectEqual(false, item.is_key),
+        .col_timestamp_arr => try testing.expectEqual(false, item.is_key),
+        .col_json => try testing.expectEqual(false, item.is_key),
+        .col_json_arr => try testing.expectEqual(false, item.is_key),
+        .col_jsonb => try testing.expectEqual(false, item.is_key),
+        .col_jsonb_arr => try testing.expectEqual(false, item.is_key),
+        .col_char => try testing.expectEqual(false, item.is_key),
+        .col_char_arr => try testing.expectEqual(false, item.is_key),
+        .col_charn => try testing.expectEqual(false, item.is_key),
+        .col_charn_arr => try testing.expectEqual(false, item.is_key),
+        .col_timestamptz => try testing.expectEqual(false, item.is_key),
+        .col_timestamptz_arr => try testing.expectEqual(false, item.is_key),
+        .col_cidr => try testing.expectEqual(false, item.is_key),
+        .col_cidr_arr => try testing.expectEqual(false, item.is_key),
+        .col_inet => try testing.expectEqual(false, item.is_key),
+        .col_inet_arr => try testing.expectEqual(false, item.is_key),
+        .col_macaddr => try testing.expectEqual(false, item.is_key),
+        .col_macaddr_arr => try testing.expectEqual(false, item.is_key),
+        .col_macaddr8 => try testing.expectEqual(false, item.is_key),
+        .col_macaddr8_arr => try testing.expectEqual(false, item.is_key),
+    };
 }
 
 test "update from value to null" {

@@ -258,21 +258,6 @@ fn StmtT(comptime StmtConn: type) type {
             try self.writer.writeInt(u16, param_count, .big);
         }
 
-        pub fn bind(self: *@This(), writer: *Io.Writer, value: anytype) !void {
-            const name = self.name;
-
-            const param_index = self.param_index;
-            assert(param_index < self.param_count);
-
-            // We tell PostgreSQL the format (text or binary) of each parameter. This
-            // information is at the start of the message, always starts at byte 9
-            // and each value is 2 bytes.
-            const format_offset = 9 + (param_index * 2) + name.len;
-
-            try types.bindValue(@TypeOf(value), self.param_oids[param_index], value, writer, format_offset);
-            self.param_index = param_index + 1;
-        }
-
         pub fn execute(self: *@This()) !*Result {
             assert(self.param_index == self.param_count);
 
@@ -358,64 +343,13 @@ fn StmtT(comptime StmtConn: type) type {
     };
 }
 
-const MockConn = struct {
-    state: State,
-    reader: Reader,
-    param_oids: []i32,
-    result_state: Result.State,
-
-    pub fn init(allocator: mem.Allocator) !@This() {
-        const result_state = try Result.State.init(allocator, 32);
-        errdefer result_state.deinit(allocator);
-
-        const param_oids = try allocator.alloc(i32, 32);
-        errdefer param_oids.free(allocator);
-
-        return .{
-            .state = .idle,
-            .reader = undefined,
-            .param_oids = param_oids,
-            .result_state = result_state
-        };
-    }
-
-    pub fn deinit(self: *@This(), allcator: mem.Allocator) void {
-        allcator.free(self.param_oids);
-        self.result_state.deinit(allcator);
-    }
-
-    pub fn peekForError(self: *@This()) !void {
-        _ = self;
-    }
-
-    pub fn unexpectedDBMessage(self: *@This()) error{UnexpectedDBMessage} {
-        _ = self;
-    }
-    
-    pub fn recoverFromError(self: *@This()) error{Canceled}!void {
-        _ = self;
-    }
-
-    pub fn read(self: *@This()) !Message {
-        _ = self;
-    }
-
-    pub fn readyForQuery(self: *@This()) !void {
-        _ = self;
-    }
-
-    pub fn write(self: *@This(), data: []const u8) !void {
-        _ = self;
-        _ = data;
-    }
-};
-
-const TestStmt = StmtT(MockConn);
+const t = @import("t.zig");
+const TestStmt = StmtT(t.Conn);
 
 test "writePrepareCommands: ensure correct output" {
     const allocator = testing.allocator;
 
-    var conn = try MockConn.init(allocator);
+    var conn = try t.Conn.init(allocator);
     defer conn.deinit(allocator);
 
     var stmt = try TestStmt.init(allocator, &conn, .{ .column_names = true });

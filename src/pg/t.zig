@@ -3,10 +3,17 @@ const std = @import("std");
 const Io = std.Io;
 const mem = std.mem;
 
-const Conn = @import("conn.zig").Conn;
-const Opts = @import("conn.zig").Opts;
+const assert = std.debug.assert;
 
-pub const test_opts: Opts = .{
+const conn = @import("conn.zig");
+
+const PgConfig = @import("root.zig").PgConfig;
+const Message = @import("reader.zig").Message;
+const Reader = @import("reader.zig").Reader;
+const Result = @import("result.zig").Result;
+const State = @import("conn.zig").State;
+
+pub const test_opts: PgConfig = .{
     .port = 5432,
     .host = "localhost",
     .username = "db_rw",
@@ -17,64 +24,93 @@ pub const test_opts: Opts = .{
     .startup_parameters = undefined,
 };
 
-// std.testing.expectEqual won't coerce expected to actual, which is a problem
-// when expected is frequently a comptime.
-// https://github.com/ziglang/zig/issues/4437
-pub fn expectDelta(expected: anytype, actual: anytype, delta: anytype) !void {
-    std.testing.expectEqual(true, expected - delta <= actual) catch |err| {
-        std.debug.print("{d} !~ {d}", .{ expected, actual });
-        return err;
-    };
-    std.testing.expectEqual(true, expected + delta >= actual) catch |err| {
-        std.debug.print("{d} !~ {d}", .{ expected, actual });
-        return err;
-    };
-}
-
 pub fn getRandom(io: Io) std.Random.DefaultPrng {
     var seed: u64 = undefined;
     std.Io.random(io, std.mem.asBytes(&seed));
     return std.Random.DefaultPrng.init(seed);
 }
 
+pub const Conn = struct {
+    state: State,
+    reader: Reader,
+    param_oids: []i32,
+    result_state: Result.State,
+
+    pub fn init(allocator: mem.Allocator) !@This() {
+        const result_state = try Result.State.init(allocator, 32);
+        errdefer result_state.deinit(allocator);
+
+        const param_oids = try allocator.alloc(i32, 32);
+        errdefer param_oids.free(allocator);
+
+        return .{
+            .state = .idle,
+            .reader = undefined,
+            .param_oids = param_oids,
+            .result_state = result_state
+        };
+    }
+
+    pub fn deinit(self: *@This(), allcator: mem.Allocator) void {
+        allcator.free(self.param_oids);
+        self.result_state.deinit(allcator);
+    }
+
+    pub fn peekForError(self: *@This()) !void {
+        _ = self;
+    }
+
+    pub fn unexpectedDBMessage(self: *@This()) error{UnexpectedDBMessage} {
+        _ = self;
+    }
+    
+    pub fn recoverFromError(self: *@This()) error{Canceled}!void {
+        _ = self;
+    }
+
+    pub fn read(self: *@This()) !Message {
+        _ = self;
+    }
+
+    pub fn readyForQuery(self: *@This()) !void {
+        _ = self;
+    }
+
+    pub fn write(self: *@This(), data: []const u8) !void {
+        _ = self;
+        _ = data;
+    }
+};
+
 pub const Stream = struct {
     allocator: mem.Allocator,
-    closed: bool,
-    read_index: usize,
-    socket: c_int = 0,
-    to_read: std.ArrayList(u8),
-    received_array: std.ArrayList(u8),
 
-    pub fn init(allocator: mem.Allocator) *Stream {
-        const s = allocator.create(Stream) catch unreachable;
-        s.* = .{
+    closed: bool,
+
+    buffer: []u8,
+    writer: Io.Writer,
+    reader: Io.Reader,
+
+    pub fn init(allocator: mem.Allocator, buffer_size: ?usize) !@This() {
+        const buffer = try allocator.alloc(u8, buffer_size orelse 512);
+        const writer = Io.Writer.fixed(buffer);
+        const reader = Io.Reader.fixed(buffer);
+
+        return .{
             .allocator = allocator,
             .closed = false,
-            .read_index = 0,
-            .to_read = .empty,
-            .received_array = .empty,
+            .buffer = buffer,
+            .writer = writer,
+            .reader = reader,
         };
-        return s;
     }
 
-    pub fn deinit(self: *Stream) void {
-        self.to_read.deinit(self.allocator);
-        self.received_array.deinit(self.allocator);
-        self.allocator.destroy(self);
+    pub fn deinit(self: *@This()) void {
+        self.allocator.free(self.buffer);
     }
 
-    pub fn reset(self: *Stream) void {
-        self.read_index = 0;
-        self.to_read.clearRetainingCapacity();
-        self.received_array.clearRetainingCapacity();
-    }
-
-    pub fn received(self: *Stream) []const u8 {
-        return self.received_array.items;
-    }
-
-    pub fn add(self: *Stream, value: []const u8) void {
-        self.to_read.appendSlice(self.allocator, value) catch unreachable;
+    pub fn received(self: *@This()) []const u8 {
+        return self.buffer[0 .. self.writer.end];
     }
 
     pub fn readWithTimeout(self: *@This(), buf: []u8, timeout_ms: i32) !usize {
@@ -82,48 +118,43 @@ pub const Stream = struct {
         return try self.read(buf);
     }
 
-    pub fn read(self: *Stream, buf: []u8) !usize {
-        std.debug.assert(!self.closed);
+    pub fn read(self: *@This(), buf: []u8) !usize {
+        assert(!self.closed);
 
-        const read_index = self.read_index;
-        const items = self.to_read.items;
-
-        if (read_index == items.len) {
-            return 0;
-        }
         if (buf.len == 0) {
             return 0;
         }
 
-        // let's fragment this message
-        const left_to_read = items.len - read_index;
+        const left_to_read = self.writer.end - self.reader.seek;
         const max_can_read = if (buf.len < left_to_read) buf.len else left_to_read;
 
-        const to_read = max_can_read;
-        var data = items[read_index..(read_index + to_read)];
-        if (data.len > buf.len) {
-            // we have more data than we have space in buf (our target)
-            // we'll give it when it can take
-            data = data[0..buf.len];
-        }
-        self.read_index = read_index + data.len;
+        const data = try self.reader.take(max_can_read);
 
         @memcpy(buf[0..data.len], data);
         return data.len;
     }
 
-    // store messages that are written to the stream
-    pub fn writeAll(self: *Stream, data: []const u8) !void {
-        self.received_array.appendSlice(self.allocator, data) catch unreachable;
+    pub fn writeAll(self: *@This(), str: []const u8) !void {
+        try self.writer.writeAll(str);
     }
 
-    pub fn close(self: *Stream) void {
+    pub fn toString(self: *@This()) []const u8 {
+        return self.buffer[0 .. self.writer.end];
+    }
+
+    pub fn reset(self: *@This()) void {
+        self.writer.end = 0;
+        self.reader.seek = 0;
+    }
+
+    pub fn close(self: *@This()) void {
         self.closed = true;
     }
 };
 
-pub fn connect(allocator: mem.Allocator, io: Io, opts: Opts) !Conn {
-    var c = try Conn.init(io, allocator, opts);
+
+pub fn connect(allocator: mem.Allocator, io: Io, opts: PgConfig) !conn.Conn {
+    var c = try conn.Conn.init(io, allocator, opts);
 
     c.auth() catch |err| {
         if (c.err) |pg| {
@@ -132,11 +163,4 @@ pub fn connect(allocator: mem.Allocator, io: Io, opts: Opts) !Conn {
         @panic(@errorName(err));
     };
     return c;
-}
-
-pub fn fail(c: Conn, err: anyerror) !void {
-    if (c.err) |pg_err| {
-        std.debug.print("PG ERROR: {s}\n", .{pg_err.message});
-    }
-    return err;
 }

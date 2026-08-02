@@ -111,9 +111,6 @@ pub const TypeInfo = struct {
     }
 
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
-        // if (self.enum_values) |enum_value| {
-        //     allocator.free(enum_value);
-        // }
         if (self.key_type) |key_type| {
             key_type.deinit(allocator);
             allocator.destroy(key_type);

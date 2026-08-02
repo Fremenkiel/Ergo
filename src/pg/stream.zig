@@ -10,6 +10,7 @@ const mem = std.mem;
 const conn = @import("conn.zig");
 
 const Conn = conn.Conn;
+const PgConfig = @import("root.zig").PgConfig;
 const Reader = @import("reader.zig").Reader;
 
 const printSSLError = @import("ssl.zig").printSSLError;
@@ -24,7 +25,7 @@ pub const Stream = struct {
     valid: bool,
     ssl: ?*openssl.SSL,
 
-    pub fn init(allocator: mem.Allocator, io: Io, opts: conn.Opts, ctx_: ?*openssl.SSL_CTX) !Stream {
+    pub fn init(allocator: mem.Allocator, io: Io, opts: PgConfig, ctx_: ?*openssl.SSL_CTX) !Stream {
         const is_unix = opts.host.len > 0 and opts.host[0] == '/';
 
         const io_stream = try blk: {
@@ -199,7 +200,7 @@ pub const Stream = struct {
     }
 };
 
-fn setKeepalive(handle: posix.socket_t, opts: conn.Opts) !void {
+fn setKeepalive(handle: posix.socket_t, opts: PgConfig) !void {
     if (opts.keepalive == false) {
         return;
     }
@@ -259,8 +260,6 @@ fn sockShutdown(sock: posix.socket_t, how: ShutdownHow) !void {
     }
 }
 
-// Sends a best-effort Terminate ('X') message, shielded from cancellation so
-// teardown can't be interrupted.
 pub fn sendTerminate(stream: *Stream, io: Io) void {
     const prev = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(prev);

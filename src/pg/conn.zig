@@ -1,57 +1,28 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const openssl = @import("openssl");
-const protocol = @import("protocol.zig");
-const ssl = @import("ssl.zig");
-const types = @import("types.zig");
-
-const Auth = @import("auth.zig").Auth;
-const AuthError = @import("auth.zig").AuthError;
-const Error = @import("error.zig").Error;
-const Message = @import("reader.zig").Message;
-const Reader = @import("reader.zig").Reader;
-const Result = @import("result.zig").Result;
-const Stream = @import("stream.zig").Stream;
-const Stmt = @import("stmt.zig").Stmt;
-
 const os = std.os;
 const mem = std.mem;
 const Io = std.Io;
 const testing = std.testing;
 
+const openssl = @import("openssl");
+const protocol = @import("protocol.zig");
+const root = @import("root.zig");
+const ssl = @import("ssl.zig");
+const types = @import("types.zig");
+
+const Auth = @import("auth.zig").Auth;
+const Error = @import("error.zig").Error;
+const Message = @import("reader.zig").Message;
+const PgConfig = root.PgConfig;
+const PgError = root.PgError;
+const Reader = @import("reader.zig").Reader;
+const Result = @import("result.zig").Result;
+const Stream = @import("stream.zig").Stream;
+const Stmt = @import("stmt.zig").Stmt;
+
 const sendTerminate = @import("stream.zig").sendTerminate;
-
-pub const Opts = struct {
-    host: []const u8,
-    port: ?u16 = null,
-    wal: []const u8 = "wal_slot",
-    write_buffer: ?u16 = null,
-    read_buffer: ?u16 = null,
-    result_state_size: u16 = 32,
-    tls: TLS = .off,
-    hostz: ?[:0]const u8 = null,
-
-    // tcp keepalive settings (null timer = OS default)
-    keepalive: bool = true,
-    keepalive_idle: ?u32 = 30,
-    keepalive_interval: ?u32 = 10,
-    keepalive_count: ?u32 = 3,
-
-    // auth
-    username: []const u8 = "postgres",
-    password: ?[]const u8 = null,
-    database: []const u8,
-    timeout_ms: i32 = 500,
-    application_name: []const u8,
-    startup_parameters: std.hash_map.StringHashMap([]const u8),
-
-    pub const TLS = union(enum) {
-        off: void,
-        require: void,
-        verify_full: ?[]const u8,
-    };
-};
 
 pub const State = enum {
     idle,
@@ -106,7 +77,7 @@ pub const Conn = struct {
     // cache_name => data necessary to re-execute previously prepared statement.
     prepared_statements: std.hash_map.StringHashMapUnmanaged(Stmt.Describe),
 
-    opts: Opts,
+    opts: PgConfig,
 
     pub const QueryOpts = struct {
         timeout_ms: ?i32 = null,
@@ -119,7 +90,7 @@ pub const Conn = struct {
         cache_name: ?[]const u8 = null,
     };
 
-    pub fn init(io: Io, allocator: mem.Allocator, opts: Opts) !@This() {
+    pub fn init(io: Io, allocator: mem.Allocator, opts: PgConfig) !@This() {
         var ssl_ctx: ?*openssl.SSL_CTX = null;
         switch (opts.tls) {
             .off => {},
@@ -186,7 +157,7 @@ pub const Conn = struct {
             if (conn_auth.err_data) |err_data| {
                 return self.setErr(err_data);
             }
-            return AuthError.UnexpectedDBMessage;
+            return PgError.UnexpectedDBMessage;
         };
 
         while (true) {
@@ -366,7 +337,7 @@ test "Conn: auth trust (no pass)" {
     const allocator = testing.allocator;
     const io = testing.io;
 
-    const opts: Opts = .{
+    const opts: PgConfig = .{
         .host = "localhost",
         .database = "db",
         .username = "db_np",
@@ -383,7 +354,7 @@ test "Conn: auth unknown user" {
     const allocator = testing.allocator;
     const io = testing.io;
 
-    const opts: Opts = .{
+    const opts: PgConfig = .{
         .host = "localhost",
         .database = "db",
         .username = "does_not_exist",
@@ -402,7 +373,7 @@ test "Conn: auth cleartext password" {
     const io = testing.io;
 
     {
-        const opts: Opts = .{
+        const opts: PgConfig = .{
             .host = "localhost",
             .database = "db",
             .username = "db_ro",
@@ -417,7 +388,7 @@ test "Conn: auth cleartext password" {
     }
 
     {
-        const opts: Opts = .{
+        const opts: PgConfig = .{
             .host = "localhost",
             .database = "db",
             .username = "db_ro",
@@ -433,7 +404,7 @@ test "Conn: auth cleartext password" {
     }
 
     {
-        const opts: Opts = .{
+        const opts: PgConfig = .{
             .host = "localhost",
             .database = "db",
             .username = "db_ro",
@@ -453,7 +424,7 @@ test "Conn: auth scram-sha-256 password" {
     const io = testing.io;
 
     {
-        const opts: Opts = .{
+        const opts: PgConfig = .{
             .host = "localhost",
             .database = "db",
             .username = "db_ro_scram_sha256",
@@ -468,7 +439,7 @@ test "Conn: auth scram-sha-256 password" {
     }
 
     {
-        const opts: Opts = .{
+        const opts: PgConfig = .{
             .host = "localhost",
             .database = "db",
             .username = "db_ro_scram_sha256",
@@ -484,7 +455,7 @@ test "Conn: auth scram-sha-256 password" {
     }
 
     {
-        const opts: Opts = .{
+        const opts: PgConfig = .{
             .host = "localhost",
             .database = "db",
             .username = "db_ro_scram_sha256",
@@ -503,7 +474,7 @@ test "PG: query column names" {
     const allocator = testing.allocator;
     const io = testing.io;
 
-    const opts: Opts = .{
+    const opts: PgConfig = .{
         .host = "localhost",
         .database = "db",
         .username = "db_rw",
@@ -542,7 +513,7 @@ test "Conn: TLS required" {
     const io = testing.io;
 
     {
-        const opts: Opts = .{
+        const opts: PgConfig = .{
             .host = "localhost",
             .database = "db",
             .username = "db_ro_ssl",
@@ -558,7 +529,7 @@ test "Conn: TLS required" {
     }
 
     {
-        const opts: Opts = .{
+        const opts: PgConfig = .{
             .host = "localhost",
             .database = "db",
             .username = "db_ro_ssl",
@@ -578,26 +549,26 @@ test "Conn: TLS verify-full" {
     const io = testing.io;
 
     {
-        const opts: Opts = .{
+        const opts: PgConfig = .{
             .host = "localhost",
             .database = "db",
             .application_name = "Ergo test",
             .startup_parameters = .init(allocator),
-            .tls = Opts.TLS{ .verify_full = null },
+            .tls = PgConfig.TLS{ .verify_full = null },
         };
 
         try testing.expectError(error.SSLCertificationVerificationError, Conn.init(io, allocator, opts));
     }
 
     {
-        const opts: Opts = .{
+        const opts: PgConfig = .{
             .host = "localhost",
             .database = "db",
             .username = "db_ro_ssl",
             .password = "12345678",
             .application_name = "Ergo test",
             .startup_parameters = .init(allocator),
-            .tls = Opts.TLS{ .verify_full = "infra/postgres/certs/ca.crt" },
+            .tls = PgConfig.TLS{ .verify_full = "infra/postgres/certs/ca.crt" },
         };
 
         var c = try t.connect(allocator, io, opts);
@@ -616,7 +587,7 @@ test "Conn: query is cancelable" {
         }
     };
 
-    const opts: Opts = .{
+    const opts: PgConfig = .{
         .host = "localhost",
         .database = "db",
         .username = "postgres",
@@ -639,23 +610,4 @@ test "Conn: query is cancelable" {
     try testing.expectError(error.Timeout, result);
     try testing.expectEqual(true, elapsed_ms < 1500); // prompt, not blocked until pg_sleep ends
     try testing.expectEqual(State.fail, c.state);
-}
-
-fn expectNumeric(allocator: mem.Allocator, numeric: types.Numeric, expected: []const u8) !void {
-    var strbuf: [50]u8 = undefined;
-    try testing.expectEqualStrings(expected, try numeric.toString(&strbuf));
-
-    const a = try allocator.alloc(u8, numeric.estimatedStringLen());
-    defer allocator.free(a);
-    try testing.expectEqualStrings(expected, try numeric.toString(a));
-
-    if (std.mem.eql(u8, expected, "nan")) {
-        try testing.expectEqual(true, std.math.isNan(numeric.toFloat()));
-    } else if (std.mem.eql(u8, expected, "inf")) {
-        try testing.expectEqual(true, std.math.isInf(numeric.toFloat()));
-    } else if (std.mem.eql(u8, expected, "-inf")) {
-        try testing.expectEqual(true, std.math.isNegativeInf(numeric.toFloat()));
-    } else {
-        try t.expectDelta(try std.fmt.parseFloat(f64, expected), numeric.toFloat(), 0.000001);
-    }
 }

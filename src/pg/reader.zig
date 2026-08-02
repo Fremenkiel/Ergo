@@ -305,13 +305,13 @@ test "Reader: next" {
     const allocator = testing.allocator;
 
     const R = ReaderT(*t.Stream);
-    var s = t.Stream.init(allocator);
+    var s = try t.Stream.init(allocator, null);
     defer s.deinit();
 
     {
         s.reset();
-        s.add(&[_]u8{ 8, 0, 0, 0, 4 });
-        var reader = R.init(allocator, 10, s) catch unreachable;
+        try s.writeAll(&[_]u8{ 8, 0, 0, 0, 4 });
+        var reader = R.init(allocator, 10, &s) catch unreachable;
         defer reader.deinit();
         const msg = try reader.next();
         try testing.expectEqual(8, msg.type);
@@ -320,8 +320,8 @@ test "Reader: next" {
 
     {
         s.reset();
-        s.add(&[_]u8{ 1, 0, 0, 0, 5, 2 });
-        var reader = R.init(allocator, 10, s) catch unreachable;
+        try s.writeAll(&[_]u8{ 1, 0, 0, 0, 5, 2 });
+        var reader = R.init(allocator, 10, &s) catch unreachable;
         defer reader.deinit();
         const msg = try reader.next();
         try testing.expectEqual(1, msg.type);
@@ -330,8 +330,8 @@ test "Reader: next" {
 
     {
         s.reset();
-        s.add(&[_]u8{ 1, 0, 0, 0, 9, 1, 2, 3, 4, 19 });
-        var reader = R.init(allocator, 10, s) catch unreachable;
+        try s.writeAll(&[_]u8{ 1, 0, 0, 0, 9, 1, 2, 3, 4, 19 });
+        var reader = R.init(allocator, 10, &s) catch unreachable;
         defer reader.deinit();
         const msg = try reader.next();
         try testing.expectEqual(1, msg.type);
@@ -343,8 +343,8 @@ test "Reader: next" {
     {
         // partial 2nd message, but closed without all the data
         s.reset();
-        s.add(&[_]u8{ 1, 0, 0, 0, 9, 1, 2, 3, 4, 19, 2 });
-        var reader = R.init(allocator, 10, s) catch unreachable;
+        try s.writeAll(&[_]u8{ 1, 0, 0, 0, 9, 1, 2, 3, 4, 19, 2 });
+        var reader = R.init(allocator, 10, &s) catch unreachable;
         defer reader.deinit();
         const msg = try reader.next();
         try testing.expectEqual(1, msg.type);
@@ -355,8 +355,8 @@ test "Reader: next" {
     {
         // 2 full messages, 2nd message has no data
         s.reset();
-        s.add(&[_]u8{ 99, 0, 0, 0, 6, 200, 201, 2, 0, 0, 0, 4 });
-        var reader = R.init(allocator, 20, s) catch unreachable;
+        try s.writeAll(&[_]u8{ 99, 0, 0, 0, 6, 200, 201, 2, 0, 0, 0, 4 });
+        var reader = R.init(allocator, 20, &s) catch unreachable;
         defer reader.deinit();
 
         const msg1 = try reader.next();
@@ -371,8 +371,8 @@ test "Reader: next" {
     {
         // 2 full messages, 2nd message has data
         s.reset();
-        s.add(&[_]u8{ 99, 0, 0, 0, 6, 200, 201, 3, 0, 0, 0, 7, 1, 8, 2 });
-        var reader = R.init(allocator, 20, s) catch unreachable;
+        try s.writeAll(&[_]u8{ 99, 0, 0, 0, 6, 200, 201, 3, 0, 0, 0, 7, 1, 8, 2 });
+        var reader = R.init(allocator, 20, &s) catch unreachable;
         defer reader.deinit();
 
         const msg1 = try reader.next();
@@ -387,15 +387,15 @@ test "Reader: next" {
     {
         // 2 full messages, split across packets
         s.reset();
-        s.add(&[_]u8{ 91, 0, 0, 0, 6, 200, 22, 4, 0, 0, 0, 5 });
-        var reader = R.init(allocator, 20, s) catch unreachable;
+        try s.writeAll(&[_]u8{ 91, 0, 0, 0, 6, 200, 22, 4, 0, 0, 0, 5 });
+        var reader = R.init(allocator, 20, &s) catch unreachable;
         defer reader.deinit();
 
         const msg1 = try reader.next();
         try testing.expectEqual(91, msg1.type);
         try testing.expectEqualSlices(u8, &[_]u8{ 200, 22 }, msg1.data);
 
-        s.add(&[_]u8{73});
+        try s.writeAll(&[_]u8{73});
         const msg2 = try reader.next();
         try testing.expectEqual(4, msg2.type);
         try testing.expectEqualSlices(u8, &[_]u8{73}, msg2.data);
@@ -404,15 +404,15 @@ test "Reader: next" {
     {
         // not enough room in buffer for header of 2nd message
         s.reset();
-        s.add(&[_]u8{ 17, 0, 0, 0, 4, 5 });
-        var reader = R.init(allocator, 8, s) catch unreachable;
+        try s.writeAll(&[_]u8{ 17, 0, 0, 0, 4, 5 });
+        var reader = R.init(allocator, 8, &s) catch unreachable;
         defer reader.deinit();
 
         const msg1 = try reader.next();
         try testing.expectEqual(17, msg1.type);
         try testing.expectEqualSlices(u8, &[_]u8{}, msg1.data);
 
-        s.add(&[_]u8{ 0, 0, 0, 6, 10, 12 });
+        try s.writeAll(&[_]u8{ 0, 0, 0, 6, 10, 12 });
         const msg2 = try reader.next();
         try testing.expectEqual(5, msg2.type);
         try testing.expectEqualSlices(u8, &[_]u8{ 10, 12 }, msg2.data);
@@ -421,17 +421,17 @@ test "Reader: next" {
     {
         // not enough room in buffer for header of 2nd message across multiple callss
         s.reset();
-        s.add(&[_]u8{ 17, 0, 0, 0, 5, 1, 200 });
-        var reader = R.init(allocator, 8, s) catch unreachable;
+        try s.writeAll(&[_]u8{ 17, 0, 0, 0, 5, 1, 200 });
+        var reader = R.init(allocator, 8, &s) catch unreachable;
         defer reader.deinit();
 
         const msg1 = try reader.next();
         try testing.expectEqual(17, msg1.type);
         try testing.expectEqualSlices(u8, &[_]u8{1}, msg1.data);
 
-        s.add(&[_]u8{ 0, 0 });
-        s.add(&[_]u8{0});
-        s.add(&[_]u8{ 7, 10, 12, 14 });
+        try s.writeAll(&[_]u8{ 0, 0 });
+        try s.writeAll(&[_]u8{0});
+        try s.writeAll(&[_]u8{ 7, 10, 12, 14 });
         const msg2 = try reader.next();
         try testing.expectEqual(200, msg2.type);
         try testing.expectEqualSlices(u8, &[_]u8{ 10, 12, 14 }, msg2.data);
@@ -451,17 +451,17 @@ test "Reader: fuzz" {
     const messages = [_]u8{ 1, 0, 0, 0, 4, 2, 0, 0, 0, 5, 1, 3, 0, 0, 0, 6, 1, 2, 4, 0, 0, 0, 24, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 5, 0, 0, 0, 8, 1, 2, 3, 4, 6, 0, 0, 0, 9, 1, 2, 3, 4, 5, 7, 0, 0, 0, 10, 1, 2, 3, 4, 5, 6, 8, 0, 0, 0, 11, 1, 2, 3, 4, 5, 6, 7, 9, 0, 0, 0, 25, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21 };
 
     for (0..400) |_| {
-        var s = t.Stream.init(allocator);
+        var s = try t.Stream.init(allocator, null);
         defer s.deinit();
 
-        var reader = R.init(allocator, 12, s) catch unreachable;
+        var reader = R.init(allocator, 12, &s) catch unreachable;
         defer reader.deinit();
 
         for (0..4) |_| {
             var buf: []const u8 = messages[0..];
             while (buf.len > 0) {
                 const l = random.uintAtMost(usize, buf.len - 1) + 1;
-                s.add(buf[0..l]);
+                try s.writeAll(buf[0..l]);
                 buf = buf[l..];
             }
 
@@ -530,13 +530,13 @@ test "Reader: dynamic" {
     const allocator = testing.allocator;
 
     const R = ReaderT(*t.Stream);
-    var s = t.Stream.init(allocator);
+    var s = try t.Stream.init(allocator, null);
     defer s.deinit();
 
     {
         //  message bigger than static buffer
-        s.add(&[_]u8{ 200, 0, 0, 0, 14, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 });
-        var reader = R.init(allocator, 10, s) catch unreachable;
+        try s.writeAll(&[_]u8{ 200, 0, 0, 0, 14, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 });
+        var reader = R.init(allocator, 10, &s) catch unreachable;
         defer reader.deinit();
         const msg = try reader.next();
         try testing.expectEqual(200, msg.type);
@@ -545,8 +545,8 @@ test "Reader: dynamic" {
 
     {
         //  2nd message bigger than static buffer
-        s.add(&[_]u8{ 199, 0, 0, 0, 6, 9, 8, 200, 0, 0, 0, 14, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 });
-        var reader = R.init(allocator, 10, s) catch unreachable;
+        try s.writeAll(&[_]u8{ 199, 0, 0, 0, 6, 9, 8, 200, 0, 0, 0, 14, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 });
+        var reader = R.init(allocator, 10, &s) catch unreachable;
         defer reader.deinit();
 
         const msg1 = try reader.next();
@@ -560,8 +560,8 @@ test "Reader: dynamic" {
 
     {
         // middle message bigger than static
-        s.add(&[_]u8{ 199, 0, 0, 0, 6, 9, 8, 200, 0, 0, 0, 14, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 198, 0, 0, 0, 5, 1 });
-        var reader = R.init(allocator, 10, s) catch unreachable;
+        try s.writeAll(&[_]u8{ 199, 0, 0, 0, 6, 9, 8, 200, 0, 0, 0, 14, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 198, 0, 0, 0, 5, 1 });
+        var reader = R.init(allocator, 10, &s) catch unreachable;
         defer reader.deinit();
 
         const msg1 = try reader.next();
@@ -582,19 +582,19 @@ test "Reader: start/endFlow basic" {
     const allocator = testing.allocator;
 
     const R = ReaderT(*t.Stream);
-    var s = t.Stream.init(allocator);
+    var s = try t.Stream.init(allocator, null);
     defer s.deinit();
 
     // 1st message is bigge than static
-    s.add(&[_]u8{ 1, 0, 0, 0, 8, 1, 2, 3, 4 });
+    try s.writeAll(&[_]u8{ 1, 0, 0, 0, 8, 1, 2, 3, 4 });
 
     // 2nd message is bigger than first
-    s.add(&[_]u8{ 2, 0, 0, 0, 10, 1, 2, 3, 4, 5, 6 });
+    try s.writeAll(&[_]u8{ 2, 0, 0, 0, 10, 1, 2, 3, 4, 5, 6 });
 
     // 3rd message is smaller than 2nd (should re-use previous buffer)
-    s.add(&[_]u8{ 3, 0, 0, 0, 9, 1, 2, 3, 4, 5 });
+    try s.writeAll(&[_]u8{ 3, 0, 0, 0, 9, 1, 2, 3, 4, 5 });
 
-    var reader = R.init(allocator, 5, s) catch unreachable;
+    var reader = R.init(allocator, 5, &s) catch unreachable;
     defer reader.deinit();
 
     try reader.startFlow(null);
@@ -613,22 +613,22 @@ test "Reader: start/endFlow overread into static" {
     const allocator = testing.allocator;
 
     const R = ReaderT(*t.Stream);
-    var s = t.Stream.init(allocator);
+    var s = try t.Stream.init(allocator, null);
     defer s.deinit();
 
     // 1st message is bigge than static
-    s.add(&[_]u8{ 1, 0, 0, 0, 8, 1, 2, 3, 4 });
+    try s.writeAll(&[_]u8{ 1, 0, 0, 0, 8, 1, 2, 3, 4 });
 
     // 2nd message is bigger than first
-    s.add(&[_]u8{ 2, 0, 0, 0, 10, 1, 2, 3, 4, 5, 6 });
+    try s.writeAll(&[_]u8{ 2, 0, 0, 0, 10, 1, 2, 3, 4, 5, 6 });
 
     // 3rd message is smaller than 2nd (should re-use previous buffer)
-    s.add(&[_]u8{ 3, 0, 0, 0, 9, 1, 2, 3, 4, 5 });
+    try s.writeAll(&[_]u8{ 3, 0, 0, 0, 9, 1, 2, 3, 4, 5 });
 
     // 4th message is overread and fits in static
-    s.add(&[_]u8{ 3, 0, 0, 0, 5, 255 });
+    try s.writeAll(&[_]u8{ 3, 0, 0, 0, 5, 255 });
 
-    var reader = R.init(allocator, 7, s) catch unreachable;
+    var reader = R.init(allocator, 7, &s) catch unreachable;
     defer reader.deinit();
 
     try reader.startFlow(null);
@@ -650,25 +650,25 @@ test "Reader: start/endFlow large overread" {
     const allocator = testing.allocator;
 
     const R = ReaderT(*t.Stream);
-    var s = t.Stream.init(allocator);
+    var s = try t.Stream.init(allocator, 8192);
     defer s.deinit();
 
     // 1st message is bigger than static
-    s.add(&[_]u8{ 1, 0, 0, 0, 8, 1, 2, 3, 4 });
+    try s.writeAll(&[_]u8{ 1, 0, 0, 0, 8, 1, 2, 3, 4 });
 
     // 2nd message is bigger than first
-    s.add(&[_]u8{ 2, 0, 0, 0, 18, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14 });
+    try s.writeAll(&[_]u8{ 2, 0, 0, 0, 18, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14 });
 
     // 3rd message is smaller than 2nd (should re-use previous buffer)
-    s.add(&[_]u8{ 3, 0, 0, 0, 9, 1, 2, 3, 4, 5 });
+    try s.writeAll(&[_]u8{ 3, 0, 0, 0, 9, 1, 2, 3, 4, 5 });
 
     // 4rd message is huge
-    s.add(&[_]u8{ 4, 0, 0, 19, 140 } ++ "z" ** 5000);
+    try s.writeAll(&[_]u8{ 4, 0, 0, 19, 140 } ++ "z" ** 5000);
 
     // 5th message is overread and does not fit into static
-    s.add(&[_]u8{ 5, 0, 0, 0, 11, 255, 250, 245, 240, 235, 230, 225 });
+    try s.writeAll(&[_]u8{ 5, 0, 0, 0, 11, 255, 250, 245, 240, 235, 230, 225 });
 
-    var reader = R.init(allocator, 7, s) catch unreachable;
+    var reader = R.init(allocator, 7, &s) catch unreachable;
     defer reader.deinit();
 
     try reader.startFlow(null);
@@ -693,22 +693,22 @@ test "Reader: start/endFlow large overread with flow-specific allocator" {
     const allocator = testing.allocator;
 
     const R = ReaderT(*t.Stream);
-    var s = t.Stream.init(allocator);
+    var s = try t.Stream.init(allocator, null);
     defer s.deinit();
 
     // 1st message is bigger than static
-    s.add(&[_]u8{ 1, 0, 0, 0, 8, 1, 2, 3, 4 });
+    try s.writeAll(&[_]u8{ 1, 0, 0, 0, 8, 1, 2, 3, 4 });
 
     // 2nd message is bigger than first
-    s.add(&[_]u8{ 2, 0, 0, 0, 10, 1, 2, 3, 4, 5, 6 });
+    try s.writeAll(&[_]u8{ 2, 0, 0, 0, 10, 1, 2, 3, 4, 5, 6 });
 
     // 3rd message is smaller than 2nd (should re-use previous buffer)
-    s.add(&[_]u8{ 3, 0, 0, 0, 9, 1, 2, 3, 4, 5 });
+    try s.writeAll(&[_]u8{ 3, 0, 0, 0, 9, 1, 2, 3, 4, 5 });
 
     // 4th message is overread and does not fit into static
-    s.add(&[_]u8{ 3, 0, 0, 0, 11, 255, 250, 245, 240, 235, 230, 225 });
+    try s.writeAll(&[_]u8{ 3, 0, 0, 0, 11, 255, 250, 245, 240, 235, 230, 225 });
 
-    var reader = R.init(allocator, 7, s) catch unreachable;
+    var reader = R.init(allocator, 7, &s) catch unreachable;
     defer reader.deinit();
 
     try reader.startFlow(null);
@@ -730,13 +730,13 @@ test "Reader: startFlow with dynamic allocation into deinit " {
     const allocator = testing.allocator;
 
     const R = ReaderT(*t.Stream);
-    var s = t.Stream.init(allocator);
+    var s = try t.Stream.init(allocator, null);
     defer s.deinit();
 
     // 1st message is bigger than static
-    s.add(&[_]u8{ 1, 0, 0, 0, 8, 1, 2, 3, 4 });
+    try s.writeAll(&[_]u8{ 1, 0, 0, 0, 8, 1, 2, 3, 4 });
 
-    var reader = R.init(allocator, 7, s) catch unreachable;
+    var reader = R.init(allocator, 7, &s) catch unreachable;
     defer reader.deinit();
 
     try reader.startFlow(null);

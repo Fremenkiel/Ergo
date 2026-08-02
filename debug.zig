@@ -8,13 +8,13 @@ const debug = std.debug;
 const pg = @import("pg");
 
 const Conn = pg.conn.Conn;
-const Opts = pg.conn.Opts;
+const PgConfig = pg.PgConfig;
 
 pub fn main(init: process.Init) !void {
     const allocator = init.arena.allocator();
     const io = init.io;
 
-        const opts: Opts = .{
+        const opts: PgConfig = .{
             .host = "localhost",
             .database = "db",
             .username = "db_ro_scram_sha256",
