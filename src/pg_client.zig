@@ -81,7 +81,7 @@ pub const PgClient = struct {
     default_conn: ?*pg.Conn,
     wal_conn: ?*pg.Conn,
 
-    pub fn init(io: Io, allocator: mem.Allocator, opts: pg.PgConfig) !PgClient{
+    pub fn init(allocator: mem.Allocator, io: Io, opts: pg.PgConfig) !PgClient{
         var wal_opts = opts;
 
         wal_opts.startup_parameters = .init(allocator);
@@ -89,7 +89,7 @@ pub const PgClient = struct {
 
         var it = opts.startup_parameters.iterator();
         while (it.next()) |entry| {
-            wal_opts.startup_parameters.putAssumeCapacity(entry.key_ptr.*, entry.value_ptr.*);
+            wal_opts.startup_parameters.putAssumeCapacity(try allocator.dupe(u8, entry.key_ptr.*), try allocator.dupe(u8, entry.value_ptr.*));
         }
 
         wal_opts.startup_parameters.putAssumeCapacity("replication", "database");
@@ -148,6 +148,9 @@ pub const PgClient = struct {
         self.context.changed_columns.deinit();
         if (self.context.user_id.len > 0) self.allocator.free(self.context.user_id);
         if (self.context.ip_address.len > 0) self.allocator.free(self.context.ip_address);
+
+        self.wal_opts.startup_parameters.clearAndFree();
+        self.wal_opts.startup_parameters.deinit();
     }
 
     pub fn cancel(self: *@This()) void {
@@ -170,6 +173,7 @@ pub const PgClient = struct {
         if (self.wal_conn == null) return PgClientError.WalConnectionNotInitialized;
 
         const query = try std.fmt.allocPrint(self.allocator, "START_REPLICATION SLOT {s} LOGICAL 0/0 (proto_version '1', publication_names 'db_pub', messages 'true');", .{self.wal_opts.wal});
+        defer self.allocator.free(query);
 
         const msg_len: u32 = @as(u32, @intCast(query.len)) + 4 + 1;
         var len_buf: [4]u8 = undefined;
@@ -192,6 +196,7 @@ pub const PgClient = struct {
         if (self.wal_conn == null) return PgClientError.WalConnectionNotInitialized;
 
         const query = try std.fmt.allocPrint(self.allocator, "DROP_REPLICATION SLOT {s};", .{self.wal_opts.wal});
+        defer self.allocator.free(query);
 
         const msg_len: u32 = @as(u32, @intCast(query.len)) + 4 + 1;
         var len_buf: [4]u8 = undefined;
@@ -693,7 +698,7 @@ pub const PgClient = struct {
     }
 };
 
-fn setupMockClient(allocator: mem.Allocator, io: Io) !PgClient {
+fn setupClient(allocator: mem.Allocator, io: Io) !PgClient {
     var cols = std.ArrayList(ColumnDef).empty;
     try cols.ensureUnusedCapacity(allocator, 6);
     try cols.append(allocator, .{ .name = try allocator.dupe(u8, "id"), .is_key = true });
@@ -716,8 +721,22 @@ fn setupMockClient(allocator: mem.Allocator, io: Io) !PgClient {
     return .{
         .allocator = allocator,
         .io = io,
-        .default_opts = undefined,
-        .wal_opts = undefined,
+        .default_opts = .{
+            .host = "localhost",
+            .port = 5432,
+            .database = "db",
+            .username = "db_rw",
+            .application_name = "Ergo test",
+            .startup_parameters = .init(allocator),
+        },
+        .wal_opts = .{
+            .host = "localhost",
+            .port = 5432,
+            .database = "db",
+            .username = "db_rw",
+            .application_name = "Ergo test",
+            .startup_parameters = .init(allocator),
+        },
         .last_lsn = 0,
         .last_timestamp = 0,
         .context = .{
@@ -737,7 +756,7 @@ test "parsePgOutput maps BEGIN correctly" {
     const allocator = testing.allocator;
     const io = testing.io;
 
-    var client = try setupMockClient(allocator, io);
+    var client = try setupClient(allocator, io);
     defer client.deinit();
 
     const commit_hex = "420000000001c160880002f9a2afe34ece00000317";
@@ -762,7 +781,7 @@ test "parsePgOutput maps METADATA correctly" {
     const allocator = testing.allocator;
     const io = testing.io;
 
-    var client = try setupMockClient(allocator, io);
+    var client = try setupClient(allocator, io);
     defer client.deinit();
 
     // PERFORM pg_logical_emit_message(
@@ -842,7 +861,7 @@ test "parsePgOutput maps INSERT correctly" {
     const allocator = testing.allocator;
     const io = testing.io;
 
-    var client = try setupMockClient(allocator, io);
+    var client = try setupClient(allocator, io);
     defer client.deinit();
 
     // INSERT INTO addresses (address_line_1, postal_code, city, country) 
@@ -899,7 +918,7 @@ test "parsePgOutput maps UPDATE correctly" {
     const allocator = testing.allocator;
     const io = testing.io;
 
-    var client = try setupMockClient(allocator, io);
+    var client = try setupClient(allocator, io);
     defer client.deinit();
 
     // UPDATE addresses SET 
@@ -962,7 +981,7 @@ test "parsePgOutput maps DELETE correctly" {
     const allocator = testing.allocator;
     const io = testing.io;
 
-    var client = try setupMockClient(allocator, io);
+    var client = try setupClient(allocator, io);
     defer client.deinit();
 
     // DELETE FROM addresses WHERE id = 1;
@@ -1018,7 +1037,7 @@ test "parsePgOutput maps COMMIT correctly" {
     const allocator = testing.allocator;
     const io = testing.io;
 
-    var client = try setupMockClient(allocator, io);
+    var client = try setupClient(allocator, io);
     defer client.deinit();
 
     const insert_hex = "43000000000001c160880000000001c160b80002f9a2afe34ece";
@@ -1044,7 +1063,7 @@ test "resetContext clears context correctly" {
     const allocator = testing.allocator;
     const io = testing.io;
 
-    var client = try setupMockClient(allocator, io);
+    var client = try setupClient(allocator, io);
     defer client.deinit();
 
     client.context.ip_address = try allocator.dupe(u8, "192.168.1.50");
@@ -1067,11 +1086,11 @@ test "resetContext clears context correctly" {
     try testing.expectEqualStrings("", client.context.user_id);
 }
 
-test "parseTupleData" {
+test "parseTupleData: correct parsing of input" {
     const allocator = testing.allocator;
     const io = testing.io;
 
-    var client = try setupMockClient(allocator, io);
+    var client = try setupClient(allocator, io);
     defer client.deinit();
 
     const commit_hex = "0006740000000131740000001031204170706c65205061726b205761796e740000000539353031347400000009437570657274696e6f74000000025553";

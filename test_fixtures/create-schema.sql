@@ -26,6 +26,8 @@ ALTER SCHEMA public OWNER TO db_migrator;
 -- db_Migrator full control
 GRANT USAGE, CREATE ON SCHEMA public TO db_migrator;
 
+CREATE TYPE custom_enum AS ENUM ('val1', 'val2');
+
 -- Example tables
 CREATE TABLE IF NOT EXISTS addresses (
   id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -46,6 +48,53 @@ CREATE TABLE IF NOT EXISTS users (
   address_id BIGINT REFERENCES addresses(id) ON DELETE CASCADE NOT NULL
   );
 ALTER TABLE users REPLICA IDENTITY FULL;
+
+CREATE TABLE IF NOT EXISTS all_types (
+  id INTEGER PRIMARY KEY,
+  col_int2 SMALLINT,
+  col_int2_arr SMALLINT[],
+  col_int4 INTEGER,
+  col_int4_arr INTEGER[],
+  col_int8 BIGINT,
+  col_int8_arr BIGINT[],
+  col_float4 FLOAT4,
+  col_float4_arr FLOAT4[],
+  col_float8 FLOAT8,
+  col_float8_arr FLOAT8[],
+  col_bool BOOL,
+  col_bool_arr BOOL[],
+  col_text TEXT,
+  col_text_arr TEXT[],
+  col_bytea BYTEA,
+  col_bytea_arr BYTEA[],
+  col_enum custom_enum,
+  col_enum_arr custom_enum[],
+  col_uuid UUID,
+  col_uuid_arr UUID[],
+  col_numeric NUMERIC,
+  col_numeric_arr NUMERIC[],
+  col_timestamp TIMESTAMP,
+  col_timestamp_arr TIMESTAMP[],
+  col_json JSON,
+  col_json_arr JSON[],
+  col_jsonb JSONB,
+  col_jsonb_arr JSONB[],
+  col_char CHAR,
+  col_char_arr CHAR[],
+  col_charn CHAR(3),
+  col_charn_arr CHAR(2)[],
+  col_timestamptz TIMESTAMPTZ,
+  col_timestamptz_arr TIMESTAMPTZ[],
+  col_cidr CIDR,
+  col_cidr_arr CIDR[],
+  col_inet INET,
+  col_inet_arr INET[],
+  col_macaddr MACADDR,
+  col_macaddr_arr MACADDR[],
+  col_macaddr8 MACADDR8,
+  col_macaddr8_arr MACADDR8[]
+  );
+ALTER TABLE all_types REPLICA IDENTITY FULL;
 
 CREATE TABLE simple_table (value text);
 

@@ -8,11 +8,12 @@ const posix = std.posix;
 const assert = std.debug.assert;
 
 const ch = @import("ch");
+const wal_stream = @import("wal_stream.zig");
+const types = @import("types.zig");
 
 const PgClient = @import("pg_client.zig").PgClient;
 const ChClient = @import("ch_client.zig").ChClient;
-const wal_stream = @import("wal_stream.zig");
-const types = @import("types.zig");
+const WalStream = wal_stream.WalStream;
 
 const application_name = "Ergo";
 
@@ -119,20 +120,6 @@ pub fn main(init: std.process.Init) !void {
     var startup_parameters: std.StringHashMap([]const u8) = .init(allocator); 
     defer startup_parameters.deinit();
 
-    var pg_client = try PgClient.init(io, allocator, .{
-        .port = 5432,
-        .host = options.pg_host,
-        .wal = options.pg_wal,
-        .username = options.pg_user,
-        .password = options.pg_pass,
-        .database = options.pg_db,
-        .application_name = application_name,
-        .timeout_ms = 10_000,
-        .startup_parameters = startup_parameters
-    });
-    defer pg_client.deinit();
-    defer pg_client.cancel();
-
     var ch_client = ChClient.init(allocator, io, .{
         .host = options.ch_host,
         .port = options.ch_port,
@@ -146,15 +133,28 @@ pub fn main(init: std.process.Init) !void {
     try ch_client.connect();
     defer ch_client.disconnect();
 
-    var processor = wal_stream.WalStream(PgClient, ChClient){ 
-        .pg_client = &pg_client, 
-        .ch_client = &ch_client,
-        .duration = Io.Duration.fromMilliseconds(options.bulk_sync_duration),
-        .last_write_timestamp = std.Io.Clock.real.now(io),
-        .allocator = allocator,
-        .io = io,
-        .is_test = options.is_test,
-    };
+    var pg_client = try PgClient.init(allocator, io, .{
+        .port = 5432,
+        .host = options.pg_host,
+        .wal = options.pg_wal,
+        .username = options.pg_user,
+        .password = options.pg_pass,
+        .database = options.pg_db,
+        .application_name = application_name,
+        .timeout_ms = 10_000,
+        .startup_parameters = startup_parameters
+    });
+    defer pg_client.deinit();
+    defer pg_client.cancel();
+
+    var processor = WalStream.init(
+        allocator,
+        io,
+        &ch_client,
+        &pg_client, 
+        options.bulk_sync_duration,
+        options.is_test
+    );
     defer processor.deinit();
     defer pg_client.cancel();
 
@@ -180,193 +180,6 @@ pub fn main(init: std.process.Init) !void {
     try Io.File.stdout().writeStreamingAll(io, "\n");
 
     std.process.exit(0);
-}
-
-fn createTestDb(allocator: mem.Allocator, io: Io, db_name: []const u8) !void {
-    // PG
-    const pg_query = try std.fmt.allocPrint(allocator, "CREATE DATABASE {s}", .{db_name});
-    defer allocator.free(pg_query);
-
-    var pg_env = try std.process.Environ.createMap(std.testing.environ, allocator);
-    defer pg_env.deinit();
-    try pg_env.put("PGPASSWORD", "postgres");
-
-    var pg_create_argv = [_][]const u8{
-        "psql",
-        "-h", "127.0.0.1",
-        "-p", "5432",
-        "-U", "postgres",
-        "-d", "postgres",
-        "-q", "-t", "-A", // Formatting
-        "-c", pg_query,
-    };
-    const pg_create_result = try std.process.run(allocator, io, .{ 
-        .argv = &pg_create_argv,
-        .environ_map = &pg_env, 
-    });
-    defer {
-        allocator.free(pg_create_result.stdout);
-        allocator.free(pg_create_result.stderr);
-    }
-
-    if (pg_create_result.term != .exited or pg_create_result.term.exited != 0 or pg_create_result.stderr.len > 0) {
-        std.debug.print("Error: PSQL create failed: {s}\n", .{pg_create_result.stderr});
-        return error.PsqlExecutionFailed;
-    }
-
-    var pg_init_argv = [_][]const u8{
-        "psql",
-        "-h", "127.0.0.1",
-        "-p", "5432",
-        "-U", "postgres",
-        "-d", db_name,
-        "-a",
-        "-f", "./test_fixtures/create-schema.sql"
-    };
-    const pg_init_result = try std.process.run(allocator, io, .{ 
-        .argv = &pg_init_argv,
-        .environ_map = &pg_env, 
-    });
-    defer {
-        allocator.free(pg_init_result.stdout);
-        allocator.free(pg_init_result.stderr);
-    }
-
-    if (pg_init_result.term != .exited or pg_init_result.term.exited != 0 or pg_init_result.stderr.len > 0) {
-        std.debug.print("Error: PSQL init failed: {s}\n", .{pg_init_result.stderr});
-        return error.PsqlExecutionFailed;
-    }
-
-    // CH
-    const ch_query = try std.fmt.allocPrint(allocator, "CREATE DATABASE IF NOT EXISTS {s}", .{db_name});
-    defer allocator.free(ch_query);
-
-    var ch_create_argv = [_][]const u8{ 
-        "clickhouse-client", 
-        "--host", "127.0.0.1",
-        "--port", "9000",
-        "--user", "default",
-        "--password", "clickhouse",
-        "--query", ch_query
-    };
-    const ch_create_result = try std.process.run(allocator, io, .{ 
-        .argv = &ch_create_argv,
-    });
-    defer {
-        allocator.free(ch_create_result.stdout);
-        allocator.free(ch_create_result.stderr);
-    }
-
-    if (ch_create_result.stderr.len > 0) {
-        std.debug.print("Error: unable to create new ch db: {s}\n", .{ch_create_result.stderr});
-        return error.CreateTestDbFailedError;
-    }
-
-    var ch_init_argv = [_][]const u8{ 
-        "clickhouse-client", 
-        "--host", "127.0.0.1",
-        "--port", "9000",
-        "--user", "default",
-        "--password", "clickhouse",
-	"--database", db_name,
-	"--queries-file", "./infra/ch/init.sql"
-    };
-    const ch_init_result = try std.process.run(allocator, io, .{ 
-        .argv = &ch_init_argv,
-    });
-    defer {
-        allocator.free(ch_init_result.stdout);
-        allocator.free(ch_init_result.stderr);
-    }
-
-    if (ch_init_result.stderr.len > 0) {
-        std.debug.print("Error: CH create db failed: {s}\n", .{ch_init_result.stderr});
-        return error.CreateTestDbFailedInitError;
-    }
-}
-
-fn teardownTestDb(allocator: mem.Allocator, io: Io, db_name: []const u8, wal_name: []const u8) !void {
-    // PG
-    const pg_rep_query = try std.fmt.allocPrint(allocator, "SELECT pg_drop_replication_slot('{s}');", .{wal_name});
-    defer allocator.free(pg_rep_query);
-    
-    const pg_db_query = try std.fmt.allocPrint(allocator, "DROP DATABASE {s}", .{db_name});
-    defer allocator.free(pg_db_query);
-
-    var pg_env = try std.process.Environ.createMap(std.testing.environ, allocator);
-    defer pg_env.deinit();
-    try pg_env.put("PGPASSWORD", "postgres");
-
-    var pg_rep_argv = [_][]const u8{
-        "psql",
-        "-h", "127.0.0.1",
-        "-p", "5432",
-        "-U", "postgres",
-        "-d", "postgres",
-        "-q", "-t", "-A", // Formatting
-        "-c", pg_rep_query,
-    };
-    const pg_rep_result = try std.process.run(allocator, io, .{ 
-        .argv = &pg_rep_argv,
-        .environ_map = &pg_env, 
-    });
-    defer {
-        allocator.free(pg_rep_result.stdout);
-        allocator.free(pg_rep_result.stderr);
-    }
-
-    if (pg_rep_result.term != .exited or pg_rep_result.term.exited != 0 or pg_rep_result.stderr.len > 0) {
-        std.debug.print("Error: PSQL drop replication failed: {s}\n", .{pg_rep_result.stderr});
-        return error.PsqlExecutionFailed;
-    }
-
-    var pg_db_argv = [_][]const u8{
-        "psql",
-        "-h", "127.0.0.1",
-        "-p", "5432",
-        "-U", "postgres",
-        "-d", "postgres",
-        "-q", "-t", "-A", // Formatting
-        "-c", pg_db_query,
-    };
-    const pg_db_result = try std.process.run(allocator, io, .{ 
-        .argv = &pg_db_argv,
-        .environ_map = &pg_env, 
-    });
-    defer {
-        allocator.free(pg_db_result.stdout);
-        allocator.free(pg_db_result.stderr);
-    }
-
-    if (pg_db_result.term != .exited or pg_db_result.term.exited != 0 or pg_db_result.stderr.len > 0) {
-        std.debug.print("Error: PSQL drop db failed: {s}\n", .{pg_db_result.stderr});
-        return error.PsqlExecutionFailed;
-    }
-
-    // CH
-    const ch_query = try std.fmt.allocPrint(allocator, "DROP DATABASE {s}", .{db_name});
-    defer allocator.free(ch_query);
-
-    var ch_db_argv = [_][]const u8{ 
-        "clickhouse-client", 
-        "--host", "127.0.0.1",
-        "--port", "9000",
-        "--user", "default",
-        "--password", "clickhouse",
-        "--query", ch_query
-    };
-    const ch_db_result = try std.process.run(allocator, io, .{ 
-        .argv = &ch_db_argv,
-    });
-    defer {
-        allocator.free(ch_db_result.stdout);
-        allocator.free(ch_db_result.stderr);
-    }
-
-    if (ch_db_result.stderr.len > 0) {
-        std.debug.print("Error: CH drop db failed: {s}\n", .{ch_db_result.stderr});
-        return error.CreateTestDbFailedError;
-    }
 }
 
 fn setupChildProcess(allocator: mem.Allocator, io: Io, db_name: []const u8, wal_name: []const u8) !std.process.Child {
@@ -428,7 +241,7 @@ fn monitorStderr(stderr: std.posix.fd_t, child_pid: std.posix.pid_t, has_error: 
     }
 }
 
-
+const t = @import("t.zig");
 test "test:main:beforeAll" {
     std.testing.refAllDecls(@This());
 }
@@ -439,14 +252,13 @@ test "main ensure correct shutdown" {
 
     var child_has_error = std.atomic.Value(bool).init(false);
 
-    const db_name = try std.fmt.allocPrint(allocator, "test_db_{d}", .{std.Io.Clock.real.now(io).toNanoseconds()});
+    const db_name = try t.createTestDb(allocator, io);
     defer allocator.free(db_name);
 
     const wal_name = try std.fmt.allocPrint(allocator, "wal_slot_{s}", .{db_name});
     defer allocator.free(wal_name);
 
-    try createTestDb(allocator, io, db_name);
-    defer teardownTestDb(allocator, io, db_name, wal_name) catch {};
+    defer t.teardownTestDb(allocator, io, db_name, wal_name) catch {};
 
     var child = try setupChildProcess(allocator, io, db_name, wal_name);
     errdefer {
@@ -506,14 +318,13 @@ test "main ensure full transaction sync on interupt" {
 
     var child_has_error = std.atomic.Value(bool).init(false);
 
-    const db_name = try std.fmt.allocPrint(allocator, "test_db_{d}", .{std.Io.Clock.real.now(io).toNanoseconds()});
+    const db_name = try t.createTestDb(allocator, io);
     defer allocator.free(db_name);
 
     const wal_name = try std.fmt.allocPrint(allocator, "wal_slot_{s}", .{db_name});
     defer allocator.free(wal_name);
 
-    try createTestDb(allocator, io, db_name);
-    defer teardownTestDb(allocator, io, db_name, wal_name) catch {};
+    defer t.teardownTestDb(allocator, io, db_name, wal_name) catch {};
 
     var child = try setupChildProcess(allocator, io, db_name, wal_name);
     errdefer {
@@ -540,7 +351,7 @@ test "main ensure full transaction sync on interupt" {
         "-U", "db_rw",
         "-d", db_name,
         "-a",
-        "-f", "./test_fixtures/shutdown_query.sql"
+        "-f", "./test_fixtures/shutdown-query.sql"
     };
     const pg_result = try std.process.run(allocator, io, .{ 
         .argv = &pg_argv,
@@ -649,18 +460,17 @@ test "making sure full commits are logged without interupt" {
 
     var child_has_error = std.atomic.Value(bool).init(false);
 
-    const db_name = try std.fmt.allocPrint(allocator, "test_db_{d}", .{std.Io.Clock.real.now(io).toNanoseconds()});
+    const db_name = try t.createTestDb(allocator, io);
     defer allocator.free(db_name);
 
     const wal_name = try std.fmt.allocPrint(allocator, "wal_slot_{s}", .{db_name});
     defer allocator.free(wal_name);
 
+    defer t.teardownTestDb(allocator, io, db_name, wal_name) catch {};
+
     var pg_env = try std.process.Environ.createMap(std.testing.environ, allocator);
     defer pg_env.deinit();
     try pg_env.put("PGPASSWORD", "12345678");
-
-    try createTestDb(allocator, io, db_name);
-    defer teardownTestDb(allocator, io, db_name, wal_name) catch {};
 
     var child = try setupChildProcess(allocator, io, db_name, wal_name);
     errdefer {
@@ -683,7 +493,7 @@ test "making sure full commits are logged without interupt" {
         "-U", "db_rw",
         "-d", db_name,
         "-a",
-        "-f", "./test_fixtures/standard_query.sql"
+        "-f", "./test_fixtures/standard-query.sql"
     };
     const pg_result = try std.process.run(allocator, io, .{ 
         .argv = &pg_argv,
