@@ -78,20 +78,7 @@ pub const ChClient = struct {
             copy_slice[i].user_id = try self.allocator.dupe(u8, entry.user_id);
             copy_slice[i].ip_address = try self.allocator.dupe(u8, entry.ip_address);
 
-            copy_slice[i].changed_columns = try entry.changed_columns.clone();
-            copy_slice[i].new_values = try entry.new_values.clone(self.allocator);
-            copy_slice[i].old_values = try entry.old_values.clone(self.allocator);
-            copy_slice[i].primary_key = try self.allocator.dupe(u8, entry.primary_key);
-
-            var old_it = copy_slice[i].old_values.iterator();
-            while (old_it.next()) |kv| {
-                kv.value_ptr.* = try self.allocator.dupe(u8, kv.value_ptr.*);
-            }
-
-            var new_it = copy_slice[i].new_values.iterator();
-            while (new_it.next()) |kv| {
-                kv.value_ptr.* = try self.allocator.dupe(u8, kv.value_ptr.*);
-            }
+            copy_slice[i].columns = try entry.columns.clone(self.allocator);
         }
 
         try self.written_logs.appendSlice(self.allocator, copy_slice);

@@ -2,7 +2,7 @@ const std = @import("std");
 
 const testing = std.testing;
 
-const protocol = @import("protocol.zig");
+pub const protocol = @import("protocol.zig");
 
 pub const packet = @import("packet.zig");
 pub const conn = @import("conn.zig");

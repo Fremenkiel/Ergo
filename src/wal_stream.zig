@@ -130,9 +130,9 @@ fn WalStreamT(comptime StreamChClient: type, comptime StreamPgClient: type) type
                                 response.data = null;
                             }
 
-                            if (response.timestamp != null) {
+                            if (response.timestamp) |timestamp| {
                                 for (self.transaction_array.items) |*row| {
-                                    row.event_time = response.timestamp.?;
+                                    row.event_time = timestamp;
                                 }
                                 try self.log_array.appendSlice(self.allocator, self.transaction_array.items);
                                 self.transaction_array.clearRetainingCapacity();
@@ -195,49 +195,30 @@ test "startStreaming: read and parse correctly" {
     const allocator = testing.allocator;
     const io = testing.io;
 
-    var changed_columns = std.StringHashMap(types.ChangedColumn).init(allocator);
-    try changed_columns.ensureUnusedCapacity(6);
+    var columns: std.ArrayList(types.ChangedColumn) = .empty;
+    errdefer {
+        columns.clearAndFree(allocator);
+        columns.deinit(allocator);
+    }
+    try columns.ensureUnusedCapacity(6);
 
-    try changed_columns.put("id", .{ .has_changes = false, .value = "1" });
-    try changed_columns.put("address_line_1", .{ .has_changes = true, .value = "Googleplex" });
-    try changed_columns.put("address_line_2", .{ .has_changes = false, .value = "" });
-    try changed_columns.put("postal_code", .{ .has_changes = true, .value = "94043" });
-    try changed_columns.put("city", .{ .has_changes = true, .value = "Mountain View" });
-    try changed_columns.put("country", .{ .has_changes = false, .value = "US" });
-
-    var new_values = std.StringHashMapUnmanaged([]const u8).empty;
-    try new_values.ensureUnusedCapacity(allocator, 6);
-
-    try new_values.put(allocator, "id", try allocator.dupe(u8, "1"));
-    try new_values.put(allocator, "address_line_1", try allocator.dupe(u8, "1 Apple Park Way"));
-    try new_values.put(allocator, "address_line_2", try allocator.dupe(u8, ""));
-    try new_values.put(allocator, "postal_code", try allocator.dupe(u8, "95014"));
-    try new_values.put(allocator, "city", try allocator.dupe(u8, "Cupertino"));
-    try new_values.put(allocator, "country", try allocator.dupe(u8, "US"));
-
-    var old_values = std.StringHashMapUnmanaged([]const u8).empty;
-    try old_values.ensureUnusedCapacity(allocator, 6);
-
-    try old_values.put(allocator, "id", try allocator.dupe(u8, "1"));
-    try old_values.put(allocator, "address_line_1", try allocator.dupe(u8, "Googleplex"));
-    try old_values.put(allocator, "address_line_2", try allocator.dupe(u8, ""));
-    try old_values.put(allocator, "postal_code", try allocator.dupe(u8, "94043"));
-    try old_values.put(allocator, "city", try allocator.dupe(u8, "Mountain View"));
-    try old_values.put(allocator, "country", try allocator.dupe(u8, "US"));
+    try columns.appendAssumeCapacity(.{ .has_changes = false, .old_value = try allocator.dupe(u8, "1"), .new_value = try allocator.dupe(u8, "1"), .column_name = try allocator.dupe(u8, "id"), .is_key = true });
+    try columns.appendAssumeCapacity(.{ .has_changes = true, .old_value = try allocator.dupe(u8, "Googleplex"), .new_value = try allocator.dupe(u8, "1 Apple Park Way"), .column_name = try allocator.dupe(u8, "address_line_1"), .is_key = false});
+    try columns.appendAssumeCapacity(.{ .has_changes = false, .old_value = try allocator.dupe(u8, ""), .new_value = try allocator.dupe(u8, ""), .column_name = allocator.dupe(u8, "address_line_2"), .is_key = false });
+    try columns.appendAssumeCapacity(.{ .has_changes = true, .old_value = try allocator.dupe(u8, "94043"), .new_value = try allocator.dupe(u8, "95014"), .column_name = allocator.dupe(u8, "postal_code"), .is_key = false });
+    try columns.appendAssumeCapacity(.{ .has_changes = true, .old_value = try allocator.dupe(u8, "Mountain View"), .new_value = try allocator.dupe(u8, "Cupertino"), .column_name = try allocator.dupe(u8, "city"), .is_key = false });
+    try columns.appendAssumeCapacity(.{ .has_changes = false, .old_value = try allocator.dupe(u8, "US"), .new_value = try allocator.dupe(u8, "US"), .column_name = try allocator.dupe(u8, "country"), .is_key = false });
 
     var res = [_]ReadResponse{
         .{ 
             .data = .{
                 .event_time = undefined,
                 .table_name = try allocator.dupe(u8, "test.addresses"),
-                .new_values = new_values,
-                .old_values = old_values,
                 .action = 1,
-                .changed_columns = changed_columns,
+                .columns = columns,
                 .transaction_id = 793,
                 .user_id = try allocator.dupe(u8, "42"),
                 .ip_address = try allocator.dupe(u8, "192.168.1.50"),
-                .primary_key = try allocator.dupe(u8, "1"),
             },
             .timestamp = 10,
             .message = pg.packet.ServerPacket.XLogData,

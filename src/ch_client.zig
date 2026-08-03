@@ -24,6 +24,7 @@ const column_definition = [10]ch.bulk_insert.ColumnDef{
 };
 
 const InsertValues = struct {
+    allocator: mem.Allocator, 
     primary_keys: std.StringHashMap([]const u8),
     changed_columns: std.ArrayList(ch.bulk_insert.Value),
     old_values: std.StringHashMap([]const u8),
@@ -31,6 +32,7 @@ const InsertValues = struct {
 
     pub fn init(allocator: mem.Allocator) !@This() {
         return .{
+            .allocator = allocator,
             .primary_keys = std.StringHashMap([]const u8).init(allocator),
             .changed_columns = std.ArrayList(ch.bulk_insert.Value).empty,
             .old_values = std.StringHashMap([]const u8).init(allocator),
@@ -38,9 +40,9 @@ const InsertValues = struct {
         };
     }
 
-    pub fn deinit(self: @This(), allocator: mem.Allocator) void {
+    pub fn deinit(self: *@This()) void {
         self.primary_keys.deinit();
-        self.changed_columns.deinit(allocator);
+        self.changed_columns.deinit(self.allocator);
 
         self.old_values.clearAndFree();
         self.old_values.deinit();
@@ -58,8 +60,8 @@ const InsertValues = struct {
 
     pub fn parseRow(self: *@This(), row: types.AuditEntry) !void {
         try self.changed_columns.ensureUnusedCapacity(self.allocator, row.columns.items.len);
-        try self.old_values.ensureUnusedCapacity(row.columns.items.len);
-        try self.new_values.ensureUnusedCapacity(row.columns.items.len);
+        try self.old_values.ensureUnusedCapacity(@as(u32, @truncate(row.columns.items.len)));
+        try self.new_values.ensureUnusedCapacity(@as(u32, @truncate(row.columns.items.len)));
 
         for (row.columns.items) |col| {
             if (col.is_key) {
@@ -70,16 +72,16 @@ const InsertValues = struct {
                 }
             }
 
-            if (!col.value_ptr.*.has_changes) continue;
+            if (!col.has_changes) continue;
 
-            self.changed_columns.appendAssumeCapacity(.{ .String = col.key_ptr.* });
+            self.changed_columns.appendAssumeCapacity(.{ .String = col.column_name });
 
             if (!mem.eql(u8, col.old_value, "")) {
-                try self.old_values.putAssumeCapacity(col.column_name, col.old_value);
+                self.old_values.putAssumeCapacity(col.column_name, col.old_value);
             }
 
             if (!mem.eql(u8, col.new_value, "")) {
-                try self.new_values.putAssumeCapacity(col.column_name, col.new_value);
+                self.new_values.putAssumeCapacity(col.column_name, col.new_value);
             }
         }
     }
@@ -397,8 +399,8 @@ pub const ChClient = struct {
             return err;
         };
 
-        const insert_values = try InsertValues.init(self.allocator);
-        defer insert_values.deinit(self.allocator);
+        var insert_values = try InsertValues.init(self.allocator);
+        defer insert_values.deinit();
 
         for (data) |row| {
             insert_values.clearRetainingCapacity();
@@ -785,14 +787,14 @@ test "writeLog" {
     defer audit_log.deinit(allocator);
     try audit_log.ensureUnusedCapacity(allocator, 4);
 
-    var columns = std.StringHashMap(types.ChangedColumn).init(allocator);
-    defer columns.deinit();
+    var columns: std.ArrayList(types.ChangedColumn) = .empty;
+    defer columns.deinit(allocator);
 
     audit_log.appendSliceAssumeCapacity(&[_]types.AuditEntry{
-        .{ .event_time = 53634634, .transaction_id = 10, .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "test.addresses"), .action = 1, .changed_columns = columns,.ip_address = try allocator.dupe(u8, "192.168.1.50") },
-        .{ .event_time = 53634634, .transaction_id = 10, .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "test.addresses"), .action = 2, .changed_columns = columns,.ip_address = try allocator.dupe(u8, "192.168.1.50") },
-        .{ .event_time = 53634634, .transaction_id = 10, .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "test.addresses"), .action = 3, .changed_columns = columns,.ip_address = try allocator.dupe(u8, "192.168.1.50") },
-        .{ .event_time = 53634634, .transaction_id = 11, .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "test.addresses"), .action = 1, .changed_columns = columns,.ip_address = try allocator.dupe(u8, "192.168.1.50") }
+        .{ .event_time = 53634634, .transaction_id = 10, .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "test.addresses"), .action = 1, .columns = columns,.ip_address = try allocator.dupe(u8, "192.168.1.50") },
+        .{ .event_time = 53634634, .transaction_id = 10, .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "test.addresses"), .action = 2, .columns = columns,.ip_address = try allocator.dupe(u8, "192.168.1.50") },
+        .{ .event_time = 53634634, .transaction_id = 10, .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "test.addresses"), .action = 3, .columns = columns,.ip_address = try allocator.dupe(u8, "192.168.1.50") },
+        .{ .event_time = 53634634, .transaction_id = 11, .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "test.addresses"), .action = 1, .columns = columns,.ip_address = try allocator.dupe(u8, "192.168.1.50") }
     });
 
     try client.writeLog(audit_log.items);
@@ -806,41 +808,19 @@ test "parseRow ensure correct output" {
     var client = try setupMockClient(allocator, io);
     defer client.deinit();
 
-    var columns = std.ArrayList(types.ChangedColumn).init(allocator);
-    try columns.ensureUnusedCapacity(6);
+    var columns: std.ArrayList(types.ChangedColumn) = .empty;
+    try columns.ensureUnusedCapacity(allocator, 6);
 
-    try columns.put("id", .{ .has_changes = false, .value = "1" });
-    try columns.put("address_line_1", .{ .has_changes = true, .value = "Googleplex" });
-    try columns.put("address_line_2", .{ .has_changes = false, .value = "" });
-    try columns.put("postal_code", .{ .has_changes = true, .value = "94043" });
-    try columns.put("city", .{ .has_changes = true, .value = "Mountain View" });
-    try columns.put("country", .{ .has_changes = false, .value = "US" });
-
-    var new_values = std.StringHashMapUnmanaged([]const u8).empty;
-    try new_values.ensureUnusedCapacity(allocator, 6);
-
-    try new_values.put(allocator, "id", try allocator.dupe(u8, "1"));
-    try new_values.put(allocator, "address_line_1", try allocator.dupe(u8, "1 Apple Park Way"));
-    try new_values.put(allocator, "address_line_2", try allocator.dupe(u8, ""));
-    try new_values.put(allocator, "postal_code", try allocator.dupe(u8, "95014"));
-    try new_values.put(allocator, "city", try allocator.dupe(u8, "Cupertino"));
-    try new_values.put(allocator, "country", try allocator.dupe(u8, "US"));
-
-    var old_values = std.StringHashMapUnmanaged([]const u8).empty;
-    try old_values.ensureUnusedCapacity(allocator, 6);
-
-    try old_values.put(allocator, "id", try allocator.dupe(u8, "1"));
-    try old_values.put(allocator, "address_line_1", try allocator.dupe(u8, "Googleplex"));
-    try old_values.put(allocator, "address_line_2", try allocator.dupe(u8, ""));
-    try old_values.put(allocator, "postal_code", try allocator.dupe(u8, "94043"));
-    try old_values.put(allocator, "city", try allocator.dupe(u8, "Mountain View"));
-    try old_values.put(allocator, "country", try allocator.dupe(u8, "US"));
+    columns.appendAssumeCapacity(.{ .has_changes = false, .old_value = try allocator.dupe(u8, "1"), .new_value = try allocator.dupe(u8, "1"), .column_name = try allocator.dupe(u8, "id"), .is_key = true });
+    columns.appendAssumeCapacity(.{ .has_changes = true, .old_value = try allocator.dupe(u8, "1 Apple Park Way"), .new_value = try allocator.dupe(u8, "Googleplex"), .column_name = try allocator.dupe(u8, "address_line_1"), .is_key = false });
+    columns.appendAssumeCapacity(.{ .has_changes = false, .old_value = try allocator.dupe(u8, ""), .new_value = try allocator.dupe(u8, ""), .column_name = try allocator.dupe(u8, "address_line_2"), .is_key = false });
+    columns.appendAssumeCapacity(.{ .has_changes = true, .old_value = try allocator.dupe(u8, "95014"), .new_value = try allocator.dupe(u8, "94043"), .column_name = try allocator.dupe(u8, "postal_code"), .is_key = false });
+    columns.appendAssumeCapacity(.{ .has_changes = true, .old_value = try allocator.dupe(u8, "Cupertino"), .new_value = try allocator.dupe(u8, "Mountain View"), .column_name = try allocator.dupe(u8, "city"), .is_key = false });
+    columns.appendAssumeCapacity(.{ .has_changes = false, .old_value = try allocator.dupe(u8, "US"), .new_value = try allocator.dupe(u8, "US"), .column_name = try allocator.dupe(u8, "country"), .is_key = false });
 
     var row: types.AuditEntry = .{
         .event_time = 10,
         .table_name = try allocator.dupe(u8, "test.addresses"),
-        .new_values = new_values,
-        .old_values = old_values,
         .action = 2,
         .columns = columns,
         .transaction_id = 793,
@@ -849,16 +829,10 @@ test "parseRow ensure correct output" {
     };
     defer row.deinit(allocator);
 
-    var row_changed_columns = std.ArrayList(ch.bulk_insert.Value).empty;
-    defer row_changed_columns.deinit(allocator);
+    var insert_values = try InsertValues.init(allocator);
+    defer insert_values.deinit();
 
-    var row_old_values = std.StringHashMap([]const u8).init(allocator);
-    defer row_old_values.deinit();
-
-    var row_new_values = std.StringHashMap([]const u8).init(allocator);
-    defer row_new_values.deinit();
-
-    const insert_values = try client.parseRow(row, &row_changed_columns, &row_old_values, &row_new_values);
+    try insert_values.parseRow(row);
 
     try std.testing.expectEqual(3, insert_values.changed_columns.items.len);
     try std.testing.expectEqual(3, insert_values.new_values.count());
@@ -876,13 +850,15 @@ test "parseRow ensure correct output" {
     try std.testing.expectEqualStrings("94043", insert_values.old_values.get("postal_code").?);
     try std.testing.expectEqualStrings("Mountain View", insert_values.old_values.get("city").?);
 
-    try std.testing.expectEqualStrings("42", insert_values.row.user_id);
-    try std.testing.expectEqualStrings("192.168.1.50", insert_values.row.ip_address);
-    try std.testing.expectEqualStrings("1", insert_values.row.primary_key);
-    try std.testing.expectEqualStrings("test.addresses", insert_values.row.table_name);
-    try std.testing.expectEqual(2, insert_values.row.action);
-    try std.testing.expectEqual(793, insert_values.row.transaction_id);
-    try std.testing.expectEqual(10, insert_values.row.event_time);
+    try std.testing.expectEqual(1, insert_values.primary_keys.count());
+    try std.testing.expectEqualStrings("1", insert_values.primary_keys.get("id").?);
+
+    try std.testing.expectEqualStrings("42", row.user_id);
+    try std.testing.expectEqualStrings("192.168.1.50", row.ip_address);
+    try std.testing.expectEqualStrings("test.addresses", row.table_name);
+    try std.testing.expectEqual(2, row.action);
+    try std.testing.expectEqual(793, row.transaction_id);
+    try std.testing.expectEqual(10, row.event_time);
 }
 
 test "insertRow ensure correct insertion" {
@@ -905,13 +881,20 @@ test "insertRow ensure correct insertion" {
 
     try client.connect();
 
-    var changed_columns = std.ArrayList(ch.bulk_insert.Value).empty;
-    defer changed_columns.deinit(allocator);
-    try changed_columns.ensureUnusedCapacity(allocator, 3);
+    var columns = std.ArrayList(ch.bulk_insert.Value).empty;
+    defer columns.deinit(allocator);
+    try columns.ensureUnusedCapacity(allocator, 3);
 
-    changed_columns.appendAssumeCapacity(.{ .String = "address_line_1" });
-    changed_columns.appendAssumeCapacity(.{ .String = "postal_code" });
-    changed_columns.appendAssumeCapacity(.{ .String = "city" });
+    columns.appendAssumeCapacity(.{ .String = "address_line_1" });
+    columns.appendAssumeCapacity(.{ .String = "postal_code" });
+    columns.appendAssumeCapacity(.{ .String = "city" });
+
+    var primary_keys = std.StringHashMap([]const u8).init(allocator);
+    defer primary_keys.deinit();
+    try primary_keys.ensureUnusedCapacity(2);
+
+    primary_keys.putAssumeCapacity("id", "1");
+    primary_keys.putAssumeCapacity("user_id", "1");
 
     var new_values = std.StringHashMap([]const u8).init(allocator);
     defer new_values.deinit();
@@ -930,26 +913,26 @@ test "insertRow ensure correct insertion" {
     old_values.putAssumeCapacity("city", "Mountain View");
 
     const values = InsertValues{
-        .changed_columns = &changed_columns,
-        .new_values = &new_values,
-        .old_values = &old_values,
-        .row = .{
+        .allocator = allocator,
+        .changed_columns = columns,
+        .primary_keys = primary_keys,
+        .new_values = new_values,
+        .old_values = old_values,
+    };
+    const row: types.AuditEntry = .{
             .event_time = 10,
             .table_name = try allocator.dupe(u8, "test.addresses"),
-            .new_values = undefined,
-            .old_values = undefined,
             .action = 2,
-            .changed_columns = undefined,
+            .columns = undefined,
             .transaction_id = 793,
             .user_id = try allocator.dupe(u8, "42"),
             .ip_address = try allocator.dupe(u8, "192.168.1.50"),
-            .primary_key = "1",
-        },
-    };
+        };
+
     defer {
-        allocator.free(values.row.table_name);
-        allocator.free(values.row.user_id);
-        allocator.free(values.row.ip_address);
+        allocator.free(row.table_name);
+        allocator.free(row.user_id);
+        allocator.free(row.ip_address);
     }
 
     var bulk: ch.BulkInsert = try .init(allocator, "entries", &column_definition, 1000);
@@ -962,7 +945,7 @@ test "insertRow ensure correct insertion" {
         return err;
     };
 
-    try client.insertRow(&bulk, values);
+    try client.insertRow(&bulk, row, values);
     bulk.flush(io, client.stream.?) catch |err| {
         std.debug.print("Error: Flush failed, {}\n", .{err});
         client.processQueryResponse() catch {};

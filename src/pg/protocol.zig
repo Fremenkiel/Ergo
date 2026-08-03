@@ -214,6 +214,20 @@ pub fn PasswordMessageT(comptime ProtocolStream: type) type {
     };
 }
 
+pub const CopyDone = CopyDoneT(Stream);
+
+fn CopyDoneT(comptime ProtocolStream: type) type {
+    return struct {
+        pub fn write(stream: *ProtocolStream) !void {
+            var len_buf: [4]u8 = undefined;
+            mem.writeInt(i32, &len_buf, 4, .big);
+
+            try stream.writeAll("c");
+            try stream.writeAll(&len_buf);
+        }
+    };
+}
+
 pub const CommandComplete = struct {
     pub fn parse(data: []const u8) !?i64 {
         try assert(data.len > 0, PgError.InvalidData);

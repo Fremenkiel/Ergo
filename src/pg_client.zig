@@ -69,6 +69,12 @@ pub const TableDef = struct {
     name: []const u8,
     // indicates whether the column is pk or not.
     columns: std.ArrayList(ColumnDef),
+
+    pub fn deinit(self: *@This(), allocator: mem.Allocator) void {
+        for (self.columns.items) |*col| { allocator.free(col.name); }
+        self.columns.clearAndFree(allocator);
+        self.columns.deinit(allocator);
+    }
 };
 
 pub const PgClient = struct {
@@ -106,8 +112,8 @@ pub const PgClient = struct {
         var wal_conn = try createConn(allocator, io, wal_opts);
         errdefer wal_conn.deinit();
 
-        var changed_columns = std.StringHashMap(types.ChangedColumn).init(allocator);
-        try changed_columns.ensureUnusedCapacity(16);
+        var columns: std.ArrayList(types.ChangedColumn) = .empty;
+        try columns.ensureUnusedCapacity(allocator, 16);
 
         return .{
             .allocator = allocator,
@@ -121,7 +127,7 @@ pub const PgClient = struct {
                 .user_id = "",
                 .ip_address = "",
                 .primary_key = "",
-                .changed_columns = changed_columns,
+                .columns = columns,
             },
             .table_reg = std.AutoHashMap(u32, TableDef).init(allocator),
             .wal_conn = wal_conn,
@@ -151,7 +157,7 @@ pub const PgClient = struct {
         }
 
         self.table_reg.deinit();
-        self.context.changed_columns.deinit();
+        self.context.columns.deinit(self.allocator);
         if (self.context.user_id.len > 0) self.allocator.free(self.context.user_id);
         if (self.context.ip_address.len > 0) self.allocator.free(self.context.ip_address);
 
@@ -171,9 +177,10 @@ pub const PgClient = struct {
         if (self.context.ip_address.len > 0) self.allocator.free(self.context.ip_address);
         self.context.ip_address = "";
         self.context.primary_key = "";
-        self.context.changed_columns.clearRetainingCapacity();
+        self.context.columns.clearRetainingCapacity();
 
-        while (self.table_reg.iterator().next()) |table_reg| { table_reg.value_ptr.*.deinit(self.allocator); }
+        var it = self.table_reg.iterator(); 
+        while (it.next()) |table_reg| { table_reg.value_ptr.*.deinit(self.allocator); }
         self.table_reg.clearRetainingCapacity();
     }
 
@@ -350,15 +357,11 @@ pub const PgClient = struct {
     }
 
     pub fn sendCopyDone(self: *@This()) !void {
-        var len_buf: [4]u8 = undefined;
-        mem.writeInt(i32, &len_buf, 4, .big);
-
-        if (self.wal_conn) |wal_conn| {
-            try wal_conn.write("c");
-            try wal_conn.write(&len_buf);
-        } else {
+        if (self.wal_conn == null) {
             return PgClientError.UnableToSendCopyDone;
         }
+
+        try pg.protocol.CopyDone.write(&self.wal_conn.?.stream);
     }
 
     pub fn parsePgOutput(self: *@This(), payload: []const u8) !ParseResponse {
@@ -393,8 +396,6 @@ pub const PgClient = struct {
                 response.timestamp = try reader.takeInt(u64, .big);
 
                 self.resetContext();
-
-                return response;
             },
             'R' => {
                 // Relation: send before any insert or update
@@ -450,13 +451,14 @@ pub const PgClient = struct {
 
 
                 if (self.table_reg.get(rel_id)) |table| {
-                    try self.parseTupleData(&reader, table, .Insert);
+                self.context.columns = try initContextColumns(self.allocator, table);
+                    try self.parseTupleData(&reader, .Insert);
 
                     response.data = types.AuditEntry{
                         .event_time = undefined,
                         .table_name = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{table.namespace, table.name}),
                         .action = 1,
-                        .changed_columns = try self.context.columns.clone(self.allocator),
+                        .columns = try self.context.columns.clone(self.allocator),
                         .transaction_id = self.context.xid,
                         .user_id = if (self.context.user_id.len > 0) try self.allocator.dupe(u8, self.context.user_id) else "",
                         .ip_address = if (self.context.ip_address.len > 0) try self.allocator.dupe(u8, self.context.ip_address) else "",
@@ -464,21 +466,22 @@ pub const PgClient = struct {
                 } else {
                     std.debug.print("Error: Received insert for unknown relation ID {d}\n", .{rel_id});
                 }
-                self.context.changed_columns.clearRetainingCapacity();
+                self.context.columns.clearRetainingCapacity();
             },
             'U' => {
                 const rel_id = try reader.takeInt(u32, .big);
                 var tuple_type = try reader.takeByte();
 
                 if (self.table_reg.get(rel_id)) |table| {
+                    self.context.columns = try initContextColumns(self.allocator, table);
                     if (tuple_type == 'O' or tuple_type == 'K') {
-                        try self.parseTupleData(&reader, table, .Update);
+                        try self.parseTupleData(&reader, .Update);
 
                         tuple_type = try reader.takeByte();
                     }
 
                     if (tuple_type == 'N') {
-                        try self.parseTupleData(&reader, table, .Update);
+                        try self.parseTupleData(&reader, .Update);
                         response.data = types.AuditEntry{
                             .event_time = undefined,
                             .table_name = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{table.namespace, table.name}),
@@ -495,7 +498,7 @@ pub const PgClient = struct {
                     std.debug.print("Error: Received update for unknown relation ID {d}\n", .{rel_id});
                 }
 
-                self.context.changed_columns.clearRetainingCapacity();
+                self.context.columns.clearRetainingCapacity();
             },
             'D' => {
                 const rel_id = try reader.takeInt(u32, .big);
@@ -503,13 +506,14 @@ pub const PgClient = struct {
                 const tuple_type = try reader.takeByte();
 
                 if (self.table_reg.get(rel_id)) |table| {
+                    self.context.columns = try initContextColumns(self.allocator, table);
                     if (tuple_type == 'O' or tuple_type == 'K') {
-                        try self.parseTupleData(&reader, table, .Update);
+                        try self.parseTupleData(&reader, .Update);
                         response.data = types.AuditEntry{
                             .event_time = undefined,
                             .table_name = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{table.namespace, table.name}),
                             .action = 3,
-                            .changed_columns = try self.context.columns.clone(self.allocator),
+                            .columns = try self.context.columns.clone(self.allocator),
                             .transaction_id = self.context.xid,
                             .user_id = if (self.context.user_id.len > 0) try self.allocator.dupe(u8, self.context.user_id) else "",
                             .ip_address = if (self.context.ip_address.len > 0) try self.allocator.dupe(u8, self.context.ip_address) else "",
@@ -521,7 +525,7 @@ pub const PgClient = struct {
                     std.debug.print("Error: Received delete for unknown relation ID {d}\n", .{rel_id});
                 }
 
-                self.context.changed_columns.clearRetainingCapacity();
+                self.context.columns.clearRetainingCapacity();
             },
             'M' => {
                 const flags = try reader.takeByte();
@@ -631,34 +635,34 @@ pub const PgClient = struct {
         }
     }
 
-    fn readSchemaKeys(self: *@This(), table_name: []const u8) !std.ArrayList(ColumnDef) {
-        if (self.default_conn == null) return PgClientError.DefaultConnectionNotInitialized;
-
-        const query = try std.fmt.allocPrint(self.allocator,
-        \\ SELECT
-        \\   a.attname AS column_name,
-        \\   COALESCE((SELECT string_agg(c.contype::text, '') FROM pg_constraint c WHERE a.attnum = ANY(c.conkey) AND c.conrelid = a.attrelid), '') AS constraint_types
-        \\ FROM pg_attribute a
-        \\ WHERE a.attrelid = '{s}'::regclass AND a.attnum > 0 AND NOT a.attisdropped
-        \\ ORDER BY a.attnum;
-        , .{ table_name });
-        defer self.allocator.free(query);
-
-        var result = try self.default_conn.?.query(query, .{ .column_names = true });
-        defer result.deinit(self.allocator);
-
-        var columns = std.ArrayList(ColumnDef).empty;
-        const column_name_index = result.columnIndex("column_name").?;
-        const constraint_types_index = result.columnIndex("constraint_types").?;
-        while (try result.next()) |row| {
-            const column_name_raw = try row.get(column_name_index);
-            const column_name = try self.allocator.dupe(u8, column_name_raw);
-
-            const constraint_types = try row.get(constraint_types_index);
-            try columns.append(self.allocator, .{ .name = column_name, .is_key = mem.containsAtLeast(u8, constraint_types, 1, "p") });
-        }
-        return columns;
-    }
+    // fn readSchemaKeys(self: *@This(), table_name: []const u8) !std.ArrayList(ColumnDef) {
+    //     if (self.default_conn == null) return PgClientError.DefaultConnectionNotInitialized;
+    //
+    //     const query = try std.fmt.allocPrint(self.allocator,
+    //     \\ SELECT
+    //     \\   a.attname AS column_name,
+    //     \\   COALESCE((SELECT string_agg(c.contype::text, '') FROM pg_constraint c WHERE a.attnum = ANY(c.conkey) AND c.conrelid = a.attrelid), '') AS constraint_types
+    //     \\ FROM pg_attribute a
+    //     \\ WHERE a.attrelid = '{s}'::regclass AND a.attnum > 0 AND NOT a.attisdropped
+    //     \\ ORDER BY a.attnum;
+    //     , .{ table_name });
+    //     defer self.allocator.free(query);
+    //
+    //     var result = try self.default_conn.?.query(query, .{ .column_names = true });
+    //     defer result.deinit(self.allocator);
+    //
+    //     var columns = std.ArrayList(ColumnDef).empty;
+    //     const column_name_index = result.columnIndex("column_name").?;
+    //     const constraint_types_index = result.columnIndex("constraint_types").?;
+    //     while (try result.next()) |row| {
+    //         const column_name_raw = try row.get(column_name_index);
+    //         const column_name = try self.allocator.dupe(u8, column_name_raw);
+    //
+    //         const constraint_types = try row.get(constraint_types_index);
+    //         try columns.append(self.allocator, .{ .name = column_name, .is_key = mem.containsAtLeast(u8, constraint_types, 1, "p") });
+    //     }
+    //     return columns;
+    // }
 
     pub fn createConn(allocator: mem.Allocator, io:  Io, opts: pg.PgConfig) !*pg.Conn {
         var conn = try allocator.create(pg.Conn);
@@ -692,6 +696,28 @@ pub const PgClient = struct {
     }
 };
 
+fn initContextColumns(allocator: mem.Allocator, table_def: TableDef) !std.ArrayList(types.ChangedColumn) {
+    var columns: std.ArrayList(types.ChangedColumn) = .empty;
+    errdefer {
+        columns.clearAndFree(allocator);
+        columns.deinit(allocator);
+    }
+
+    try columns.ensureUnusedCapacity(allocator, table_def.columns.items.len);
+
+    for (table_def.columns.items) |col| {
+        columns.appendAssumeCapacity(.{
+            .is_key = col.is_key,
+            .column_name = col.name,
+            .old_value = "",
+            .new_value = "",
+            .has_changes = false,
+        });
+    }
+
+    return columns;
+}
+
 fn setupClient(allocator: mem.Allocator, io: Io) !PgClient {
     var cols = std.ArrayList(ColumnDef).empty;
     try cols.ensureUnusedCapacity(allocator, 6);
@@ -709,8 +735,8 @@ fn setupClient(allocator: mem.Allocator, io: Io) !PgClient {
         .columns = cols,
     });
 
-    var changed_columns = std.StringHashMap(types.ChangedColumn).init(allocator);
-    try changed_columns.ensureUnusedCapacity(6);
+    var columns: std.ArrayList(types.ChangedColumn) = .empty;
+    try columns.ensureUnusedCapacity(allocator, 6);
 
     return .{
         .allocator = allocator,
@@ -738,7 +764,7 @@ fn setupClient(allocator: mem.Allocator, io: Io) !PgClient {
             .user_id = "",
             .ip_address = "",
             .primary_key = "",
-            .changed_columns = changed_columns,
+            .columns = columns,
         },
         .table_reg = table_reg,
         .wal_conn = null,
@@ -819,7 +845,7 @@ test "parsePgOutput maps RELATION correctly" {
             .user_id = "",
             .ip_address = "",
             .primary_key = "",
-            .changed_columns = .init(allocator),
+            .columns = .empty,
         },
         .table_reg = .init(allocator),
         .wal_conn = null,
@@ -872,34 +898,30 @@ test "parsePgOutput maps INSERT correctly" {
     try testing.expectEqual(1, result.data.?.action);
     try testing.expectEqualStrings("public.addresses", result.data.?.table_name);
 
+    try testing.expectEqual(6, result.data.?.columns.items.len);
+
     // Changed columns
-    try testing.expectEqual(true, result.data.?.changed_columns.get("id").?.has_changes);
-    try testing.expectEqualStrings("1", result.data.?.changed_columns.get("id").?.value);
+    try testing.expectEqual(true, result.data.?.columns.items[0].has_changes);
+    try testing.expectEqual(true, result.data.?.columns.items[1].has_changes);
+    try testing.expectEqual(false, result.data.?.columns.items[2].has_changes);
+    try testing.expectEqual(true, result.data.?.columns.items[3].has_changes);
+    try testing.expectEqual(true, result.data.?.columns.items[4].has_changes);
+    try testing.expectEqual(true, result.data.?.columns.items[5].has_changes);
 
-    try testing.expectEqual(true, result.data.?.changed_columns.get("address_line_1").?.has_changes);
-    try testing.expectEqualStrings("1 Apple Park Way", result.data.?.changed_columns.get("address_line_1").?.value);
-
-    try testing.expectEqual(null, result.data.?.changed_columns.get("address_line_2"));
-
-    try testing.expectEqual(true, result.data.?.changed_columns.get("postal_code").?.has_changes);
-    try testing.expectEqualStrings("95014", result.data.?.changed_columns.get("postal_code").?.value);
-
-    try testing.expectEqual(true, result.data.?.changed_columns.get("city").?.has_changes);
-    try testing.expectEqualStrings("Cupertino", result.data.?.changed_columns.get("city").?.value);
-
-    try testing.expectEqual(true, result.data.?.changed_columns.get("country").?.has_changes);
-    try testing.expectEqualStrings("US", result.data.?.changed_columns.get("country").?.value);
-
-    // Old values
-    try testing.expectEqual(0, result.data.?.old_values.capacity());
+    try testing.expectEqualStrings("1", result.data.?.columns.items[0].old_value);
+    try testing.expectEqualStrings("1 Apple Park Way", result.data.?.columns.items[1].old_value);
+    try testing.expectEqualStrings("", result.data.?.columns.items[2].old_value);
+    try testing.expectEqualStrings("95014", result.data.?.columns.items[3].old_value);
+    try testing.expectEqualStrings("Cupertino", result.data.?.columns.items[4].old_value);
+    try testing.expectEqualStrings("US", result.data.?.columns.items[5].old_value);
 
     // New values
-    try testing.expectEqualStrings("1", result.data.?.new_values.get("id").?);
-    try testing.expectEqualStrings("1 Apple Park Way", result.data.?.new_values.get("address_line_1").?);
-    try testing.expectEqual(null, result.data.?.new_values.get("address_line_2"));
-    try testing.expectEqualStrings("95014", result.data.?.new_values.get("postal_code").?);
-    try testing.expectEqualStrings("Cupertino", result.data.?.new_values.get("city").?);
-    try testing.expectEqualStrings("US", result.data.?.new_values.get("country").?);
+    try testing.expectEqualStrings("1", result.data.?.columns.items[0].new_value);
+    try testing.expectEqualStrings("1 Apple Park Way", result.data.?.columns.items[1].new_value);
+    try testing.expectEqualStrings("", result.data.?.columns.items[2].new_value);
+    try testing.expectEqualStrings("95014", result.data.?.columns.items[3].new_value);
+    try testing.expectEqualStrings("Cupertino", result.data.?.columns.items[4].new_value);
+    try testing.expectEqualStrings("US", result.data.?.columns.items[5].new_value);
 
     try testing.expectEqual(0, client.context.xid);
     try testing.expectEqualStrings("", client.context.ip_address);
@@ -932,37 +954,31 @@ test "parsePgOutput maps UPDATE correctly" {
     try testing.expectEqual(2, result.data.?.action);
     try testing.expectEqualStrings("public.addresses", result.data.?.table_name);
 
+    try testing.expectEqual(6, result.data.?.columns.items.len);
+
     // Changed columns
-    try testing.expectEqual(false, result.data.?.changed_columns.get("id").?.has_changes);
-    try testing.expectEqualStrings("1", result.data.?.changed_columns.get("id").?.value);
-
-    try testing.expectEqual(true, result.data.?.changed_columns.get("address_line_1").?.has_changes);
-    try testing.expectEqualStrings("1 Apple Park Way", result.data.?.changed_columns.get("address_line_1").?.value);
-
-    try testing.expectEqual(null, result.data.?.changed_columns.get("address_line_2"));
-
-    try testing.expectEqual(true, result.data.?.changed_columns.get("postal_code").?.has_changes);
-    try testing.expectEqualStrings("95014", result.data.?.changed_columns.get("postal_code").?.value);
-
-    try testing.expectEqual(true, result.data.?.changed_columns.get("city").?.has_changes);
-    try testing.expectEqualStrings("Cupertino", result.data.?.changed_columns.get("city").?.value);
-
-    try testing.expectEqual(false, result.data.?.changed_columns.get("country").?.has_changes);
-    try testing.expectEqualStrings("US", result.data.?.changed_columns.get("country").?.value);
+    try testing.expectEqual(false, result.data.?.columns.items[0].has_changes);
+    try testing.expectEqual(true, result.data.?.columns.items[0].has_changes);
+    try testing.expectEqual(false, result.data.?.columns.items[0].has_changes);
+    try testing.expectEqual(true, result.data.?.columns.items[0].has_changes);
+    try testing.expectEqual(true, result.data.?.columns.items[0].has_changes);
+    try testing.expectEqual(false, result.data.?.columns.items[0].has_changes);
 
     // Old values
-    try testing.expectEqualStrings("1 Apple Park Way", result.data.?.old_values.get("address_line_1").?);
-    try testing.expectEqual(null, result.data.?.old_values.get("address_line_2"));
-    try testing.expectEqualStrings("95014", result.data.?.old_values.get("postal_code").?);
-    try testing.expectEqualStrings("Cupertino", result.data.?.old_values.get("city").?);
-    try testing.expectEqualStrings("US", result.data.?.old_values.get("country").?);
+    try testing.expectEqualStrings("1", result.data.?.columns.items[0].old_value);
+    try testing.expectEqualStrings("1 Apple Park Way", result.data.?.columns.items[1].old_value);
+    try testing.expectEqualStrings("", result.data.?.columns.items[2].old_value);
+    try testing.expectEqualStrings("95014", result.data.?.columns.items[3].old_value);
+    try testing.expectEqualStrings("Cupertino", result.data.?.columns.items[4].old_value);
+    try testing.expectEqualStrings("US", result.data.?.columns.items[5].old_value);
 
     // New values
-    try testing.expectEqualStrings("Googleplex", result.data.?.new_values.get("address_line_1").?);
-    try testing.expectEqual(null, result.data.?.new_values.get("address_line_2"));
-    try testing.expectEqualStrings("94043", result.data.?.new_values.get("postal_code").?);
-    try testing.expectEqualStrings("Mountain View", result.data.?.new_values.get("city").?);
-    try testing.expectEqualStrings("US", result.data.?.new_values.get("country").?);
+    try testing.expectEqualStrings("1", result.data.?.columns.items[0].new_value);
+    try testing.expectEqualStrings("Googleplex", result.data.?.columns.items[1].new_value);
+    try testing.expectEqualStrings("", result.data.?.columns.items[2].new_value);
+    try testing.expectEqualStrings("94043", result.data.?.columns.items[3].new_value);
+    try testing.expectEqualStrings("Mountain View", result.data.?.columns.items[4].new_value);
+    try testing.expectEqualStrings("US", result.data.?.columns.items[5].new_value);
 
     try testing.expectEqual(0, client.context.xid);
     try testing.expectEqualStrings("", client.context.ip_address);
@@ -991,34 +1007,31 @@ test "parsePgOutput maps DELETE correctly" {
     try testing.expectEqual(3, result.data.?.action);
     try testing.expectEqualStrings("public.addresses", result.data.?.table_name);
 
+    try testing.expectEqual(6, result.data.?.columns.items.len);
+
     // Changed columns
-    try testing.expectEqual(true, result.data.?.changed_columns.get("id").?.has_changes);
-    try testing.expectEqualStrings("1", result.data.?.changed_columns.get("id").?.value);
-
-    try testing.expectEqual(true, result.data.?.changed_columns.get("address_line_1").?.has_changes);
-    try testing.expectEqualStrings("Googleplex", result.data.?.changed_columns.get("address_line_1").?.value);
-
-    try testing.expectEqual(null, result.data.?.changed_columns.get("address_line_2"));
-
-    try testing.expectEqual(true, result.data.?.changed_columns.get("postal_code").?.has_changes);
-    try testing.expectEqualStrings("94043", result.data.?.changed_columns.get("postal_code").?.value);
-
-    try testing.expectEqual(true, result.data.?.changed_columns.get("city").?.has_changes);
-    try testing.expectEqualStrings("Mountain View", result.data.?.changed_columns.get("city").?.value);
-
-    try testing.expectEqual(true, result.data.?.changed_columns.get("country").?.has_changes);
-    try testing.expectEqualStrings("US", result.data.?.changed_columns.get("country").?.value);
+    try testing.expectEqual(true, result.data.?.columns.items[0].has_changes);
+    try testing.expectEqual(true, result.data.?.columns.items[1].has_changes);
+    try testing.expectEqual(false, result.data.?.columns.items[2].has_changes);
+    try testing.expectEqual(true, result.data.?.columns.items[3].has_changes);
+    try testing.expectEqual(true, result.data.?.columns.items[4].has_changes);
+    try testing.expectEqual(true, result.data.?.columns.items[5].has_changes);
 
     // Old values
-    try testing.expectEqualStrings("1", result.data.?.old_values.get("id").?);
-    try testing.expectEqualStrings("Googleplex", result.data.?.old_values.get("address_line_1").?);
-    try testing.expectEqual(null, result.data.?.old_values.get("address_line_2"));
-    try testing.expectEqualStrings("94043", result.data.?.old_values.get("postal_code").?);
-    try testing.expectEqualStrings("Mountain View", result.data.?.old_values.get("city").?);
-    try testing.expectEqualStrings("US", result.data.?.old_values.get("country").?);
+    try testing.expectEqualStrings("1", result.data.?.columns.items[0].old_value);
+    try testing.expectEqualStrings("Googleplex", result.data.?.columns.items[1].old_value);
+    try testing.expectEqualStrings("", result.data.?.columns.items[2].old_value);
+    try testing.expectEqualStrings("94043", result.data.?.columns.items[3].old_value);
+    try testing.expectEqualStrings("Mountain View", result.data.?.columns.items[4].old_value);
+    try testing.expectEqualStrings("US", result.data.?.columns.items[5].old_value);
 
     // New values
-    try testing.expectEqual(0, result.data.?.new_values.capacity());
+    try testing.expectEqualStrings("", result.data.?.columns.items[0].new_value);
+    try testing.expectEqualStrings("", result.data.?.columns.items[1].new_value);
+    try testing.expectEqualStrings("", result.data.?.columns.items[2].new_value);
+    try testing.expectEqualStrings("", result.data.?.columns.items[3].new_value);
+    try testing.expectEqualStrings("", result.data.?.columns.items[4].new_value);
+    try testing.expectEqualStrings("", result.data.?.columns.items[5].new_value);
 
     try testing.expectEqual(0, client.context.xid);
     try testing.expectEqualStrings("", client.context.ip_address);
@@ -1095,114 +1108,108 @@ test "parseTupleData: correct parsing of input" {
 
     var reader = Io.Reader.fixed(commit_bytes);
 
-    var result = try client.parseTupleData(&reader, client.table_reg.get(16390).?);
-    defer {
-        var it = result.valueIterator();
-        while (it.next()) |val| {
-            allocator.free(val.*);
-        }
-        result.deinit(allocator);
-    }
+    client.context.columns = try initContextColumns(allocator, client.table_reg.get(16390).?);
+    try client.parseTupleData(&reader, .Insert);
 
-    try testing.expectEqualStrings("1", result.get("id").?);
-    try testing.expectEqualStrings("1 Apple Park Way", result.get("address_line_1").?);
-    try testing.expectEqual(null, result.get("address_line_2"));
-    try testing.expectEqualStrings("95014", result.get("postal_code").?);
-    try testing.expectEqualStrings("Cupertino", result.get("city").?);
-    try testing.expectEqualStrings("US", result.get("country").?);
+    try testing.expectEqualStrings("1", client.context.columns.items[0].new_value);
+    try testing.expectEqualStrings("1 Apple Park Way", client.context.columns.items[0].new_value);
+    try testing.expectEqual(null, client.context.columns.items[0].new_value);
+    try testing.expectEqualStrings("95014", client.context.columns.items[0].new_value);
+    try testing.expectEqualStrings("Cupertino", client.context.columns.items[0].new_value);
+    try testing.expectEqualStrings("US", client.context.columns.items[0].new_value);
 
     try testing.expectEqual(0, client.context.xid);
     try testing.expectEqualStrings("", client.context.ip_address);
     try testing.expectEqualStrings("", client.context.user_id);
 }
 
-test "readSchemaKeys: ensure correct read" {
-    const allocator = testing.allocator;
-    const io = testing.io;
-
-    var startup_parameters: std.StringHashMap([]const u8) = .init(allocator); 
-    defer startup_parameters.deinit();
-
-    var client = PgClient{
-        .allocator = allocator,
-        .io = undefined,
-        .context = undefined,
-        .default_opts = undefined,
-        .wal_opts = undefined,
-        .last_lsn = undefined,
-        .last_timestamp = undefined,
-        .default_conn = try PgClient.createConn(allocator, io, .{
-            .port = 5432,
-            .host = "localhost",
-            .wal = "wal_slot",
-            .username = "db_rp",
-            .password = "12345678",
-            .database = "db",
-            .timeout_ms = 500,
-            .startup_parameters = startup_parameters,
-            .application_name = "Ergo test",
-        }),
-        .table_reg = undefined,
-        .wal_conn = null,
-    };
-    defer client.deinit();
-
-    var columns = try client.readSchemaKeys("all_types");
-    defer {
-        for (columns.items) |col| {
-            allocator.free(col.name);
-        }
-        columns.deinit(allocator);
-    }
-
-    try testing.expectEqual(43, columns.items.len);
-
-    for (columns.items) |item| if (std.meta.stringToEnum(t.AllTypesColumn, item.name)) |field| switch (field) {
-        .id => try testing.expectEqual(true, item.is_key),
-        .col_int2 => try testing.expectEqual(false, item.is_key),
-        .col_int2_arr => try testing.expectEqual(false, item.is_key),
-        .col_int4 => try testing.expectEqual(false, item.is_key),
-        .col_int4_arr => try testing.expectEqual(false, item.is_key),
-        .col_int8 => try testing.expectEqual(false, item.is_key),
-        .col_int8_arr => try testing.expectEqual(false, item.is_key),
-        .col_float4 => try testing.expectEqual(false, item.is_key),
-        .col_float4_arr => try testing.expectEqual(false, item.is_key),
-        .col_float8 => try testing.expectEqual(false, item.is_key),
-        .col_float8_arr => try testing.expectEqual(false, item.is_key),
-        .col_bool => try testing.expectEqual(false, item.is_key),
-        .col_bool_arr => try testing.expectEqual(false, item.is_key),
-        .col_text => try testing.expectEqual(false, item.is_key),
-        .col_text_arr => try testing.expectEqual(false, item.is_key),
-        .col_bytea => try testing.expectEqual(false, item.is_key),
-        .col_bytea_arr => try testing.expectEqual(false, item.is_key),
-        .col_enum => try testing.expectEqual(false, item.is_key),
-        .col_enum_arr => try testing.expectEqual(false, item.is_key),
-        .col_uuid => try testing.expectEqual(false, item.is_key),
-        .col_uuid_arr => try testing.expectEqual(false, item.is_key),
-        .col_numeric => try testing.expectEqual(false, item.is_key),
-        .col_numeric_arr => try testing.expectEqual(false, item.is_key),
-        .col_timestamp => try testing.expectEqual(false, item.is_key),
-        .col_timestamp_arr => try testing.expectEqual(false, item.is_key),
-        .col_json => try testing.expectEqual(false, item.is_key),
-        .col_json_arr => try testing.expectEqual(false, item.is_key),
-        .col_jsonb => try testing.expectEqual(false, item.is_key),
-        .col_jsonb_arr => try testing.expectEqual(false, item.is_key),
-        .col_char => try testing.expectEqual(false, item.is_key),
-        .col_char_arr => try testing.expectEqual(false, item.is_key),
-        .col_charn => try testing.expectEqual(false, item.is_key),
-        .col_charn_arr => try testing.expectEqual(false, item.is_key),
-        .col_timestamptz => try testing.expectEqual(false, item.is_key),
-        .col_timestamptz_arr => try testing.expectEqual(false, item.is_key),
-        .col_cidr => try testing.expectEqual(false, item.is_key),
-        .col_cidr_arr => try testing.expectEqual(false, item.is_key),
-        .col_inet => try testing.expectEqual(false, item.is_key),
-        .col_inet_arr => try testing.expectEqual(false, item.is_key),
-        .col_macaddr => try testing.expectEqual(false, item.is_key),
-        .col_macaddr_arr => try testing.expectEqual(false, item.is_key),
-        .col_macaddr8 => try testing.expectEqual(false, item.is_key),
-        .col_macaddr8_arr => try testing.expectEqual(false, item.is_key),
-    };
-}
+// test "readSchemaKeys: ensure correct read" {
+//     const allocator = testing.allocator;
+//     const io = testing.io;
+//
+//     var startup_parameters: std.StringHashMap([]const u8) = .init(allocator); 
+//     defer startup_parameters.deinit();
+//
+//     var client = PgClient{
+//         .allocator = allocator,
+//         .io = undefined,
+//         .context = undefined,
+//         .default_opts = undefined,
+//         .wal_opts = undefined,
+//         .last_lsn = undefined,
+//         .last_timestamp = undefined,
+//         .default_conn = try PgClient.createConn(allocator, io, .{
+//             .port = 5432,
+//             .host = "localhost",
+//             .wal = "wal_slot",
+//             .username = "db_rp",
+//             .password = "12345678",
+//             .database = "db",
+//             .timeout_ms = 500,
+//             .startup_parameters = startup_parameters,
+//             .application_name = "Ergo test",
+//         }),
+//         .table_reg = undefined,
+//         .wal_conn = null,
+//     };
+//     defer client.deinit();
+//
+//     var columns = try client.readSchemaKeys("all_types");
+//     defer {
+//         for (columns.items) |col| {
+//             allocator.free(col.name);
+//         }
+//         columns.deinit(allocator);
+//     }
+//
+//     try testing.expectEqual(43, columns.items.len);
+//
+//     for (columns.items) |item| if (std.meta.stringToEnum(t.AllTypesColumn, item.name)) |field| switch (field) {
+//         .id => try testing.expectEqual(true, item.is_key),
+//         .col_int2 => try testing.expectEqual(false, item.is_key),
+//         .col_int2_arr => try testing.expectEqual(false, item.is_key),
+//         .col_int4 => try testing.expectEqual(false, item.is_key),
+//         .col_int4_arr => try testing.expectEqual(false, item.is_key),
+//         .col_int8 => try testing.expectEqual(false, item.is_key),
+//         .col_int8_arr => try testing.expectEqual(false, item.is_key),
+//         .col_float4 => try testing.expectEqual(false, item.is_key),
+//         .col_float4_arr => try testing.expectEqual(false, item.is_key),
+//         .col_float8 => try testing.expectEqual(false, item.is_key),
+//         .col_float8_arr => try testing.expectEqual(false, item.is_key),
+//         .col_bool => try testing.expectEqual(false, item.is_key),
+//         .col_bool_arr => try testing.expectEqual(false, item.is_key),
+//         .col_text => try testing.expectEqual(false, item.is_key),
+//         .col_text_arr => try testing.expectEqual(false, item.is_key),
+//         .col_bytea => try testing.expectEqual(false, item.is_key),
+//         .col_bytea_arr => try testing.expectEqual(false, item.is_key),
+//         .col_enum => try testing.expectEqual(false, item.is_key),
+//         .col_enum_arr => try testing.expectEqual(false, item.is_key),
+//         .col_uuid => try testing.expectEqual(false, item.is_key),
+//         .col_uuid_arr => try testing.expectEqual(false, item.is_key),
+//         .col_numeric => try testing.expectEqual(false, item.is_key),
+//         .col_numeric_arr => try testing.expectEqual(false, item.is_key),
+//         .col_timestamp => try testing.expectEqual(false, item.is_key),
+//         .col_timestamp_arr => try testing.expectEqual(false, item.is_key),
+//         .col_json => try testing.expectEqual(false, item.is_key),
+//         .col_json_arr => try testing.expectEqual(false, item.is_key),
+//         .col_jsonb => try testing.expectEqual(false, item.is_key),
+//         .col_jsonb_arr => try testing.expectEqual(false, item.is_key),
+//         .col_char => try testing.expectEqual(false, item.is_key),
+//         .col_char_arr => try testing.expectEqual(false, item.is_key),
+//         .col_charn => try testing.expectEqual(false, item.is_key),
+//         .col_charn_arr => try testing.expectEqual(false, item.is_key),
+//         .col_timestamptz => try testing.expectEqual(false, item.is_key),
+//         .col_timestamptz_arr => try testing.expectEqual(false, item.is_key),
+//         .col_cidr => try testing.expectEqual(false, item.is_key),
+//         .col_cidr_arr => try testing.expectEqual(false, item.is_key),
+//         .col_inet => try testing.expectEqual(false, item.is_key),
+//         .col_inet_arr => try testing.expectEqual(false, item.is_key),
+//         .col_macaddr => try testing.expectEqual(false, item.is_key),
+//         .col_macaddr_arr => try testing.expectEqual(false, item.is_key),
+//         .col_macaddr8 => try testing.expectEqual(false, item.is_key),
+//         .col_macaddr8_arr => try testing.expectEqual(false, item.is_key),
+//     };
+// }
 
 test "update from value to null" {
 }
