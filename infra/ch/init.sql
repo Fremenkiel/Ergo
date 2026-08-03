@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS entries
     action Enum8('INSERT' = 1, 'UPDATE' = 2, 'DELETE' = 3),
 
     table_name LowCardinality(String),
-    primary_key String,
+    primary_key Map(String, String),
 
     changed_columns Array(String),
     old_values Map(String, String),

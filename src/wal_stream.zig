@@ -191,158 +191,160 @@ var mock_is_shutting_down = std.atomic.Value(bool).init(false);
 
 const t = @import("t.zig");
 
-const TestWalStream = WalStreamT(t.ChClient, t.PgClient);
-
-// test "startStreaming: read and parse correctly" {
-//     const allocator = testing.allocator;
-//     const io = testing.io;
-//
-//     var changed_columns = std.StringHashMap(types.ChangedColumns).init(allocator);
-//     try changed_columns.ensureUnusedCapacity(1);
-//
-//     try changed_columns.put("id", .{ .has_changes = false, .value = "1" });
-//     try changed_columns.put("address_line_1", .{ .has_changes = true, .value = "Googleplex" });
-//     try changed_columns.put("address_line_2", .{ .has_changes = false, .value = "" });
-//     try changed_columns.put("postal_code", .{ .has_changes = true, .value = "94043" });
-//     try changed_columns.put("city", .{ .has_changes = true, .value = "Mountain View" });
-//     try changed_columns.put("country", .{ .has_changes = false, .value = "US" });
-//
-//     var new_values = std.StringHashMapUnmanaged([]const u8).empty;
-//     try new_values.ensureUnusedCapacity(allocator, 6);
-//
-//     try new_values.put(allocator, "id", try allocator.dupe(u8, "1"));
-//     try new_values.put(allocator, "address_line_1", try allocator.dupe(u8, "1 Apple Park Way"));
-//     try new_values.put(allocator, "address_line_2", try allocator.dupe(u8, ""));
-//     try new_values.put(allocator, "postal_code", try allocator.dupe(u8, "95014"));
-//     try new_values.put(allocator, "city", try allocator.dupe(u8, "Cupertino"));
-//     try new_values.put(allocator, "country", try allocator.dupe(u8, "US"));
-//
-//     var old_values = std.StringHashMapUnmanaged([]const u8).empty;
-//     try old_values.ensureUnusedCapacity(allocator, 6);
-//
-//     try old_values.put(allocator, "id", try allocator.dupe(u8, "1"));
-//     try old_values.put(allocator, "address_line_1", try allocator.dupe(u8, "Googleplex"));
-//     try old_values.put(allocator, "address_line_2", try allocator.dupe(u8, ""));
-//     try old_values.put(allocator, "postal_code", try allocator.dupe(u8, "94043"));
-//     try old_values.put(allocator, "city", try allocator.dupe(u8, "Mountain View"));
-//     try old_values.put(allocator, "country", try allocator.dupe(u8, "US"));
-//
-//     var res = [_]ReadResponse{
-//         .{ 
-//             .data = .{
-//                 .event_time = undefined,
-//                 .table_name = try allocator.dupe(u8, "test.addresses"),
-//                 .new_values = new_values,
-//                 .old_values = old_values,
-//                 .action = 1,
-//                 .changed_columns = changed_columns,
-//                 .transaction_id = 793,
-//                 .user_id = try allocator.dupe(u8, "42"),
-//                 .ip_address = try allocator.dupe(u8, "192.168.1.50"),
-//                 .primary_key = try allocator.dupe(u8, "1"),
-//             },
-//             .timestamp = 10,
-//             .message = pg.packet.ServerPacket.XLogData,
-//         },
-//     };
-//
-//     var mock_pg_client = try t.PgClient.init(allocator, io, &res);
-//     defer mock_pg_client.deinit();
-//
-//     var mock_ch_client = t.ChClient.init(allocator);
-//     defer mock_ch_client.deinit();
-//
-//     var stream = TestWalStream.init(
-//         allocator,
-//         io, 
-//         &mock_ch_client,
-//         &mock_pg_client, 
-//         null,
-//         false,
-//     );
-//     defer stream.deinit();
-//
-//     stream.last_write_timestamp = Io.Clock.real.now(io).subDuration(
-//         Io.Duration.fromSeconds(2));
-//     stream.status = .CopyData;
-//
-//     try stream.startStreaming();
-//
-//     mock_is_shutting_down.store(true, .seq_cst);
-//
-//     try stream.stream(&mock_is_shutting_down);
-//     try stream.endStreaming();
-//
-//     try testing.expectEqual(1, mock_ch_client.written_logs.items.len);
-//     try testing.expectEqual(1, mock_ch_client.written_logs.items[0].action);
-//     try testing.expectEqualStrings("test.addresses", mock_ch_client.written_logs.items[0].table_name);
-//     try testing.expectEqualStrings("42", mock_ch_client.written_logs.items[0].user_id);
-//     try testing.expectEqualStrings("192.168.1.50", mock_ch_client.written_logs.items[0].ip_address);
-//     try testing.expectEqualStrings("1", mock_ch_client.written_logs.items[0].primary_key);
-//     try testing.expectEqual(10, mock_ch_client.written_logs.items[0].event_time);
-//     try testing.expectEqual(793, mock_ch_client.written_logs.items[0].transaction_id);
-//
-//     try testing.expectEqual(6, mock_ch_client.written_logs.items[0].changed_columns.count());
-//     try testing.expectEqual(6, mock_ch_client.written_logs.items[0].new_values.count());
-//     try testing.expectEqual(6, mock_ch_client.written_logs.items[0].old_values.count());
-//
-//     const id_changed_column = mock_ch_client.written_logs.items[0].changed_columns.get("id").?;
-//     try testing.expectEqualStrings("1", id_changed_column.value);
-//     try testing.expectEqual(false, id_changed_column.has_changes);
-//     const address_line_1_changed_column = mock_ch_client.written_logs.items[0].changed_columns.get("address_line_1").?;
-//     try testing.expectEqualStrings("Googleplex", address_line_1_changed_column.value);
-//     try testing.expectEqual(true, address_line_1_changed_column.has_changes);
-//     const address_line_2_changed_column = mock_ch_client.written_logs.items[0].changed_columns.get("address_line_2").?;
-//     try testing.expectEqualStrings("", address_line_2_changed_column.value);
-//     try testing.expectEqual(false, address_line_2_changed_column.has_changes);
-//     const postal_code_changed_column = mock_ch_client.written_logs.items[0].changed_columns.get("postal_code").?;
-//     try testing.expectEqualStrings("94043", postal_code_changed_column.value);
-//     try testing.expectEqual(true, postal_code_changed_column.has_changes);
-//     const city_changed_column = mock_ch_client.written_logs.items[0].changed_columns.get("city").?;
-//     try testing.expectEqualStrings("Mountain View", city_changed_column.value);
-//     try testing.expectEqual(true, city_changed_column.has_changes);
-//     const country_changed_column = mock_ch_client.written_logs.items[0].changed_columns.get("country").?;
-//     try testing.expectEqualStrings("US", country_changed_column.value);
-//     try testing.expectEqual(false, country_changed_column.has_changes);
-//
-//     const id_new_values = mock_ch_client.written_logs.items[0].new_values.get("id").?;
-//     try testing.expectEqualStrings("1", id_new_values);
-//     const address_line_1_new_values = mock_ch_client.written_logs.items[0].new_values.get("address_line_1").?;
-//     try testing.expectEqualStrings("1 Apple Park Way", address_line_1_new_values);
-//     const address_line_2_new_values = mock_ch_client.written_logs.items[0].new_values.get("address_line_2").?;
-//     try testing.expectEqualStrings("", address_line_2_new_values);
-//     const postal_code_new_values = mock_ch_client.written_logs.items[0].new_values.get("postal_code").?;
-//     try testing.expectEqualStrings("95014", postal_code_new_values);
-//     const city_new_values = mock_ch_client.written_logs.items[0].new_values.get("city").?;
-//     try testing.expectEqualStrings("Cupertino", city_new_values);
-//     const country_new_values = mock_ch_client.written_logs.items[0].new_values.get("country").?;
-//     try testing.expectEqualStrings("US", country_new_values);
-//
-//     const id_old_values = mock_ch_client.written_logs.items[0].old_values.get("id").?;
-//     try testing.expectEqualStrings("1", id_old_values);
-//     const address_line_1_old_values = mock_ch_client.written_logs.items[0].old_values.get("address_line_1").?;
-//     try testing.expectEqualStrings("Googleplex", address_line_1_old_values);
-//     const address_line_2_old_values = mock_ch_client.written_logs.items[0].old_values.get("address_line_2").?;
-//     try testing.expectEqualStrings("", address_line_2_old_values);
-//     const postal_code_old_values = mock_ch_client.written_logs.items[0].old_values.get("postal_code").?;
-//     try testing.expectEqualStrings("94043", postal_code_old_values);
-//     const city_old_values = mock_ch_client.written_logs.items[0].old_values.get("city").?;
-//     try testing.expectEqualStrings("Mountain View", city_old_values);
-//     const country_old_values = mock_ch_client.written_logs.items[0].old_values.get("country").?;
-//     try testing.expectEqualStrings("US", country_old_values);
-// }
-
-test "startStreaming: read all types correctly" {
+test "startStreaming: read and parse correctly" {
     const allocator = testing.allocator;
     const io = testing.io;
 
-    const db_name = try t.createTestDb(allocator, io);
+    var changed_columns = std.StringHashMap(types.ChangedColumn).init(allocator);
+    try changed_columns.ensureUnusedCapacity(6);
+
+    try changed_columns.put("id", .{ .has_changes = false, .value = "1" });
+    try changed_columns.put("address_line_1", .{ .has_changes = true, .value = "Googleplex" });
+    try changed_columns.put("address_line_2", .{ .has_changes = false, .value = "" });
+    try changed_columns.put("postal_code", .{ .has_changes = true, .value = "94043" });
+    try changed_columns.put("city", .{ .has_changes = true, .value = "Mountain View" });
+    try changed_columns.put("country", .{ .has_changes = false, .value = "US" });
+
+    var new_values = std.StringHashMapUnmanaged([]const u8).empty;
+    try new_values.ensureUnusedCapacity(allocator, 6);
+
+    try new_values.put(allocator, "id", try allocator.dupe(u8, "1"));
+    try new_values.put(allocator, "address_line_1", try allocator.dupe(u8, "1 Apple Park Way"));
+    try new_values.put(allocator, "address_line_2", try allocator.dupe(u8, ""));
+    try new_values.put(allocator, "postal_code", try allocator.dupe(u8, "95014"));
+    try new_values.put(allocator, "city", try allocator.dupe(u8, "Cupertino"));
+    try new_values.put(allocator, "country", try allocator.dupe(u8, "US"));
+
+    var old_values = std.StringHashMapUnmanaged([]const u8).empty;
+    try old_values.ensureUnusedCapacity(allocator, 6);
+
+    try old_values.put(allocator, "id", try allocator.dupe(u8, "1"));
+    try old_values.put(allocator, "address_line_1", try allocator.dupe(u8, "Googleplex"));
+    try old_values.put(allocator, "address_line_2", try allocator.dupe(u8, ""));
+    try old_values.put(allocator, "postal_code", try allocator.dupe(u8, "94043"));
+    try old_values.put(allocator, "city", try allocator.dupe(u8, "Mountain View"));
+    try old_values.put(allocator, "country", try allocator.dupe(u8, "US"));
+
+    var res = [_]ReadResponse{
+        .{ 
+            .data = .{
+                .event_time = undefined,
+                .table_name = try allocator.dupe(u8, "test.addresses"),
+                .new_values = new_values,
+                .old_values = old_values,
+                .action = 1,
+                .changed_columns = changed_columns,
+                .transaction_id = 793,
+                .user_id = try allocator.dupe(u8, "42"),
+                .ip_address = try allocator.dupe(u8, "192.168.1.50"),
+                .primary_key = try allocator.dupe(u8, "1"),
+            },
+            .timestamp = 10,
+            .message = pg.packet.ServerPacket.XLogData,
+        },
+    };
+
+    var pg_client = try t.PgClient.init(allocator, io, &res);
+    defer pg_client.deinit();
+
+    var ch_client = t.ChClient.init(allocator);
+    defer ch_client.deinit();
+
+    const TestWalStream = WalStreamT(t.ChClient, t.PgClient);
+
+    var stream = TestWalStream.init(
+        allocator,
+        io, 
+        &ch_client,
+        &pg_client, 
+        null,
+        false,
+    );
+    defer stream.deinit();
+
+    stream.last_write_timestamp = Io.Clock.real.now(io).subDuration(
+        Io.Duration.fromSeconds(2));
+    stream.status = .CopyData;
+
+    try stream.startStreaming();
+
+    mock_is_shutting_down.store(true, .seq_cst);
+
+    try stream.stream(&mock_is_shutting_down);
+    try stream.endStreaming();
+
+    try testing.expectEqual(1, ch_client.written_logs.items.len);
+    try testing.expectEqual(1, ch_client.written_logs.items[0].action);
+    try testing.expectEqualStrings("test.addresses", ch_client.written_logs.items[0].table_name);
+    try testing.expectEqualStrings("42", ch_client.written_logs.items[0].user_id);
+    try testing.expectEqualStrings("192.168.1.50", ch_client.written_logs.items[0].ip_address);
+    try testing.expectEqualStrings("1", ch_client.written_logs.items[0].primary_key);
+    try testing.expectEqual(10, ch_client.written_logs.items[0].event_time);
+    try testing.expectEqual(793, ch_client.written_logs.items[0].transaction_id);
+
+    try testing.expectEqual(6, ch_client.written_logs.items[0].changed_columns.count());
+    try testing.expectEqual(6, ch_client.written_logs.items[0].new_values.count());
+    try testing.expectEqual(6, ch_client.written_logs.items[0].old_values.count());
+
+    const id_changed_column = ch_client.written_logs.items[0].changed_columns.get("id").?;
+    try testing.expectEqualStrings("1", id_changed_column.value);
+    try testing.expectEqual(false, id_changed_column.has_changes);
+    const address_line_1_changed_column = ch_client.written_logs.items[0].changed_columns.get("address_line_1").?;
+    try testing.expectEqualStrings("Googleplex", address_line_1_changed_column.value);
+    try testing.expectEqual(true, address_line_1_changed_column.has_changes);
+    const address_line_2_changed_column = ch_client.written_logs.items[0].changed_columns.get("address_line_2").?;
+    try testing.expectEqualStrings("", address_line_2_changed_column.value);
+    try testing.expectEqual(false, address_line_2_changed_column.has_changes);
+    const postal_code_changed_column = ch_client.written_logs.items[0].changed_columns.get("postal_code").?;
+    try testing.expectEqualStrings("94043", postal_code_changed_column.value);
+    try testing.expectEqual(true, postal_code_changed_column.has_changes);
+    const city_changed_column = ch_client.written_logs.items[0].changed_columns.get("city").?;
+    try testing.expectEqualStrings("Mountain View", city_changed_column.value);
+    try testing.expectEqual(true, city_changed_column.has_changes);
+    const country_changed_column = ch_client.written_logs.items[0].changed_columns.get("country").?;
+    try testing.expectEqualStrings("US", country_changed_column.value);
+    try testing.expectEqual(false, country_changed_column.has_changes);
+
+    const id_new_values = ch_client.written_logs.items[0].new_values.get("id").?;
+    try testing.expectEqualStrings("1", id_new_values);
+    const address_line_1_new_values = ch_client.written_logs.items[0].new_values.get("address_line_1").?;
+    try testing.expectEqualStrings("1 Apple Park Way", address_line_1_new_values);
+    const address_line_2_new_values = ch_client.written_logs.items[0].new_values.get("address_line_2").?;
+    try testing.expectEqualStrings("", address_line_2_new_values);
+    const postal_code_new_values = ch_client.written_logs.items[0].new_values.get("postal_code").?;
+    try testing.expectEqualStrings("95014", postal_code_new_values);
+    const city_new_values = ch_client.written_logs.items[0].new_values.get("city").?;
+    try testing.expectEqualStrings("Cupertino", city_new_values);
+    const country_new_values = ch_client.written_logs.items[0].new_values.get("country").?;
+    try testing.expectEqualStrings("US", country_new_values);
+
+    const id_old_values = ch_client.written_logs.items[0].old_values.get("id").?;
+    try testing.expectEqualStrings("1", id_old_values);
+    const address_line_1_old_values = ch_client.written_logs.items[0].old_values.get("address_line_1").?;
+    try testing.expectEqualStrings("Googleplex", address_line_1_old_values);
+    const address_line_2_old_values = ch_client.written_logs.items[0].old_values.get("address_line_2").?;
+    try testing.expectEqualStrings("", address_line_2_old_values);
+    const postal_code_old_values = ch_client.written_logs.items[0].old_values.get("postal_code").?;
+    try testing.expectEqualStrings("94043", postal_code_old_values);
+    const city_old_values = ch_client.written_logs.items[0].old_values.get("city").?;
+    try testing.expectEqualStrings("Mountain View", city_old_values);
+    const country_old_values = ch_client.written_logs.items[0].old_values.get("country").?;
+    try testing.expectEqualStrings("US", country_old_values);
+}
+
+test "startStreaming: insert all types read correctly" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    const db_name = try t.genereateDbName(allocator, io);
     defer allocator.free(db_name);
+
+    try t.createTestPgDb(allocator, io, db_name);
 
     const wal_name = try std.fmt.allocPrint(allocator, "wal_slot_{s}", .{db_name});
     defer allocator.free(wal_name);
 
-    defer t.teardownTestDb(allocator, io, db_name, wal_name) catch {};
+    defer t.teardownTestPgDb(allocator, io, db_name, wal_name) catch {};
 
     var startup_parameters: std.StringHashMap([]const u8) = .init(allocator);
     defer startup_parameters.deinit();
@@ -361,14 +363,14 @@ test "startStreaming: read all types correctly" {
     defer pg_client.deinit();
     defer pg_client.cancel();
 
-    var mock_ch_client = t.ChClient.init(allocator);
-    defer mock_ch_client.deinit();
+    var ch_client = t.ChClient.init(allocator);
+    defer ch_client.deinit();
 
-    const partialWalStream = WalStreamT(t.ChClient, PgClient);
-    var stream = partialWalStream.init(
+    const TestWalStream = WalStreamT(t.ChClient, PgClient);
+    var stream = TestWalStream.init(
         allocator,
         io, 
-        &mock_ch_client,
+        &ch_client,
         &pg_client, 
         null,
         false,
@@ -388,7 +390,7 @@ test "startStreaming: read all types correctly" {
         "-U", "db_rw",
         "-d", db_name,
         "-a",
-        "-f", "./test_fixtures/all-types-query.sql"
+        "-f", "./test_fixtures/all-types-insert-query.sql"
     };
     const pg_result = try std.process.run(allocator, io, .{ 
         .argv = &pg_argv,
@@ -411,49 +413,52 @@ test "startStreaming: read all types correctly" {
     try stream.stream(&mock_is_shutting_down);
     try stream.endStreaming();
 
-    const id_new_values = mock_ch_client.written_logs.items[0].new_values.get("id").?;
-    const col_int2_value = mock_ch_client.written_logs.items[0].new_values.get("col_int2").?;
-    const col_int2_arr_value = mock_ch_client.written_logs.items[0].new_values.get("col_int2_arr").?;
-    const col_int4_value = mock_ch_client.written_logs.items[0].new_values.get("col_int4").?;
-    const col_int4_arr_value = mock_ch_client.written_logs.items[0].new_values.get("col_int4_arr").?;
-    const col_int8_value = mock_ch_client.written_logs.items[0].new_values.get("col_int8").?;
-    const col_int8_arr_value = mock_ch_client.written_logs.items[0].new_values.get("col_int8_arr").?;
-    const col_float4_value = mock_ch_client.written_logs.items[0].new_values.get("col_float4").?;
-    const col_float4_arr_value = mock_ch_client.written_logs.items[0].new_values.get("col_float4_arr").?;
-    const col_float8_value = mock_ch_client.written_logs.items[0].new_values.get("col_float8").?;
-    const col_float8_arr_value = mock_ch_client.written_logs.items[0].new_values.get("col_float8_arr").?;
-    const col_bool_value = mock_ch_client.written_logs.items[0].new_values.get("col_bool").?;
-    const col_bool_arr_value = mock_ch_client.written_logs.items[0].new_values.get("col_bool_arr").?;
-    const col_text_value = mock_ch_client.written_logs.items[0].new_values.get("col_text").?;
-    const col_text_arr_value = mock_ch_client.written_logs.items[0].new_values.get("col_text_arr").?;
-    const col_bytea_value = mock_ch_client.written_logs.items[0].new_values.get("col_bytea").?;
-    const col_bytea_arr_value = mock_ch_client.written_logs.items[0].new_values.get("col_bytea_arr").?;
-    const col_enum_value = mock_ch_client.written_logs.items[0].new_values.get("col_enum").?;
-    const col_enum_arr_value = mock_ch_client.written_logs.items[0].new_values.get("col_enum_arr").?;
-    const col_uuid_value = mock_ch_client.written_logs.items[0].new_values.get("col_uuid").?;
-    const col_uuid_arr_value = mock_ch_client.written_logs.items[0].new_values.get("col_uuid_arr").?;
-    const col_numeric_value = mock_ch_client.written_logs.items[0].new_values.get("col_numeric").?;
-    const col_numeric_arr_value = mock_ch_client.written_logs.items[0].new_values.get("col_numeric_arr").?;
-    const col_timestamp_value = mock_ch_client.written_logs.items[0].new_values.get("col_timestamp").?;
-    const col_timestamp_arr_value = mock_ch_client.written_logs.items[0].new_values.get("col_timestamp_arr").?;
-    const col_json_value = mock_ch_client.written_logs.items[0].new_values.get("col_json").?;
-    const col_json_arr_value = mock_ch_client.written_logs.items[0].new_values.get("col_json_arr").?;
-    const col_jsonb_value = mock_ch_client.written_logs.items[0].new_values.get("col_jsonb").?;
-    const col_jsonb_arr_value = mock_ch_client.written_logs.items[0].new_values.get("col_jsonb_arr").?;
-    const col_char_value = mock_ch_client.written_logs.items[0].new_values.get("col_char").?;
-    const col_char_arr_value = mock_ch_client.written_logs.items[0].new_values.get("col_char_arr").?;
-    const col_charn_value = mock_ch_client.written_logs.items[0].new_values.get("col_charn").?;
-    const col_charn_arr_value = mock_ch_client.written_logs.items[0].new_values.get("col_charn_arr").?;
-    const col_timestamptz_value = mock_ch_client.written_logs.items[0].new_values.get("col_timestamptz").?;
-    const col_timestamptz_arr_value = mock_ch_client.written_logs.items[0].new_values.get("col_timestamptz_arr").?;
-    const col_cidr_value = mock_ch_client.written_logs.items[0].new_values.get("col_cidr").?;
-    const col_cidr_arr_value = mock_ch_client.written_logs.items[0].new_values.get("col_cidr_arr").?;
-    const col_inet_value = mock_ch_client.written_logs.items[0].new_values.get("col_inet").?;
-    const col_inet_arr_value = mock_ch_client.written_logs.items[0].new_values.get("col_inet_arr").?;
-    const col_macaddr_value = mock_ch_client.written_logs.items[0].new_values.get("col_macaddr").?;
-    const col_macaddr_arr_value = mock_ch_client.written_logs.items[0].new_values.get("col_macaddr_arr").?;
-    const col_macaddr8_value = mock_ch_client.written_logs.items[0].new_values.get("col_macaddr8").?;
-    const col_macaddr8_arr_value = mock_ch_client.written_logs.items[0].new_values.get("col_macaddr8_arr").?;
+    const id_new_values = ch_client.written_logs.items[0].new_values.get("id").?;
+    const col_int2_value = ch_client.written_logs.items[0].new_values.get("col_int2").?;
+    const col_int2_arr_value = ch_client.written_logs.items[0].new_values.get("col_int2_arr").?;
+    const col_int4_value = ch_client.written_logs.items[0].new_values.get("col_int4").?;
+    const col_int4_arr_value = ch_client.written_logs.items[0].new_values.get("col_int4_arr").?;
+    const col_int8_value = ch_client.written_logs.items[0].new_values.get("col_int8").?;
+    const col_int8_arr_value = ch_client.written_logs.items[0].new_values.get("col_int8_arr").?;
+    const col_float4_value = ch_client.written_logs.items[0].new_values.get("col_float4").?;
+    const col_float4_arr_value = ch_client.written_logs.items[0].new_values.get("col_float4_arr").?;
+    const col_float8_value = ch_client.written_logs.items[0].new_values.get("col_float8").?;
+    const col_float8_arr_value = ch_client.written_logs.items[0].new_values.get("col_float8_arr").?;
+    const col_bool_value = ch_client.written_logs.items[0].new_values.get("col_bool").?;
+    const col_bool_arr_value = ch_client.written_logs.items[0].new_values.get("col_bool_arr").?;
+    const col_text_value = ch_client.written_logs.items[0].new_values.get("col_text").?;
+    const col_text_arr_value = ch_client.written_logs.items[0].new_values.get("col_text_arr").?;
+    const col_bytea_value = ch_client.written_logs.items[0].new_values.get("col_bytea").?;
+    const col_bytea_arr_value = ch_client.written_logs.items[0].new_values.get("col_bytea_arr").?;
+    const col_enum_value = ch_client.written_logs.items[0].new_values.get("col_enum").?;
+    const col_enum_arr_value = ch_client.written_logs.items[0].new_values.get("col_enum_arr").?;
+    const col_uuid_value = ch_client.written_logs.items[0].new_values.get("col_uuid").?;
+    const col_uuid_arr_value = ch_client.written_logs.items[0].new_values.get("col_uuid_arr").?;
+    const col_numeric_value = ch_client.written_logs.items[0].new_values.get("col_numeric").?;
+    const col_numeric_arr_value = ch_client.written_logs.items[0].new_values.get("col_numeric_arr").?;
+    const col_timestamp_value = ch_client.written_logs.items[0].new_values.get("col_timestamp").?;
+    const col_timestamp_arr_value = ch_client.written_logs.items[0].new_values.get("col_timestamp_arr").?;
+    const col_json_value = ch_client.written_logs.items[0].new_values.get("col_json").?;
+    const col_json_arr_value = ch_client.written_logs.items[0].new_values.get("col_json_arr").?;
+    const col_jsonb_value = ch_client.written_logs.items[0].new_values.get("col_jsonb").?;
+    const col_jsonb_arr_value = ch_client.written_logs.items[0].new_values.get("col_jsonb_arr").?;
+    const col_char_value = ch_client.written_logs.items[0].new_values.get("col_char").?;
+    const col_char_arr_value = ch_client.written_logs.items[0].new_values.get("col_char_arr").?;
+    const col_charn_value = ch_client.written_logs.items[0].new_values.get("col_charn").?;
+    const col_charn_arr_value = ch_client.written_logs.items[0].new_values.get("col_charn_arr").?;
+    const col_timestamptz_value = ch_client.written_logs.items[0].new_values.get("col_timestamptz").?;
+    const col_timestamptz_arr_value = ch_client.written_logs.items[0].new_values.get("col_timestamptz_arr").?;
+    const col_cidr_value = ch_client.written_logs.items[0].new_values.get("col_cidr").?;
+    const col_cidr_arr_value = ch_client.written_logs.items[0].new_values.get("col_cidr_arr").?;
+    const col_inet_value = ch_client.written_logs.items[0].new_values.get("col_inet").?;
+    const col_inet_arr_value = ch_client.written_logs.items[0].new_values.get("col_inet_arr").?;
+    const col_macaddr_value = ch_client.written_logs.items[0].new_values.get("col_macaddr").?;
+    const col_macaddr_arr_value = ch_client.written_logs.items[0].new_values.get("col_macaddr_arr").?;
+    const col_macaddr8_value = ch_client.written_logs.items[0].new_values.get("col_macaddr8").?;
+    const col_macaddr8_arr_value = ch_client.written_logs.items[0].new_values.get("col_macaddr8_arr").?;
+
+    try testing.expectEqual(1, ch_client.written_logs.items.len);
+    try testing.expectEqual(43, ch_client.written_logs.items[0].new_values.count());
 
     try testing.expectEqualStrings("1", id_new_values);
     try testing.expectEqualStrings("-32768", col_int2_value);
@@ -504,4 +509,304 @@ test "startStreaming: read all types correctly" {
     try testing.expectEqualStrings("{08:00:2b:01:02:03,08:00:2b:01:02:04}", col_macaddr_arr_value);
     try testing.expectEqualStrings("08:00:2b:01:02:03:04:05", col_macaddr8_value);
     try testing.expectEqualStrings("{08:00:2b:01:02:03:04:05,08:00:2b:01:02:03:04:06}", col_macaddr8_arr_value);
+}
+
+test "startStreaming: update all types to null read correctly" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    const db_name = try t.genereateDbName(allocator, io);
+    defer allocator.free(db_name);
+
+    try t.createTestPgDb(allocator, io, db_name);
+
+    const wal_name = try std.fmt.allocPrint(allocator, "wal_slot_{s}", .{db_name});
+    defer allocator.free(wal_name);
+
+    defer t.teardownTestPgDb(allocator, io, db_name, wal_name) catch {};
+
+    var startup_parameters: std.StringHashMap([]const u8) = .init(allocator);
+    defer startup_parameters.deinit();
+
+    var pg_client = try PgClient.init(allocator, io, .{
+        .port = 5432,
+        .host = "localhost",
+        .wal = wal_name,
+        .username = "db_rp",
+        .password = "12345678",
+        .database = db_name,
+        .application_name = "Ergo test",
+        .timeout_ms = 10_000,
+        .startup_parameters = startup_parameters
+    });
+    defer pg_client.deinit();
+    defer pg_client.cancel();
+
+    var ch_client = t.ChClient.init(allocator);
+    defer ch_client.deinit();
+
+    const TestWalStream = WalStreamT(t.ChClient, PgClient);
+    var stream = TestWalStream.init(
+        allocator,
+        io, 
+        &ch_client,
+        &pg_client, 
+        null,
+        false,
+    );
+    defer stream.deinit();
+
+    stream.status = .AwaitingData;
+
+    var pg_env = try std.process.Environ.createMap(std.testing.environ, allocator);
+    defer pg_env.deinit();
+    try pg_env.put("PGPASSWORD", "12345678");
+
+    var pg_argv = [_][]const u8{
+        "psql",
+        "-h", "127.0.0.1",
+        "-p", "5432",
+        "-U", "db_rw",
+        "-d", db_name,
+        "-a",
+        "-f", "./test_fixtures/all-types-update-query.sql"
+    };
+    const pg_result = try std.process.run(allocator, io, .{ 
+        .argv = &pg_argv,
+        .environ_map = &pg_env, 
+    });
+    defer {
+        allocator.free(pg_result.stdout);
+        allocator.free(pg_result.stderr);
+    }
+
+    if (pg_result.term != .exited or pg_result.term.exited != 0 or pg_result.stderr.len > 0) {
+        std.debug.print("Error: PSQL failed: {s}\n", .{pg_result.stderr});
+        return error.PsqlExecutionFailed;
+    }
+
+    try stream.startStreaming();
+
+    mock_is_shutting_down.store(true, .seq_cst);
+
+    try stream.stream(&mock_is_shutting_down);
+    try stream.endStreaming();
+
+    const id_new_values = ch_client.written_logs.items[1].new_values.get("id").?;
+    const col_int2_value = ch_client.written_logs.items[1].new_values.get("col_int2");
+    const col_int2_arr_value = ch_client.written_logs.items[1].new_values.get("col_int2_arr");
+    const col_int4_value = ch_client.written_logs.items[1].new_values.get("col_int4");
+    const col_int4_arr_value = ch_client.written_logs.items[1].new_values.get("col_int4_arr");
+    const col_int8_value = ch_client.written_logs.items[1].new_values.get("col_int8");
+    const col_int8_arr_value = ch_client.written_logs.items[1].new_values.get("col_int8_arr");
+    const col_float4_value = ch_client.written_logs.items[1].new_values.get("col_float4");
+    const col_float4_arr_value = ch_client.written_logs.items[1].new_values.get("col_float4_arr");
+    const col_float8_value = ch_client.written_logs.items[1].new_values.get("col_float8");
+    const col_float8_arr_value = ch_client.written_logs.items[1].new_values.get("col_float8_arr");
+    const col_bool_value = ch_client.written_logs.items[1].new_values.get("col_bool");
+    const col_bool_arr_value = ch_client.written_logs.items[1].new_values.get("col_bool_arr");
+    const col_text_value = ch_client.written_logs.items[1].new_values.get("col_text");
+    const col_text_arr_value = ch_client.written_logs.items[1].new_values.get("col_text_arr");
+    const col_bytea_value = ch_client.written_logs.items[1].new_values.get("col_bytea");
+    const col_bytea_arr_value = ch_client.written_logs.items[1].new_values.get("col_bytea_arr");
+    const col_enum_value = ch_client.written_logs.items[1].new_values.get("col_enum");
+    const col_enum_arr_value = ch_client.written_logs.items[1].new_values.get("col_enum_arr");
+    const col_uuid_value = ch_client.written_logs.items[1].new_values.get("col_uuid");
+    const col_uuid_arr_value = ch_client.written_logs.items[1].new_values.get("col_uuid_arr");
+    const col_numeric_value = ch_client.written_logs.items[1].new_values.get("col_numeric");
+    const col_numeric_arr_value = ch_client.written_logs.items[1].new_values.get("col_numeric_arr");
+    const col_timestamp_value = ch_client.written_logs.items[1].new_values.get("col_timestamp");
+    const col_timestamp_arr_value = ch_client.written_logs.items[1].new_values.get("col_timestamp_arr");
+    const col_json_value = ch_client.written_logs.items[1].new_values.get("col_json");
+    const col_json_arr_value = ch_client.written_logs.items[1].new_values.get("col_json_arr");
+    const col_jsonb_value = ch_client.written_logs.items[1].new_values.get("col_jsonb");
+    const col_jsonb_arr_value = ch_client.written_logs.items[1].new_values.get("col_jsonb_arr");
+    const col_char_value = ch_client.written_logs.items[1].new_values.get("col_char");
+    const col_char_arr_value = ch_client.written_logs.items[1].new_values.get("col_char_arr");
+    const col_charn_value = ch_client.written_logs.items[1].new_values.get("col_charn");
+    const col_charn_arr_value = ch_client.written_logs.items[1].new_values.get("col_charn_arr");
+    const col_timestamptz_value = ch_client.written_logs.items[1].new_values.get("col_timestamptz");
+    const col_timestamptz_arr_value = ch_client.written_logs.items[1].new_values.get("col_timestamptz_arr");
+    const col_cidr_value = ch_client.written_logs.items[1].new_values.get("col_cidr");
+    const col_cidr_arr_value = ch_client.written_logs.items[1].new_values.get("col_cidr_arr");
+    const col_inet_value = ch_client.written_logs.items[1].new_values.get("col_inet");
+    const col_inet_arr_value = ch_client.written_logs.items[1].new_values.get("col_inet_arr");
+    const col_macaddr_value = ch_client.written_logs.items[1].new_values.get("col_macaddr");
+    const col_macaddr_arr_value = ch_client.written_logs.items[1].new_values.get("col_macaddr_arr");
+    const col_macaddr8_value = ch_client.written_logs.items[1].new_values.get("col_macaddr8");
+    const col_macaddr8_arr_value = ch_client.written_logs.items[1].new_values.get("col_macaddr8_arr");
+
+    try testing.expectEqual(2, ch_client.written_logs.items.len);
+    try testing.expectEqual(43, ch_client.written_logs.items[0].new_values.count());
+
+    try testing.expectEqualStrings("1", id_new_values);
+    try testing.expectEqual(null, col_int2_value);
+    try testing.expectEqual(null, col_int2_arr_value);
+    try testing.expectEqual(null, col_int4_value);
+    try testing.expectEqual(null, col_int4_arr_value);
+    try testing.expectEqual(null, col_int8_value);
+    try testing.expectEqual(null, col_int8_arr_value);
+    try testing.expectEqual(null, col_float4_value);
+    try testing.expectEqual(null, col_float4_arr_value);
+    try testing.expectEqual(null, col_float8_value);
+    try testing.expectEqual(null, col_float8_arr_value);
+    try testing.expectEqual(null, col_bool_value);
+    try testing.expectEqual(null, col_bool_arr_value);
+    try testing.expectEqual(null, col_text_value);
+    try testing.expectEqual(null, col_text_arr_value);
+    try testing.expectEqual(null, col_bytea_value);
+    try testing.expectEqual(null, col_bytea_arr_value);
+    try testing.expectEqual(null, col_enum_value);
+    try testing.expectEqual(null, col_enum_arr_value);
+    try testing.expectEqual(null, col_uuid_value);
+    try testing.expectEqual(null, col_uuid_arr_value);
+    try testing.expectEqual(null, col_numeric_value);
+    try testing.expectEqual(null, col_numeric_arr_value);
+    try testing.expectEqual(null, col_timestamp_value);
+    try testing.expectEqual(null, col_timestamp_arr_value);
+    try testing.expectEqual(null, col_json_value);
+    try testing.expectEqual(null, col_json_arr_value);
+    try testing.expectEqual(null, col_jsonb_value);
+    try testing.expectEqual(null, col_jsonb_arr_value);
+    try testing.expectEqual(null, col_char_value);
+    try testing.expectEqual(null, col_char_arr_value);
+    try testing.expectEqual(null, col_charn_value);
+    try testing.expectEqual(null, col_charn_arr_value);
+    try testing.expectEqual(null, col_timestamptz_value);
+    try testing.expectEqual(null, col_timestamptz_arr_value);
+    try testing.expectEqual(null, col_cidr_value);
+    try testing.expectEqual(null, col_cidr_arr_value);
+    try testing.expectEqual(null, col_inet_value);
+    try testing.expectEqual(null, col_inet_arr_value);
+    try testing.expectEqual(null, col_macaddr_value);
+    try testing.expectEqual(null, col_macaddr_arr_value);
+    try testing.expectEqual(null, col_macaddr8_value);
+    try testing.expectEqual(null, col_macaddr8_arr_value);
+}
+
+test "startStreaming: insert all types to null write correctly" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    const db_name = try t.genereateDbName(allocator, io);
+    defer allocator.free(db_name);
+
+    try t.createTestChDb(allocator, io, db_name);
+    defer t.teardownTestChDb(allocator, io, db_name) catch {};
+
+    var changed_columns = std.StringHashMap(types.ChangedColumn).init(allocator);
+    try changed_columns.ensureUnusedCapacity(6);
+
+    try changed_columns.put("id", .{ .has_changes = false, .value = "1" });
+    try changed_columns.put("address_line_1", .{ .has_changes = true, .value = "Googleplex" });
+    try changed_columns.put("address_line_2", .{ .has_changes = false, .value = "" });
+    try changed_columns.put("postal_code", .{ .has_changes = true, .value = "94043" });
+    try changed_columns.put("city", .{ .has_changes = true, .value = "Mountain View" });
+    try changed_columns.put("country", .{ .has_changes = false, .value = "US" });
+
+    var new_values = std.StringHashMapUnmanaged([]const u8).empty;
+    try new_values.ensureUnusedCapacity(allocator, 6);
+
+    try new_values.put(allocator, "id", try allocator.dupe(u8, "1"));
+    try new_values.put(allocator, "address_line_1", try allocator.dupe(u8, "1 Apple Park Way"));
+    try new_values.put(allocator, "address_line_2", try allocator.dupe(u8, ""));
+    try new_values.put(allocator, "postal_code", try allocator.dupe(u8, "95014"));
+    try new_values.put(allocator, "city", try allocator.dupe(u8, "Cupertino"));
+    try new_values.put(allocator, "country", try allocator.dupe(u8, "US"));
+
+    var old_values = std.StringHashMapUnmanaged([]const u8).empty;
+    try old_values.ensureUnusedCapacity(allocator, 6);
+
+    try old_values.put(allocator, "id", try allocator.dupe(u8, "1"));
+    try old_values.put(allocator, "address_line_1", try allocator.dupe(u8, "Googleplex"));
+    try old_values.put(allocator, "address_line_2", try allocator.dupe(u8, ""));
+    try old_values.put(allocator, "postal_code", try allocator.dupe(u8, "94043"));
+    try old_values.put(allocator, "city", try allocator.dupe(u8, "Mountain View"));
+    try old_values.put(allocator, "country", try allocator.dupe(u8, "US"));
+
+    var res = [_]ReadResponse{
+        .{ 
+            .data = .{
+                .event_time = undefined,
+                .table_name = try allocator.dupe(u8, "test.addresses"),
+                .new_values = new_values,
+                .old_values = old_values,
+                .action = 1,
+                .changed_columns = changed_columns,
+                .transaction_id = 793,
+                .user_id = try allocator.dupe(u8, "42"),
+                .ip_address = try allocator.dupe(u8, "192.168.1.50"),
+                .primary_key = try allocator.dupe(u8, "1"),
+            },
+            .timestamp = 10,
+            .message = pg.packet.ServerPacket.XLogData,
+        },
+    };
+
+    var pg_client = try t.PgClient.init(allocator, io, &res);
+    defer pg_client.deinit();
+
+    var ch_client = ChClient.init(allocator, io, .{
+        .host = "localhost",
+        .port = 9000,
+        .username = "default",
+        .password = "clickhouse",
+        .database = db_name,
+        .application_name = "Ergo test",
+    }, "Fremenkiel");
+    defer ch_client.deinit();
+
+    try ch_client.connect();
+    defer ch_client.disconnect();
+
+    const TestWalStream = WalStreamT(ChClient, t.PgClient);
+
+    var stream = TestWalStream.init(
+        allocator,
+        io, 
+        &ch_client,
+        &pg_client, 
+        null,
+        false,
+    );
+    defer stream.deinit();
+
+    stream.last_write_timestamp = Io.Clock.real.now(io).subDuration(
+        Io.Duration.fromSeconds(2));
+    stream.status = .CopyData;
+
+    try stream.startStreaming();
+
+    mock_is_shutting_down.store(true, .seq_cst);
+
+    try stream.stream(&mock_is_shutting_down);
+    try stream.endStreaming();
+
+    var ch_assert_argv = [_][]const u8{ 
+        "clickhouse-client", 
+        "--host", "127.0.0.1",
+        "--port", "9000",
+        "--user", "default",
+        "--password", "clickhouse",
+        "--database", db_name,
+        "--query", "SELECT action, table_name, primary_key, changed_columns, old_values, new_values, user_id, ip_address FROM entries ORDER BY primary_key, action DESC" 
+    };
+    const ch_assert_result = try std.process.run(allocator, io, .{ 
+        .argv = &ch_assert_argv,
+    });
+    defer {
+        allocator.free(ch_assert_result.stdout);
+        allocator.free(ch_assert_result.stderr);
+    }
+
+    if (ch_assert_result.term != .exited or ch_assert_result.term.exited != 0 or ch_assert_result.stderr.len > 0) {
+        std.debug.print("Error: unable to select ch data: {s}\n", .{ch_assert_result.stderr});
+        return error.ChSelectError;
+    }
+
+    try testing.expectEqualStrings(
+        "INSERT\ttest.addresses\t1\t['address_line_1','postal_code','city']\t{'address_line_1':'Googleplex','city':'Mountain View','postal_code':'94043'}\t{'address_line_1':'1 Apple Park Way','city':'Cupertino','postal_code':'95014'}\t42\t192.168.1.50\n",
+        ch_assert_result.stdout,
+    );
+
 }

@@ -1,7 +1,15 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const Io = std.Io;
+
 const compression = @import("compression.zig");
+
+const packet = @import("packet.zig");
+const root = @import("root.zig");
+
+const ChConfig = root.ChConfig;
+const ChError = root.ChError;
 
 pub const CLIENT_VERSION_MAJOR: u64 = 1;
 pub const CLIENT_VERSION_MINOR: u64 = 0;
@@ -10,16 +18,29 @@ pub const CLIENT_VERSION_PATCH: u64 = 0;
 pub const PROTOCOL_VERSION: u64 = 54449;
 
 pub const ClientHello = struct {
-    pub fn write(writer: *std.Io.Writer, application_name: []const u8) !void {
-        try writeString(writer, application_name);
+    pub fn write(writer: *Io.Writer, config: ChConfig) !void {
+        try packet.writeClientPacketHeader(writer, .Hello);
+
+        try writeString(writer, config.application_name);
         try writeVarInt(writer, CLIENT_VERSION_MAJOR);
         try writeVarInt(writer, CLIENT_VERSION_MINOR);
         try writeVarInt(writer, PROTOCOL_VERSION);
+
+        try writer.writeInt(u8, @as(u8, @truncate(config.database.len)), .little);
+        try writer.writeAll(config.database);
+
+        try writer.writeInt(u8, @as(u8, @truncate(config.username.len)), .little);
+        try writer.writeAll(config.username);
+
+        try writer.writeInt(u8, @as(u8, @truncate(config.password.len)), .little);
+        try writer.writeAll(config.password);
+
+        try writer.flush();
     }
 };
 
 pub const ClientInfo = struct {
-    pub fn write(writer: *std.Io.Writer, query_id: []const u8, initial_user: []const u8, initial_address: []const u8, initial_timestamp: i64, os_user: []const u8, application_name: []const u8) !void {
+    pub fn write(writer: *Io.Writer, query_id: []const u8, initial_user: []const u8, initial_address: []const u8, initial_timestamp: i64, os_user: []const u8, application_name: []const u8) !void {
         var hostname_buf: [std.posix.HOST_NAME_MAX]u8 = undefined;
         const hostname = try std.posix.gethostname(&hostname_buf);
 
@@ -55,7 +76,13 @@ pub const ServerInfo = struct {
     display_name: []const u8,
     version_patch: u64,
 
-    pub fn read(allocator: std.mem.Allocator, reader: *std.Io.Reader) !ServerInfo {
+    pub fn read(allocator: std.mem.Allocator, reader: *Io.Reader) !@This() {
+        const server_packet = try readVarInt(reader);
+
+        if (server_packet != @intFromEnum(packet.ServerPacket.Hello)) {
+            return ChError.ProtocolError;
+        }
+
         const name = try allocator.dupe(u8, try readString(reader));
 
         const major_version = try readVarInt(reader);
@@ -68,7 +95,7 @@ pub const ServerInfo = struct {
 
         const version_patch = try readVarInt(reader);
 
-        return ServerInfo{
+        return .{
             .allocator = allocator,
             .name = name,
             .major_version = major_version,
@@ -87,7 +114,7 @@ pub const ServerInfo = struct {
     }
 };
 
-pub fn writeVarInt(writer: *std.Io.Writer, value: u64) !void {
+pub fn writeVarInt(writer: *Io.Writer, value: u64) !void {
     var v = value;
     while (true) {
         var byte: u8 = @truncate(v);
@@ -104,7 +131,7 @@ pub fn writeVarInt(writer: *std.Io.Writer, value: u64) !void {
     }
 }
 
-pub fn readVarInt(reader: *std.Io.Reader) !u64 {
+pub fn readVarInt(reader: *Io.Reader) !u64 {
     var result: u64 = 0;
     var shift: u6 = 0;
     while (true) {
@@ -118,23 +145,24 @@ pub fn readVarInt(reader: *std.Io.Reader) !u64 {
     return result;
 }
 
-pub fn writeString(writer: *std.Io.Writer, str: []const u8) !void {
+pub fn writeString(writer: *Io.Writer, str: []const u8) !void {
     try writeVarInt(writer, str.len);
     try writer.writeAll(str);
 }
 
-pub fn readString(reader: *std.Io.Reader) ![]u8 {
+pub fn readString(reader: *Io.Reader) ![]u8 {
     const len = try readVarInt(reader);
     return try reader.take(len);
 }
 
-test "writeVarInt ensure correct encoding" {
+const t = @import("t.zig");
+test "writeVarInt: ensure correct encoding" {
     const allocator = std.testing.allocator;
 
     const write_buffer = try allocator.alloc(u8, 512);
     defer allocator.free(write_buffer);
 
-    var writer = std.Io.Writer.fixed(write_buffer);
+    var writer = Io.Writer.fixed(write_buffer);
     const w = &writer;
 
     // zero
@@ -216,13 +244,13 @@ test "writeVarInt ensure correct encoding" {
     w.end = 0;
 }
 
-test "readVarInt ensure correct decoding" {
+test "readVarInt: ensure correct decoding" {
     const allocator = std.testing.allocator;
 
     const read_buffer = try allocator.alloc(u8, 512);
     defer allocator.free(read_buffer);
 
-    var reader = std.Io.Reader.fixed(read_buffer);
+    var reader = Io.Reader.fixed(read_buffer);
     const r = &reader;
 
     // zero
@@ -286,16 +314,16 @@ test "readVarInt ensure correct decoding" {
     r.seek = 0;
 }
 
-test "writeString ensure correct decoding" {
+test "writeString: ensure correct decoding" {
     const allocator = std.testing.allocator;
 
     const buffer = try allocator.alloc(u8, 512);
     defer allocator.free(buffer);
 
-    var writer = std.Io.Writer.fixed(buffer);
+    var writer = Io.Writer.fixed(buffer);
     const w = &writer;
 
-    var reader = std.Io.Reader.fixed(buffer);
+    var reader = Io.Reader.fixed(buffer);
     const r = &reader;
 
     // empty
@@ -321,16 +349,16 @@ test "writeString ensure correct decoding" {
     r.seek = 0;
 }
 
-test "readString ensure correct decoding" {
+test "readString: ensure correct decoding" {
     const allocator = std.testing.allocator;
 
     const buffer = try allocator.alloc(u8, 512);
     defer allocator.free(buffer);
 
-    var writer = std.Io.Writer.fixed(buffer);
+    var writer = Io.Writer.fixed(buffer);
     const w = &writer;
 
-    var reader = std.Io.Reader.fixed(buffer);
+    var reader = Io.Reader.fixed(buffer);
     const r = &reader;
 
     // empty
@@ -354,4 +382,89 @@ test "readString ensure correct decoding" {
     try std.testing.expectEqualStrings(normal_str, read_normal_str);
     w.end = 0;
     r.seek = 0;
+}
+
+
+test "sendHello: ensure correct encoding" {
+    const allocator = std.testing.allocator;
+
+    const buffer = try allocator.alloc(u8, 1024);
+    defer allocator.free(buffer);
+    
+    var writer = Io.Writer.fixed(buffer);
+    var reader = Io.Reader.fixed(buffer);
+
+    try ClientHello.write(&writer, t.default_config);
+
+    const packet_type = try readVarInt(&reader);
+    try std.testing.expectEqual(@intFromEnum(packet.ClientPacket.Hello), packet_type);
+
+    const name = try readString(&reader);
+    try std.testing.expectEqualStrings(t.default_config.application_name, name);
+
+    const major_version = try readVarInt(&reader);
+    try std.testing.expectEqual(CLIENT_VERSION_MAJOR, major_version);
+
+    const minor_version = try readVarInt(&reader);
+    try std.testing.expectEqual(CLIENT_VERSION_MINOR, minor_version);
+
+    const protocol = try readVarInt(&reader);
+    try std.testing.expectEqual(PROTOCOL_VERSION, protocol);
+
+    const config_db_len = try reader.takeInt(u8, .little);
+    try std.testing.expectEqual(t.default_config.database.len, config_db_len);
+
+    const config_db = try reader.take(config_db_len);
+    try std.testing.expectEqualStrings(t.default_config.database, config_db);
+
+    const config_user_len = try reader.takeInt(u8, .little);
+    try std.testing.expectEqual(t.default_config.username.len, config_user_len);
+
+    const config_user = try reader.take(config_user_len);
+    try std.testing.expectEqualStrings(t.default_config.username, config_user);
+
+    const config_pass_len = try reader.takeInt(u8, .little);
+    try std.testing.expectEqual(t.default_config.password.len, config_pass_len);
+
+    const config_pass = try reader.take(config_pass_len);
+    try std.testing.expectEqualStrings(t.default_config.password, config_pass);
+}
+
+test "readServerHello: ensure correct decoding" {
+    const allocator = std.testing.allocator;
+
+    const buffer = try allocator.alloc(u8, 1024);
+    defer allocator.free(buffer);
+    
+    var writer = Io.Writer.fixed(buffer);
+    var reader = Io.Reader.fixed(buffer);
+
+    const server_name = "Test ch server";
+    const major_version: u64 = 1;
+    const minor_version: u64 = 6;
+    const revision: u64 = 6;
+
+    const tz = "utc";
+    const display = "Main";
+    const version_patch = 453;
+
+    try writeVarInt(&writer, @intFromEnum(packet.ServerPacket.Hello));
+    try writeString(&writer, server_name);
+    try writeVarInt(&writer, major_version);
+    try writeVarInt(&writer, minor_version);
+    try writeVarInt(&writer, revision);
+    try writeString(&writer, tz);
+    try writeString(&writer, display);
+    try writeVarInt(&writer, version_patch);
+
+    const server_info = try ServerInfo.read(allocator, &reader);
+
+    try std.testing.expectEqual(writer.end, reader.seek);
+    try std.testing.expectEqualStrings(server_name, server_info.name);
+    try std.testing.expectEqual(major_version, server_info.major_version);
+    try std.testing.expectEqual(minor_version, server_info.minor_version);
+    try std.testing.expectEqual(revision, server_info.revision);
+    try std.testing.expectEqualStrings(tz, server_info.timezone);
+    try std.testing.expectEqualStrings(display, server_info.display_name);
+    try std.testing.expectEqual(version_patch, server_info.version_patch);
 }

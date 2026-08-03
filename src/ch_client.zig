@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+
 const Io = std.Io;
 const net = Io.net;
 const mem = std.mem;
@@ -7,16 +8,15 @@ const mem = std.mem;
 const assert = std.debug.assert;
 
 const ch = @import("ch");
-
 const types = @import("types.zig");
 
-const columns = [10]ch.bulk_insert.ColumnDef{
+const column_definition = [10]ch.bulk_insert.ColumnDef{
     .{ .name = "event_time", .type_str = "DateTime64" },
     .{ .name = "transaction_id", .type_str = "UInt64" },
     .{ .name = "user_id", .type_str = "String" },
     .{ .name = "table_name", .type_str = "LowCardinality(String)" },
     .{ .name = "action", .type_str = "Enum8('INSERT' = 1, 'UPDATE' = 2, 'DELETE' = 3)" },
-    .{ .name = "primary_key", .type_str = "String" },
+    .{ .name = "primary_keys", .type_str = "Map(String, String)" },
     .{ .name = "changed_columns", .type_str = "Array(String)" },
     .{ .name = "old_values", .type_str = "Map(String, String)" },
     .{ .name = "new_values", .type_str = "Map(String, String)" },
@@ -24,10 +24,65 @@ const columns = [10]ch.bulk_insert.ColumnDef{
 };
 
 const InsertValues = struct {
-    row: types.AuditEntry,
-    changed_columns: *std.ArrayList(ch.bulk_insert.Value),
-    old_values: *std.StringHashMap([]const u8),
-    new_values: *std.StringHashMap([]const u8),
+    primary_keys: std.StringHashMap([]const u8),
+    changed_columns: std.ArrayList(ch.bulk_insert.Value),
+    old_values: std.StringHashMap([]const u8),
+    new_values: std.StringHashMap([]const u8),
+
+    pub fn init(allocator: mem.Allocator) !@This() {
+        return .{
+            .primary_keys = std.StringHashMap([]const u8).init(allocator),
+            .changed_columns = std.ArrayList(ch.bulk_insert.Value).empty,
+            .old_values = std.StringHashMap([]const u8).init(allocator),
+            .new_values = std.StringHashMap([]const u8).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: @This(), allocator: mem.Allocator) void {
+        self.primary_keys.deinit();
+        self.changed_columns.deinit(allocator);
+
+        self.old_values.clearAndFree();
+        self.old_values.deinit();
+
+        self.new_values.clearAndFree();
+        self.new_values.deinit();
+    }
+
+    pub fn clearRetainingCapacity(self: *@This()) void {
+        self.primary_keys.clearRetainingCapacity();
+        self.changed_columns.clearRetainingCapacity();
+        self.old_values.clearRetainingCapacity();
+        self.new_values.clearRetainingCapacity();
+    }
+
+    pub fn parseRow(self: *@This(), row: types.AuditEntry) !void {
+        try self.changed_columns.ensureUnusedCapacity(self.allocator, row.columns.items.len);
+        try self.old_values.ensureUnusedCapacity(row.columns.items.len);
+        try self.new_values.ensureUnusedCapacity(row.columns.items.len);
+
+        for (row.columns.items) |col| {
+            if (col.is_key) {
+                if (!mem.eql(u8, col.old_value, "")) {
+                    try self.primary_keys.put(col.column_name, col.old_value);
+                } else if (!mem.eql(u8, col.new_value, "")) {
+                    try self.primary_keys.put(col.column_name, col.new_value);
+                }
+            }
+
+            if (!col.value_ptr.*.has_changes) continue;
+
+            self.changed_columns.appendAssumeCapacity(.{ .String = col.key_ptr.* });
+
+            if (!mem.eql(u8, col.old_value, "")) {
+                try self.old_values.putAssumeCapacity(col.column_name, col.old_value);
+            }
+
+            if (!mem.eql(u8, col.new_value, "")) {
+                try self.new_values.putAssumeCapacity(col.column_name, col.new_value);
+            }
+        }
+    }
 };
 
 pub const ChClient = struct {
@@ -101,8 +156,8 @@ pub const ChClient = struct {
         self.stream_writer = self.stream.?.writer(self.io, &self.write_buf);
         self.writer = &self.stream_writer.?.interface;
 
-        try self.sendHello();
-        try self.readServerHello();
+        try ch.protocol.ClientHello.write(self.writer.?, self.config);
+        self.server_info = try ch.protocol.ServerInfo.read(self.allocator, self.reader.?);
     }
 
     pub fn disconnect(self: *ChClient) void {
@@ -141,36 +196,6 @@ pub const ChClient = struct {
                 self.writer = &w.interface;
             }
         }
-    }
-
-    fn sendHello(self: *ChClient) !void {
-        if (self.writer == null) return ch.ChError.ConnectionFailed;
-
-        try ch.packet.writeClientPacketHeader(self.writer.?, .Hello);
-        try ch.protocol.ClientHello.write(self.writer.?, self.config.application_name);
-
-        try self.writer.?.writeInt(u8, @as(u8, @truncate(self.config.database.len)), .little);
-        try self.writer.?.writeAll(self.config.database);
-
-        try self.writer.?.writeInt(u8, @as(u8, @truncate(self.config.username.len)), .little);
-        try self.writer.?.writeAll(self.config.username);
-
-        try self.writer.?.writeInt(u8, @as(u8, @truncate(self.config.password.len)), .little);
-        try self.writer.?.writeAll(self.config.password);
-
-        try self.writer.?.flush();
-    }
-
-    fn readServerHello(self: *ChClient) !void {
-        if (self.reader == null) return ch.ChError.ConnectionFailed;
-
-        const server_packet = try ch.protocol.readVarInt(self.reader.?);
-
-        if (server_packet != @intFromEnum(ch.packet.ServerPacket.Hello)) {
-            return ch.ChError.ProtocolError;
-        }
-
-        self.server_info = try ch.protocol.ServerInfo.read(self.allocator, self.reader.?);
     }
 
     pub fn readBlock(self: *ChClient) !void {
@@ -362,7 +387,7 @@ pub const ChClient = struct {
     }
 
     pub fn writeLog(self: *@This(), data: []types.AuditEntry) !void {
-        var bulk: ch.BulkInsert = try .init(self.allocator, "entries", &columns, 1000);
+        var bulk: ch.BulkInsert = try .init(self.allocator, "entries", &column_definition, 1000);
         defer bulk.deinit();
 
         self.startInsert("INSERT INTO entries FORMAT Native") catch |err| {
@@ -372,19 +397,15 @@ pub const ChClient = struct {
             return err;
         };
 
-        var buf = std.ArrayList(ch.bulk_insert.Value).empty;
-        defer buf.deinit(self.allocator);
-
-        var old_values = std.StringHashMap([]const u8).init(self.allocator);
-        defer old_values.deinit();
-
-        var new_values = std.StringHashMap([]const u8).init(self.allocator);
-        defer new_values.deinit();
+        const insert_values = try InsertValues.init(self.allocator);
+        defer insert_values.deinit(self.allocator);
 
         for (data) |row| {
-            const insert_values = try self.parseRow(row, &buf, &old_values, &new_values);
+            insert_values.clearRetainingCapacity();
 
-            try self.insertRow(&bulk, insert_values);
+            try insert_values.parseRow(row);
+
+            try self.insertRow(&bulk, row, insert_values);
         }
 
         // Flush any remaining rows
@@ -410,56 +431,18 @@ pub const ChClient = struct {
         }
     }
 
-    pub fn parseRow(self: *@This(), row: types.AuditEntry, changed_columns: *std.ArrayList(ch.bulk_insert.Value), old_values: *std.StringHashMap([]const u8), new_values: *std.StringHashMap([]const u8)) !InsertValues {
-        changed_columns.clearRetainingCapacity();
-        old_values.clearRetainingCapacity();
-        new_values.clearRetainingCapacity();
-
-        try changed_columns.ensureUnusedCapacity(self.allocator, row.changed_columns.count());
-        if (row.old_values.count() > 0) { try old_values.ensureUnusedCapacity(row.old_values.count()); }
-        if (row.new_values.count() > 0) { try new_values.ensureUnusedCapacity(row.new_values.count()); }
-
-        var it = row.changed_columns.iterator();
-        while (it.next()) |col| {
-            if (!col.value_ptr.*.has_changes) continue;
-
-            changed_columns.appendAssumeCapacity(.{ .String = col.key_ptr.* });
-
-            if (row.old_values.capacity() > 0) {
-                if (row.old_values.get(col.key_ptr.*)) |val| {
-                    try old_values.put(col.key_ptr.*, val);
-                }
-            }
-
-            if (row.new_values.capacity() > 0) {
-                if (row.new_values.get(col.key_ptr.*)) |val| {
-                    try new_values.put(col.key_ptr.*, val);
-                }
-            }
-        }
-
-        // TODO: change the type to not contain row
-        // Does not feal right
-        return .{
-            .row = row,
-            .changed_columns = changed_columns,
-            .old_values = old_values,
-            .new_values = new_values,
-        };
-    }
-
-    pub fn insertRow(self: *@This(), bulk: *ch.BulkInsert, insert_values: InsertValues) !void {
+    pub fn insertRow(self: *@This(), bulk: *ch.BulkInsert, row: types.AuditEntry, insert_values: InsertValues) !void {
         const values = [_]ch.bulk_insert.Value{
-            .{ .DateTime64 = insert_values.row.event_time },
-            .{ .UInt64 = insert_values.row.transaction_id },
-            .{ .String = insert_values.row.user_id},
-            .{ .LowCardinality = insert_values.row.table_name },
-            .{ .Enum8 = insert_values.row.action },
-            .{ .String = insert_values.row.primary_key },
+            .{ .DateTime64 = row.event_time },
+            .{ .UInt64 = row.transaction_id },
+            .{ .String = row.user_id},
+            .{ .LowCardinality = row.table_name },
+            .{ .Enum8 = row.action },
+            .{ .Map = insert_values.primary_keys },
             .{ .Array = insert_values.changed_columns.items },
-            .{ .Map = insert_values.old_values.* },
-            .{ .Map = insert_values.new_values.* },
-            .{ .IPv4 = insert_values.row.ip_address },
+            .{ .Map = insert_values.old_values },
+            .{ .Map = insert_values.new_values },
+            .{ .IPv4 = row.ip_address },
         };
 
         if (try bulk.addRow(&values)) {
@@ -557,26 +540,26 @@ fn writeMockDataBlock(client: *ChClient) !void {
     try ch.protocol.writeVarInt(client.writer.?, num_columns);
     try ch.protocol.writeVarInt(client.writer.?, num_rows);
 
-    try ch.protocol.writeString(client.writer.?, columns[0].name);
-    try ch.protocol.writeString(client.writer.?, columns[0].type_str);
-    try ch.protocol.writeString(client.writer.?, columns[1].name);
-    try ch.protocol.writeString(client.writer.?, columns[1].type_str);
-    try ch.protocol.writeString(client.writer.?, columns[2].name);
-    try ch.protocol.writeString(client.writer.?, columns[2].type_str);
-    try ch.protocol.writeString(client.writer.?, columns[3].name);
-    try ch.protocol.writeString(client.writer.?, columns[3].type_str);
-    try ch.protocol.writeString(client.writer.?, columns[4].name);
-    try ch.protocol.writeString(client.writer.?, columns[4].type_str);
-    try ch.protocol.writeString(client.writer.?, columns[5].name);
-    try ch.protocol.writeString(client.writer.?, columns[5].type_str);
-    try ch.protocol.writeString(client.writer.?, columns[6].name);
-    try ch.protocol.writeString(client.writer.?, columns[6].type_str);
-    try ch.protocol.writeString(client.writer.?, columns[7].name);
-    try ch.protocol.writeString(client.writer.?, columns[7].type_str);
-    try ch.protocol.writeString(client.writer.?, columns[8].name);
-    try ch.protocol.writeString(client.writer.?, columns[8].type_str);
-    try ch.protocol.writeString(client.writer.?, columns[9].name);
-    try ch.protocol.writeString(client.writer.?, columns[9].type_str);
+    try ch.protocol.writeString(client.writer.?, column_definition[0].name);
+    try ch.protocol.writeString(client.writer.?, column_definition[0].type_str);
+    try ch.protocol.writeString(client.writer.?, column_definition[1].name);
+    try ch.protocol.writeString(client.writer.?, column_definition[1].type_str);
+    try ch.protocol.writeString(client.writer.?, column_definition[2].name);
+    try ch.protocol.writeString(client.writer.?, column_definition[2].type_str);
+    try ch.protocol.writeString(client.writer.?, column_definition[3].name);
+    try ch.protocol.writeString(client.writer.?, column_definition[3].type_str);
+    try ch.protocol.writeString(client.writer.?, column_definition[4].name);
+    try ch.protocol.writeString(client.writer.?, column_definition[4].type_str);
+    try ch.protocol.writeString(client.writer.?, column_definition[5].name);
+    try ch.protocol.writeString(client.writer.?, column_definition[5].type_str);
+    try ch.protocol.writeString(client.writer.?, column_definition[6].name);
+    try ch.protocol.writeString(client.writer.?, column_definition[6].type_str);
+    try ch.protocol.writeString(client.writer.?, column_definition[7].name);
+    try ch.protocol.writeString(client.writer.?, column_definition[7].type_str);
+    try ch.protocol.writeString(client.writer.?, column_definition[8].name);
+    try ch.protocol.writeString(client.writer.?, column_definition[8].type_str);
+    try ch.protocol.writeString(client.writer.?, column_definition[9].name);
+    try ch.protocol.writeString(client.writer.?, column_definition[9].type_str);
 }
 
 test "ensureStream recover lost connect" {
@@ -599,87 +582,6 @@ test "ensureStream recover lost connect" {
     try std.testing.expect(client.stream_writer != null);
     try std.testing.expect(client.reader != null);
     try std.testing.expect(client.writer != null);
-}
-
-test "sendHello ensure correct encoding" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
-
-    var client = try setupFixedReaderWriterMockClient(allocator, io);
-    defer teardownFixedReaderWriterMockClient(allocator, &client);
-
-    try client.sendHello();
-
-    const packet_type = try ch.protocol.readVarInt(client.reader.?);
-    try std.testing.expectEqual(@intFromEnum(ch.packet.ClientPacket.Hello), packet_type);
-
-    const name = try ch.protocol.readString(client.reader.?);
-    try std.testing.expectEqualStrings(client.config.application_name, name);
-
-    const major_version = try ch.protocol.readVarInt(client.reader.?);
-    try std.testing.expectEqual(ch.protocol.CLIENT_VERSION_MAJOR, major_version);
-
-    const minor_version = try ch.protocol.readVarInt(client.reader.?);
-    try std.testing.expectEqual(ch.protocol.CLIENT_VERSION_MINOR, minor_version);
-
-    const protocol = try ch.protocol.readVarInt(client.reader.?);
-    try std.testing.expectEqual(ch.protocol.PROTOCOL_VERSION, protocol);
-
-    const config_db_len = try client.reader.?.takeInt(u8, .little);
-    try std.testing.expectEqual(client.config.database.len, config_db_len);
-
-    const config_db = try client.reader.?.take(config_db_len);
-    try std.testing.expectEqualStrings(client.config.database, config_db);
-
-    const config_user_len = try client.reader.?.takeInt(u8, .little);
-    try std.testing.expectEqual(client.config.username.len, config_user_len);
-
-    const config_user = try client.reader.?.take(config_user_len);
-    try std.testing.expectEqualStrings(client.config.username, config_user);
-
-    const config_pass_len = try client.reader.?.takeInt(u8, .little);
-    try std.testing.expectEqual(client.config.password.len, config_pass_len);
-
-    const config_pass = try client.reader.?.take(config_pass_len);
-    try std.testing.expectEqualStrings(client.config.password, config_pass);
-}
-
-test "readServerHello ensure correct decoding" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
-
-    var client = try setupFixedReaderWriterMockClient(allocator, io);
-    defer teardownFixedReaderWriterMockClient(allocator, &client);
-
-    const server_name = "Test ch server";
-    const major_version: u64 = 1;
-    const minor_version: u64 = 6;
-    const revision: u64 = 6;
-
-    const tz = "utc";
-    const display = "Main";
-    const version_patch = 453;
-
-    try ch.protocol.writeVarInt(client.writer.?, @intFromEnum(ch.packet.ServerPacket.Hello));
-    try ch.protocol.writeString(client.writer.?, server_name);
-    try ch.protocol.writeVarInt(client.writer.?, major_version);
-    try ch.protocol.writeVarInt(client.writer.?, minor_version);
-    try ch.protocol.writeVarInt(client.writer.?, revision);
-    try ch.protocol.writeString(client.writer.?, tz);
-    try ch.protocol.writeString(client.writer.?, display);
-    try ch.protocol.writeVarInt(client.writer.?, version_patch);
-
-    try client.readServerHello();
-
-    try std.testing.expect(client.server_info != null);
-    try std.testing.expectEqual(client.writer.?.end, client.reader.?.seek);
-    try std.testing.expectEqualStrings(server_name, client.server_info.?.name);
-    try std.testing.expectEqual(major_version, client.server_info.?.major_version);
-    try std.testing.expectEqual(minor_version, client.server_info.?.minor_version);
-    try std.testing.expectEqual(revision, client.server_info.?.revision);
-    try std.testing.expectEqualStrings(tz, client.server_info.?.timezone);
-    try std.testing.expectEqualStrings(display, client.server_info.?.display_name);
-    try std.testing.expectEqual(version_patch, client.server_info.?.version_patch);
 }
 
 test "startInsert ensure correct query info" {
@@ -723,26 +625,26 @@ test "readBlock ensure correct read | non-null current_block" {
     try std.testing.expectEqual(26, client.current_block.rows);
     try std.testing.expectEqual(client.writer.?.end, client.reader.?.seek);
 
-    try std.testing.expectEqualStrings(columns[0].name, client.current_block.columns[0].name);
-    try std.testing.expectEqualStrings(columns[0].type_str, client.current_block.columns[0].type_name);
-    try std.testing.expectEqualStrings(columns[1].name, client.current_block.columns[1].name);
-    try std.testing.expectEqualStrings(columns[1].type_str, client.current_block.columns[1].type_name);
-    try std.testing.expectEqualStrings(columns[2].name, client.current_block.columns[2].name);
-    try std.testing.expectEqualStrings(columns[2].type_str, client.current_block.columns[2].type_name);
-    try std.testing.expectEqualStrings(columns[3].name, client.current_block.columns[3].name);
-    try std.testing.expectEqualStrings(columns[3].type_str, client.current_block.columns[3].type_name);
-    try std.testing.expectEqualStrings(columns[4].name, client.current_block.columns[4].name);
-    try std.testing.expectEqualStrings(columns[4].type_str, client.current_block.columns[4].type_name);
-    try std.testing.expectEqualStrings(columns[5].name, client.current_block.columns[5].name);
-    try std.testing.expectEqualStrings(columns[5].type_str, client.current_block.columns[5].type_name);
-    try std.testing.expectEqualStrings(columns[6].name, client.current_block.columns[6].name);
-    try std.testing.expectEqualStrings(columns[6].type_str, client.current_block.columns[6].type_name);
-    try std.testing.expectEqualStrings(columns[7].name, client.current_block.columns[7].name);
-    try std.testing.expectEqualStrings(columns[7].type_str, client.current_block.columns[7].type_name);
-    try std.testing.expectEqualStrings(columns[8].name, client.current_block.columns[8].name);
-    try std.testing.expectEqualStrings(columns[8].type_str, client.current_block.columns[8].type_name);
-    try std.testing.expectEqualStrings(columns[9].name, client.current_block.columns[9].name);
-    try std.testing.expectEqualStrings(columns[9].type_str, client.current_block.columns[9].type_name);
+    try std.testing.expectEqualStrings(column_definition[0].name, client.current_block.columns[0].name);
+    try std.testing.expectEqualStrings(column_definition[0].type_str, client.current_block.columns[0].type_name);
+    try std.testing.expectEqualStrings(column_definition[1].name, client.current_block.columns[1].name);
+    try std.testing.expectEqualStrings(column_definition[1].type_str, client.current_block.columns[1].type_name);
+    try std.testing.expectEqualStrings(column_definition[2].name, client.current_block.columns[2].name);
+    try std.testing.expectEqualStrings(column_definition[2].type_str, client.current_block.columns[2].type_name);
+    try std.testing.expectEqualStrings(column_definition[3].name, client.current_block.columns[3].name);
+    try std.testing.expectEqualStrings(column_definition[3].type_str, client.current_block.columns[3].type_name);
+    try std.testing.expectEqualStrings(column_definition[4].name, client.current_block.columns[4].name);
+    try std.testing.expectEqualStrings(column_definition[4].type_str, client.current_block.columns[4].type_name);
+    try std.testing.expectEqualStrings(column_definition[5].name, client.current_block.columns[5].name);
+    try std.testing.expectEqualStrings(column_definition[5].type_str, client.current_block.columns[5].type_name);
+    try std.testing.expectEqualStrings(column_definition[6].name, client.current_block.columns[6].name);
+    try std.testing.expectEqualStrings(column_definition[6].type_str, client.current_block.columns[6].type_name);
+    try std.testing.expectEqualStrings(column_definition[7].name, client.current_block.columns[7].name);
+    try std.testing.expectEqualStrings(column_definition[7].type_str, client.current_block.columns[7].type_name);
+    try std.testing.expectEqualStrings(column_definition[8].name, client.current_block.columns[8].name);
+    try std.testing.expectEqualStrings(column_definition[8].type_str, client.current_block.columns[8].type_name);
+    try std.testing.expectEqualStrings(column_definition[9].name, client.current_block.columns[9].name);
+    try std.testing.expectEqualStrings(column_definition[9].type_str, client.current_block.columns[9].type_name);
 }
 
 test "processQueryResponse ensure correct read | Data" {
@@ -883,14 +785,14 @@ test "writeLog" {
     defer audit_log.deinit(allocator);
     try audit_log.ensureUnusedCapacity(allocator, 4);
 
-    var changed_columns = std.StringHashMap(types.ChangedColumns).init(allocator);
-    defer changed_columns.deinit();
+    var columns = std.StringHashMap(types.ChangedColumn).init(allocator);
+    defer columns.deinit();
 
     audit_log.appendSliceAssumeCapacity(&[_]types.AuditEntry{
-        .{ .event_time = 53634634, .transaction_id = 10, .primary_key = try allocator.dupe(u8, "1"), .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "test.addresses"), .action = 1, .changed_columns = changed_columns, .new_values = .empty, .old_values = .empty, .ip_address = try allocator.dupe(u8, "192.168.1.50") },
-        .{ .event_time = 53634634, .transaction_id = 10, .primary_key = try allocator.dupe(u8, "2"), .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "test.addresses"), .action = 2, .changed_columns = changed_columns, .new_values = .empty, .old_values = .empty, .ip_address = try allocator.dupe(u8, "192.168.1.50") },
-        .{ .event_time = 53634634, .transaction_id = 10, .primary_key = try allocator.dupe(u8, "3"), .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "test.addresses"), .action = 3, .changed_columns = changed_columns, .new_values = .empty, .old_values = .empty, .ip_address = try allocator.dupe(u8, "192.168.1.50") },
-        .{ .event_time = 53634634, .transaction_id = 11, .primary_key = try allocator.dupe(u8, "4"), .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "test.addresses"), .action = 1, .changed_columns = changed_columns, .new_values = .empty, .old_values = .empty, .ip_address = try allocator.dupe(u8, "192.168.1.50") }
+        .{ .event_time = 53634634, .transaction_id = 10, .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "test.addresses"), .action = 1, .changed_columns = columns,.ip_address = try allocator.dupe(u8, "192.168.1.50") },
+        .{ .event_time = 53634634, .transaction_id = 10, .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "test.addresses"), .action = 2, .changed_columns = columns,.ip_address = try allocator.dupe(u8, "192.168.1.50") },
+        .{ .event_time = 53634634, .transaction_id = 10, .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "test.addresses"), .action = 3, .changed_columns = columns,.ip_address = try allocator.dupe(u8, "192.168.1.50") },
+        .{ .event_time = 53634634, .transaction_id = 11, .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "test.addresses"), .action = 1, .changed_columns = columns,.ip_address = try allocator.dupe(u8, "192.168.1.50") }
     });
 
     try client.writeLog(audit_log.items);
@@ -904,15 +806,15 @@ test "parseRow ensure correct output" {
     var client = try setupMockClient(allocator, io);
     defer client.deinit();
 
-    var changed_columns = std.StringHashMap(types.ChangedColumns).init(allocator);
-    try changed_columns.ensureUnusedCapacity(1);
+    var columns = std.ArrayList(types.ChangedColumn).init(allocator);
+    try columns.ensureUnusedCapacity(6);
 
-    try changed_columns.put("id", .{ .has_changes = false, .value = "1" });
-    try changed_columns.put("address_line_1", .{ .has_changes = true, .value = "Googleplex" });
-    try changed_columns.put("address_line_2", .{ .has_changes = false, .value = "" });
-    try changed_columns.put("postal_code", .{ .has_changes = true, .value = "94043" });
-    try changed_columns.put("city", .{ .has_changes = true, .value = "Mountain View" });
-    try changed_columns.put("country", .{ .has_changes = false, .value = "US" });
+    try columns.put("id", .{ .has_changes = false, .value = "1" });
+    try columns.put("address_line_1", .{ .has_changes = true, .value = "Googleplex" });
+    try columns.put("address_line_2", .{ .has_changes = false, .value = "" });
+    try columns.put("postal_code", .{ .has_changes = true, .value = "94043" });
+    try columns.put("city", .{ .has_changes = true, .value = "Mountain View" });
+    try columns.put("country", .{ .has_changes = false, .value = "US" });
 
     var new_values = std.StringHashMapUnmanaged([]const u8).empty;
     try new_values.ensureUnusedCapacity(allocator, 6);
@@ -940,11 +842,10 @@ test "parseRow ensure correct output" {
         .new_values = new_values,
         .old_values = old_values,
         .action = 2,
-        .changed_columns = changed_columns,
+        .columns = columns,
         .transaction_id = 793,
         .user_id = try allocator.dupe(u8, "42"),
         .ip_address = try allocator.dupe(u8, "192.168.1.50"),
-        .primary_key = try allocator.dupe(u8, "1"),
     };
     defer row.deinit(allocator);
 
@@ -1051,7 +952,7 @@ test "insertRow ensure correct insertion" {
         allocator.free(values.row.ip_address);
     }
 
-    var bulk: ch.BulkInsert = try .init(allocator, "entries", &columns, 1000);
+    var bulk: ch.BulkInsert = try .init(allocator, "entries", &column_definition, 1000);
     defer bulk.deinit();
 
     client.startInsert("INSERT INTO entries FORMAT Native") catch |err| {

@@ -252,8 +252,10 @@ test "main ensure correct shutdown" {
 
     var child_has_error = std.atomic.Value(bool).init(false);
 
-    const db_name = try t.createTestDb(allocator, io);
+    const db_name = try t.genereateDbName(allocator, io);
     defer allocator.free(db_name);
+
+    try t.createTestDb(allocator, io, db_name);
 
     const wal_name = try std.fmt.allocPrint(allocator, "wal_slot_{s}", .{db_name});
     defer allocator.free(wal_name);
@@ -318,8 +320,10 @@ test "main ensure full transaction sync on interupt" {
 
     var child_has_error = std.atomic.Value(bool).init(false);
 
-    const db_name = try t.createTestDb(allocator, io);
+    const db_name = try t.genereateDbName(allocator, io);
     defer allocator.free(db_name);
+
+    try t.createTestDb(allocator, io, db_name);
 
     const wal_name = try std.fmt.allocPrint(allocator, "wal_slot_{s}", .{db_name});
     defer allocator.free(wal_name);
@@ -460,8 +464,10 @@ test "making sure full commits are logged without interupt" {
 
     var child_has_error = std.atomic.Value(bool).init(false);
 
-    const db_name = try t.createTestDb(allocator, io);
+    const db_name = try t.genereateDbName(allocator, io);
     defer allocator.free(db_name);
+
+    try t.createTestDb(allocator, io, db_name);
 
     const wal_name = try std.fmt.allocPrint(allocator, "wal_slot_{s}", .{db_name});
     defer allocator.free(wal_name);

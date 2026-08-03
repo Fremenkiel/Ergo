@@ -180,10 +180,63 @@ pub const PgClient = struct {
     }
 };
 
-pub fn createTestDb(allocator: mem.Allocator, io: Io) ![]const u8 {
+pub fn genereateDbName(allocator: mem.Allocator, io: Io) ![]const u8 {
     const db_name = try std.fmt.allocPrint(allocator, "test_db_{d}", .{std.Io.Clock.real.now(io).toNanoseconds()});
     errdefer allocator.free(db_name);
 
+    return db_name;
+}
+
+pub fn createTestChDb(allocator: mem.Allocator, io: Io, db_name: []const u8) !void {
+    // CH
+    const ch_query = try std.fmt.allocPrint(allocator, "CREATE DATABASE IF NOT EXISTS {s}", .{db_name});
+    defer allocator.free(ch_query);
+
+    var ch_create_argv = [_][]const u8{ 
+        "clickhouse-client", 
+        "--host", "127.0.0.1",
+        "--port", "9000",
+        "--user", "default",
+        "--password", "clickhouse",
+        "--query", ch_query
+    };
+    const ch_create_result = try std.process.run(allocator, io, .{ 
+        .argv = &ch_create_argv,
+    });
+    defer {
+        allocator.free(ch_create_result.stdout);
+        allocator.free(ch_create_result.stderr);
+    }
+
+    if (ch_create_result.stderr.len > 0) {
+        std.debug.print("Error: unable to create new ch db: {s}\n", .{ch_create_result.stderr});
+        return error.CreateTestDbFailedError;
+    }
+
+    var ch_init_argv = [_][]const u8{ 
+        "clickhouse-client", 
+        "--host", "127.0.0.1",
+        "--port", "9000",
+        "--user", "default",
+        "--password", "clickhouse",
+	"--database", db_name,
+	"--queries-file", "./infra/ch/init.sql"
+    };
+    const ch_init_result = try std.process.run(allocator, io, .{ 
+        .argv = &ch_init_argv,
+    });
+    defer {
+        allocator.free(ch_init_result.stdout);
+        allocator.free(ch_init_result.stderr);
+    }
+
+    if (ch_init_result.stderr.len > 0) {
+        std.debug.print("Error: CH create db failed: {s}\n", .{ch_init_result.stderr});
+        return error.CreateTestDbFailedInitError;
+    }
+}
+
+pub fn createTestPgDb(allocator: mem.Allocator, io: Io, db_name: []const u8) !void {
     // PG
     const pg_query = try std.fmt.allocPrint(allocator, "CREATE DATABASE {s}", .{db_name});
     defer allocator.free(pg_query);
@@ -237,12 +290,19 @@ pub fn createTestDb(allocator: mem.Allocator, io: Io) ![]const u8 {
         std.debug.print("Error: PSQL init failed: {s}\n", .{pg_init_result.stderr});
         return error.PsqlExecutionFailed;
     }
+}
 
+pub fn createTestDb(allocator: mem.Allocator, io: Io, db_name: []const u8) !void {
+    try createTestChDb(allocator, io, db_name);
+    try createTestPgDb(allocator, io, db_name);
+}
+
+pub fn teardownTestChDb(allocator: mem.Allocator, io: Io, db_name: []const u8) !void {
     // CH
-    const ch_query = try std.fmt.allocPrint(allocator, "CREATE DATABASE IF NOT EXISTS {s}", .{db_name});
+    const ch_query = try std.fmt.allocPrint(allocator, "DROP DATABASE {s}", .{db_name});
     defer allocator.free(ch_query);
 
-    var ch_create_argv = [_][]const u8{ 
+    var ch_db_argv = [_][]const u8{ 
         "clickhouse-client", 
         "--host", "127.0.0.1",
         "--port", "9000",
@@ -250,45 +310,21 @@ pub fn createTestDb(allocator: mem.Allocator, io: Io) ![]const u8 {
         "--password", "clickhouse",
         "--query", ch_query
     };
-    const ch_create_result = try std.process.run(allocator, io, .{ 
-        .argv = &ch_create_argv,
+    const ch_db_result = try std.process.run(allocator, io, .{ 
+        .argv = &ch_db_argv,
     });
     defer {
-        allocator.free(ch_create_result.stdout);
-        allocator.free(ch_create_result.stderr);
+        allocator.free(ch_db_result.stdout);
+        allocator.free(ch_db_result.stderr);
     }
 
-    if (ch_create_result.stderr.len > 0) {
-        std.debug.print("Error: unable to create new ch db: {s}\n", .{ch_create_result.stderr});
+    if (ch_db_result.stderr.len > 0) {
+        std.debug.print("Error: CH drop db failed: {s}\n", .{ch_db_result.stderr});
         return error.CreateTestDbFailedError;
     }
-
-    var ch_init_argv = [_][]const u8{ 
-        "clickhouse-client", 
-        "--host", "127.0.0.1",
-        "--port", "9000",
-        "--user", "default",
-        "--password", "clickhouse",
-	"--database", db_name,
-	"--queries-file", "./infra/ch/init.sql"
-    };
-    const ch_init_result = try std.process.run(allocator, io, .{ 
-        .argv = &ch_init_argv,
-    });
-    defer {
-        allocator.free(ch_init_result.stdout);
-        allocator.free(ch_init_result.stderr);
-    }
-
-    if (ch_init_result.stderr.len > 0) {
-        std.debug.print("Error: CH create db failed: {s}\n", .{ch_init_result.stderr});
-        return error.CreateTestDbFailedInitError;
-    }
-
-    return db_name;
 }
 
-pub fn teardownTestDb(allocator: mem.Allocator, io: Io, db_name: []const u8, wal_name: []const u8) !void {
+pub fn teardownTestPgDb(allocator: mem.Allocator, io: Io, db_name: []const u8, wal_name: []const u8) !void {
     // PG
     const pg_rep_query = try std.fmt.allocPrint(allocator, "SELECT pg_drop_replication_slot('{s}');", .{wal_name});
     defer allocator.free(pg_rep_query);
@@ -345,30 +381,10 @@ pub fn teardownTestDb(allocator: mem.Allocator, io: Io, db_name: []const u8, wal
         std.debug.print("Error: PSQL drop db failed: {s}\n", .{pg_db_result.stderr});
         return error.PsqlExecutionFailed;
     }
+}
 
-    // CH
-    const ch_query = try std.fmt.allocPrint(allocator, "DROP DATABASE {s}", .{db_name});
-    defer allocator.free(ch_query);
-
-    var ch_db_argv = [_][]const u8{ 
-        "clickhouse-client", 
-        "--host", "127.0.0.1",
-        "--port", "9000",
-        "--user", "default",
-        "--password", "clickhouse",
-        "--query", ch_query
-    };
-    const ch_db_result = try std.process.run(allocator, io, .{ 
-        .argv = &ch_db_argv,
-    });
-    defer {
-        allocator.free(ch_db_result.stdout);
-        allocator.free(ch_db_result.stderr);
-    }
-
-    if (ch_db_result.stderr.len > 0) {
-        std.debug.print("Error: CH drop db failed: {s}\n", .{ch_db_result.stderr});
-        return error.CreateTestDbFailedError;
-    }
+pub fn teardownTestDb(allocator: mem.Allocator, io: Io, db_name: []const u8, wal_name: []const u8) !void {
+    try teardownTestChDb(allocator, io, db_name);
+    try teardownTestPgDb(allocator, io, db_name, wal_name);
 }
 

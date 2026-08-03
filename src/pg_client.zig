@@ -21,6 +21,12 @@ TransactionStateUnknown,
 WalConnectionUnableToStop,
 };
 
+const Action = enum(u8) {
+    Insert,
+    Update,
+    Delete,
+};
+
 pub const ReadResponse = struct {
     data: ?types.AuditEntry,
     timestamp: ?i64,
@@ -50,7 +56,7 @@ pub const TransactionContext = struct {
     user_id: []const u8,
     ip_address: []const u8,
     primary_key: []const u8,
-    changed_columns: std.StringHashMap(types.ChangedColumns),
+    columns: std.ArrayList(types.ChangedColumn),
 };
 
 pub const ColumnDef = struct {
@@ -100,7 +106,7 @@ pub const PgClient = struct {
         var wal_conn = try createConn(allocator, io, wal_opts);
         errdefer wal_conn.deinit();
 
-        var changed_columns = std.StringHashMap(types.ChangedColumns).init(allocator);
+        var changed_columns = std.StringHashMap(types.ChangedColumn).init(allocator);
         try changed_columns.ensureUnusedCapacity(16);
 
         return .{
@@ -166,6 +172,9 @@ pub const PgClient = struct {
         self.context.ip_address = "";
         self.context.primary_key = "";
         self.context.changed_columns.clearRetainingCapacity();
+
+        while (self.table_reg.iterator().next()) |table_reg| { table_reg.value_ptr.*.deinit(self.allocator); }
+        self.table_reg.clearRetainingCapacity();
     }
 
     pub fn startWALReader(self: *@This(), timeout_ms: i32) !void {
@@ -218,6 +227,7 @@ pub const PgClient = struct {
         if (self.wal_conn == null) return PgClientError.WalConnectionNotInitialized;
 
         const msg = try self.wal_conn.?.reader.next();
+
         switch (msg.type) {
             'W' => {
                 // Server entered COPY BOTH mode,
@@ -403,15 +413,15 @@ pub const PgClient = struct {
                 const table_name = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{namespace, rel_name});
                 defer self.allocator.free(table_name);
 
-                const columns = try self.readSchemaKeys(table_name);
+                // const columns = try self.readSchemaKeys(table_name);
+                var columns = std.ArrayList(ColumnDef).empty;
 
                 var i: u16 = 0;
                 while (i < num_columns) : (i += 1) {
-                    // flags
-                    _ = try reader.takeByte();
+                    const flag = try reader.takeByte();
 
                     // col name
-                    _ = try reader.takeDelimiterExclusive(0);
+                    const column_name = try reader.takeDelimiterExclusive(0);
                     _ = try reader.takeByte();
 
                     // type_id
@@ -419,6 +429,8 @@ pub const PgClient = struct {
 
                     // typemod
                     _ = try reader.takeInt(u32, .big);
+
+                    try columns.append(self.allocator, .{ .name = try self.allocator.dupe(u8, column_name), .is_key = flag == 1 });
                 }
 
                 try self.table_reg.put(rel_id, .{
@@ -438,20 +450,17 @@ pub const PgClient = struct {
 
 
                 if (self.table_reg.get(rel_id)) |table| {
-                    const new_values = try self.parseTupleData(&reader, table);
+                    try self.parseTupleData(&reader, table, .Insert);
 
-                        response.data = types.AuditEntry{
-                            .event_time = undefined,
-                            .table_name = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{table.namespace, table.name}),
-                            .new_values = new_values,
-                            .old_values = .empty,
-                            .action = 1,
-                            .changed_columns = try self.context.changed_columns.clone(),
-                            .transaction_id = self.context.xid,
-                            .user_id = if (self.context.user_id.len > 0) try self.allocator.dupe(u8, self.context.user_id) else "",
-                            .ip_address = if (self.context.ip_address.len > 0) try self.allocator.dupe(u8, self.context.ip_address) else "",
-                            .primary_key = if (self.context.primary_key.len > 0) try self.allocator.dupe(u8, self.context.primary_key) else "",
-                        };
+                    response.data = types.AuditEntry{
+                        .event_time = undefined,
+                        .table_name = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{table.namespace, table.name}),
+                        .action = 1,
+                        .changed_columns = try self.context.columns.clone(self.allocator),
+                        .transaction_id = self.context.xid,
+                        .user_id = if (self.context.user_id.len > 0) try self.allocator.dupe(u8, self.context.user_id) else "",
+                        .ip_address = if (self.context.ip_address.len > 0) try self.allocator.dupe(u8, self.context.ip_address) else "",
+                    };
                 } else {
                     std.debug.print("Error: Received insert for unknown relation ID {d}\n", .{rel_id});
                 }
@@ -462,27 +471,22 @@ pub const PgClient = struct {
                 var tuple_type = try reader.takeByte();
 
                 if (self.table_reg.get(rel_id)) |table| {
-                    var old_values: std.StringHashMapUnmanaged([]const u8) = .empty;
-
                     if (tuple_type == 'O' or tuple_type == 'K') {
-                        old_values = try self.parseTupleData(&reader, table);
+                        try self.parseTupleData(&reader, table, .Update);
 
                         tuple_type = try reader.takeByte();
                     }
 
                     if (tuple_type == 'N') {
-                        const new_values = try self.parseTupleData(&reader, table);
+                        try self.parseTupleData(&reader, table, .Update);
                         response.data = types.AuditEntry{
                             .event_time = undefined,
                             .table_name = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{table.namespace, table.name}),
-                            .new_values = new_values,
-                            .old_values = old_values,
                             .action = 2,
-                            .changed_columns = try self.context.changed_columns.clone(),
+                            .columns = try self.context.columns.clone(self.allocator),
                             .transaction_id = self.context.xid,
                             .user_id = if (self.context.user_id.len > 0) try self.allocator.dupe(u8, self.context.user_id) else "",
                             .ip_address = if (self.context.ip_address.len > 0) try self.allocator.dupe(u8, self.context.ip_address) else "",
-                            .primary_key = if (self.context.primary_key.len > 0) try self.allocator.dupe(u8, self.context.primary_key) else "",
                         };
                     } else {
                         std.debug.print("Error: Expected 'N', got '{c}'\n", .{tuple_type});
@@ -500,18 +504,15 @@ pub const PgClient = struct {
 
                 if (self.table_reg.get(rel_id)) |table| {
                     if (tuple_type == 'O' or tuple_type == 'K') {
-                        const old_values = try self.parseTupleData(&reader, table);
+                        try self.parseTupleData(&reader, table, .Update);
                         response.data = types.AuditEntry{
                             .event_time = undefined,
                             .table_name = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{table.namespace, table.name}),
-                            .new_values = .empty,
-                            .old_values = old_values,
                             .action = 3,
-                            .changed_columns = try self.context.changed_columns.clone(),
+                            .changed_columns = try self.context.columns.clone(self.allocator),
                             .transaction_id = self.context.xid,
                             .user_id = if (self.context.user_id.len > 0) try self.allocator.dupe(u8, self.context.user_id) else "",
                             .ip_address = if (self.context.ip_address.len > 0) try self.allocator.dupe(u8, self.context.ip_address) else "",
-                            .primary_key = if (self.context.primary_key.len > 0) try self.allocator.dupe(u8, self.context.primary_key) else "",
                         };
                     } else {
                         std.debug.print("Error: Expected 'O' or 'K', got '{c}'\n", .{tuple_type});
@@ -580,26 +581,15 @@ pub const PgClient = struct {
         return response;
     }
 
-    fn parseTupleData(self: *@This(), reader: *Io.Reader, table: TableDef) !std.StringHashMapUnmanaged([]const u8) {
+    fn parseTupleData(self: *@This(), reader: *Io.Reader, action: Action) !void {
         const num_columns = try reader.takeInt(u16, .big);
 
-        if (num_columns > table.columns.items.len) {
+        if (num_columns > self.context.columns.items.len) {
             return error.ColumnMismatch;
         }
 
-        var changes = std.StringHashMapUnmanaged([]const u8).empty;
-        errdefer {
-            var it = changes.valueIterator();
-            while (it.next()) |val| {
-                self.allocator.free(val.*);
-            }
-            changes.deinit(self.allocator);
-        }
-
-        for (table.columns.items) |col| {
+        for (self.context.columns.items) |*col| {
             const col_type = try reader.takeByte();
-            const col_name = col.name;
-            const is_pk = col.is_key;
 
             switch (col_type) {
                 'n' => {
@@ -611,30 +601,34 @@ pub const PgClient = struct {
                 't' => {
                     const col_len = try reader.takeInt(u32, .big);
 
-                    const val_buf_raw = try reader.take(col_len);
-                    const val_buf = try self.allocator.dupe(u8, val_buf_raw);
-                    errdefer self.allocator.free(val_buf);
+                    const val_raw = try reader.take(col_len);
+                    const val = try self.allocator.dupe(u8, val_raw);
+                    errdefer self.allocator.free(val);
 
-                    try changes.put(self.allocator, col_name, val_buf);
-                    const changed_column = try self.context.changed_columns.getOrPut(col_name);
+                    switch (action) {
+                        .Insert => {
+                            col.new_value = val;
+                        },
+                        .Update => {
+                            if (col.old_value.len > 0) {
+                                col.new_value = val;
 
-                    if (!changed_column.found_existing) {
-                        changed_column.value_ptr.* = .{
-                            .value = val_buf,
-                            .has_changes = true,
-                        };
-                    } else if (mem.eql(u8, changed_column.value_ptr.*.value, val_buf)) {
-                        changed_column.value_ptr.*.has_changes = false;
-                    }
+                                if (!mem.eql(u8, col.old_value, col.new_value)) {
+                                    col.has_changes = true;
+                                }
+                            } else {
+                                col.old_value = val;
+                            }
 
-                    if (is_pk) {
-                        self.context.primary_key = val_buf;
+                        },
+                        .Delete => {
+                            col.old_value = val;
+                        },
                     }
                 },
                 else => return error.UnknownTupleFormat,
             }
         }
-        return changes;
     }
 
     fn readSchemaKeys(self: *@This(), table_name: []const u8) !std.ArrayList(ColumnDef) {
@@ -715,7 +709,7 @@ fn setupClient(allocator: mem.Allocator, io: Io) !PgClient {
         .columns = cols,
     });
 
-    var changed_columns = std.StringHashMap(types.ChangedColumns).init(allocator);
+    var changed_columns = std.StringHashMap(types.ChangedColumn).init(allocator);
     try changed_columns.ensureUnusedCapacity(6);
 
     return .{
