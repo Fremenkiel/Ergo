@@ -64,24 +64,31 @@ const InsertValues = struct {
         try self.new_values.ensureUnusedCapacity(@as(u32, @truncate(row.columns.items.len)));
 
         for (row.columns.items) |col| {
+            // const column_name = try self.allocator.dupe(u8, col.column_name);
+            // const old_value = try self.allocator.dupe(u8, col.old_value);
+            // const new_value = try self.allocator.dupe(u8, col.new_value);
+            const column_name = col.column_name;
+            const old_value = col.old_value;
+            const new_value = col.new_value;
+
             if (col.is_key) {
-                if (!mem.eql(u8, col.old_value, "")) {
-                    try self.primary_keys.put(col.column_name, col.old_value);
-                } else if (!mem.eql(u8, col.new_value, "")) {
-                    try self.primary_keys.put(col.column_name, col.new_value);
+                if (old_value) |val| {
+                    try self.primary_keys.put(column_name, val);
+                } else if (new_value) |val| {
+                    try self.primary_keys.put(column_name, val);
                 }
             }
 
             if (!col.has_changes) continue;
 
-            self.changed_columns.appendAssumeCapacity(.{ .String = col.column_name });
+            self.changed_columns.appendAssumeCapacity(.{ .String = column_name });
 
-            if (!mem.eql(u8, col.old_value, "")) {
-                self.old_values.putAssumeCapacity(col.column_name, col.old_value);
+            if (old_value) |val| {
+                self.old_values.putAssumeCapacity(column_name, val);
             }
 
-            if (!mem.eql(u8, col.new_value, "")) {
-                self.new_values.putAssumeCapacity(col.column_name, col.new_value);
+            if (new_value) |val| {
+                self.new_values.putAssumeCapacity(column_name, val);
             }
         }
     }
@@ -809,6 +816,7 @@ test "parseRow ensure correct output" {
     defer client.deinit();
 
     var columns: std.ArrayList(types.ChangedColumn) = .empty;
+
     try columns.ensureUnusedCapacity(allocator, 6);
 
     columns.appendAssumeCapacity(.{ .has_changes = false, .old_value = try allocator.dupe(u8, "1"), .new_value = try allocator.dupe(u8, "1"), .column_name = try allocator.dupe(u8, "id"), .is_key = true });
@@ -842,13 +850,13 @@ test "parseRow ensure correct output" {
     try std.testing.expectEqualStrings("postal_code", insert_values.changed_columns.items[1].String);
     try std.testing.expectEqualStrings("city", insert_values.changed_columns.items[2].String);
 
-    try std.testing.expectEqualStrings("1 Apple Park Way", insert_values.new_values.get("address_line_1").?);
-    try std.testing.expectEqualStrings("95014", insert_values.new_values.get("postal_code").?);
-    try std.testing.expectEqualStrings("Cupertino", insert_values.new_values.get("city").?);
+    try std.testing.expectEqualStrings("Googleplex", insert_values.new_values.get("address_line_1").?);
+    try std.testing.expectEqualStrings("94043", insert_values.new_values.get("postal_code").?);
+    try std.testing.expectEqualStrings("Mountain View", insert_values.new_values.get("city").?);
 
-    try std.testing.expectEqualStrings("Googleplex", insert_values.old_values.get("address_line_1").?);
-    try std.testing.expectEqualStrings("94043", insert_values.old_values.get("postal_code").?);
-    try std.testing.expectEqualStrings("Mountain View", insert_values.old_values.get("city").?);
+    try std.testing.expectEqualStrings("1 Apple Park Way", insert_values.old_values.get("address_line_1").?);
+    try std.testing.expectEqualStrings("95014", insert_values.old_values.get("postal_code").?);
+    try std.testing.expectEqualStrings("Cupertino", insert_values.old_values.get("city").?);
 
     try std.testing.expectEqual(1, insert_values.primary_keys.count());
     try std.testing.expectEqualStrings("1", insert_values.primary_keys.get("id").?);

@@ -23,7 +23,8 @@ WalConnectionUnableToStop,
 
 const Action = enum(u8) {
     Insert,
-    Update,
+    UpdateOld,
+    UpdateNew,
     Delete,
 };
 
@@ -56,7 +57,11 @@ pub const TransactionContext = struct {
     user_id: []const u8,
     ip_address: []const u8,
     primary_key: []const u8,
-    columns: std.ArrayList(types.ChangedColumn),
+
+    pub fn deinit(self: *@This(), allocator: mem.Allocator) void {
+        if (self.user_id.len > 0) allocator.free(self.user_id);
+        if (self.ip_address.len > 0) allocator.free(self.ip_address);
+    }
 };
 
 pub const ColumnDef = struct {
@@ -74,6 +79,9 @@ pub const TableDef = struct {
         for (self.columns.items) |*col| { allocator.free(col.name); }
         self.columns.clearAndFree(allocator);
         self.columns.deinit(allocator);
+
+        allocator.free(self.namespace);
+        allocator.free(self.name);
     }
 };
 
@@ -127,7 +135,6 @@ pub const PgClient = struct {
                 .user_id = "",
                 .ip_address = "",
                 .primary_key = "",
-                .columns = columns,
             },
             .table_reg = std.AutoHashMap(u32, TableDef).init(allocator),
             .wal_conn = wal_conn,
@@ -157,9 +164,7 @@ pub const PgClient = struct {
         }
 
         self.table_reg.deinit();
-        self.context.columns.deinit(self.allocator);
-        if (self.context.user_id.len > 0) self.allocator.free(self.context.user_id);
-        if (self.context.ip_address.len > 0) self.allocator.free(self.context.ip_address);
+        self.context.deinit(self.allocator);
 
         self.wal_opts.startup_parameters.clearAndFree();
         self.wal_opts.startup_parameters.deinit();
@@ -177,7 +182,6 @@ pub const PgClient = struct {
         if (self.context.ip_address.len > 0) self.allocator.free(self.context.ip_address);
         self.context.ip_address = "";
         self.context.primary_key = "";
-        self.context.columns.clearRetainingCapacity();
 
         var it = self.table_reg.iterator(); 
         while (it.next()) |table_reg| { table_reg.value_ptr.*.deinit(self.allocator); }
@@ -451,14 +455,13 @@ pub const PgClient = struct {
 
 
                 if (self.table_reg.get(rel_id)) |table| {
-                self.context.columns = try initContextColumns(self.allocator, table);
-                    try self.parseTupleData(&reader, .Insert);
+                    const columns = try initContextColumns(self.allocator, table);
 
                     response.data = types.AuditEntry{
                         .event_time = undefined,
                         .table_name = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{table.namespace, table.name}),
                         .action = 1,
-                        .columns = try self.context.columns.clone(self.allocator),
+                        .columns = try self.parseTupleData(&reader, columns, .Insert),
                         .transaction_id = self.context.xid,
                         .user_id = if (self.context.user_id.len > 0) try self.allocator.dupe(u8, self.context.user_id) else "",
                         .ip_address = if (self.context.ip_address.len > 0) try self.allocator.dupe(u8, self.context.ip_address) else "",
@@ -466,27 +469,25 @@ pub const PgClient = struct {
                 } else {
                     std.debug.print("Error: Received insert for unknown relation ID {d}\n", .{rel_id});
                 }
-                self.context.columns.clearRetainingCapacity();
             },
             'U' => {
                 const rel_id = try reader.takeInt(u32, .big);
                 var tuple_type = try reader.takeByte();
 
                 if (self.table_reg.get(rel_id)) |table| {
-                    self.context.columns = try initContextColumns(self.allocator, table);
+                    var columns = try initContextColumns(self.allocator, table);
                     if (tuple_type == 'O' or tuple_type == 'K') {
-                        try self.parseTupleData(&reader, .Update);
+                        columns = try self.parseTupleData(&reader, columns, .UpdateOld);
 
                         tuple_type = try reader.takeByte();
                     }
 
                     if (tuple_type == 'N') {
-                        try self.parseTupleData(&reader, .Update);
                         response.data = types.AuditEntry{
                             .event_time = undefined,
                             .table_name = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{table.namespace, table.name}),
                             .action = 2,
-                            .columns = try self.context.columns.clone(self.allocator),
+                            .columns = try self.parseTupleData(&reader, columns, .UpdateNew),
                             .transaction_id = self.context.xid,
                             .user_id = if (self.context.user_id.len > 0) try self.allocator.dupe(u8, self.context.user_id) else "",
                             .ip_address = if (self.context.ip_address.len > 0) try self.allocator.dupe(u8, self.context.ip_address) else "",
@@ -497,8 +498,6 @@ pub const PgClient = struct {
                 } else {
                     std.debug.print("Error: Received update for unknown relation ID {d}\n", .{rel_id});
                 }
-
-                self.context.columns.clearRetainingCapacity();
             },
             'D' => {
                 const rel_id = try reader.takeInt(u32, .big);
@@ -506,14 +505,13 @@ pub const PgClient = struct {
                 const tuple_type = try reader.takeByte();
 
                 if (self.table_reg.get(rel_id)) |table| {
-                    self.context.columns = try initContextColumns(self.allocator, table);
+                    const columns = try initContextColumns(self.allocator, table);
                     if (tuple_type == 'O' or tuple_type == 'K') {
-                        try self.parseTupleData(&reader, .Update);
                         response.data = types.AuditEntry{
                             .event_time = undefined,
                             .table_name = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{table.namespace, table.name}),
                             .action = 3,
-                            .columns = try self.context.columns.clone(self.allocator),
+                            .columns = try self.parseTupleData(&reader, columns, .Delete),
                             .transaction_id = self.context.xid,
                             .user_id = if (self.context.user_id.len > 0) try self.allocator.dupe(u8, self.context.user_id) else "",
                             .ip_address = if (self.context.ip_address.len > 0) try self.allocator.dupe(u8, self.context.ip_address) else "",
@@ -524,8 +522,6 @@ pub const PgClient = struct {
                 } else {
                     std.debug.print("Error: Received delete for unknown relation ID {d}\n", .{rel_id});
                 }
-
-                self.context.columns.clearRetainingCapacity();
             },
             'M' => {
                 const flags = try reader.takeByte();
@@ -585,14 +581,14 @@ pub const PgClient = struct {
         return response;
     }
 
-    fn parseTupleData(self: *@This(), reader: *Io.Reader, action: Action) !void {
+    fn parseTupleData(self: *@This(), reader: *Io.Reader, columns: std.ArrayList(types.ChangedColumn), action: Action) !std.ArrayList(types.ChangedColumn) {
         const num_columns = try reader.takeInt(u16, .big);
 
-        if (num_columns > self.context.columns.items.len) {
+        if (num_columns > columns.items.len) {
             return error.ColumnMismatch;
         }
 
-        for (self.context.columns.items) |*col| {
+        for (columns.items) |*col| {
             const col_type = try reader.takeByte();
 
             switch (col_type) {
@@ -612,27 +608,30 @@ pub const PgClient = struct {
                     switch (action) {
                         .Insert => {
                             col.new_value = val;
+                            col.has_changes = true;
                         },
-                        .Update => {
-                            if (col.old_value.len > 0) {
-                                col.new_value = val;
+                        .UpdateNew => {
+                            col.new_value = val;
 
-                                if (!mem.eql(u8, col.old_value, col.new_value)) {
-                                    col.has_changes = true;
-                                }
-                            } else {
-                                col.old_value = val;
+                            if ((col.old_value == null) != (col.new_value == null) or 
+                                (col.old_value != null and col.new_value != null and !std.mem.eql(u8, col.old_value.?, col.new_value.?))) {
+                                col.has_changes = true;
                             }
-
+                        },
+                        .UpdateOld => {
+                            col.old_value = val;
                         },
                         .Delete => {
                             col.old_value = val;
+                            col.has_changes = true;
                         },
                     }
                 },
                 else => return error.UnknownTupleFormat,
             }
         }
+
+        return columns;
     }
 
     // fn readSchemaKeys(self: *@This(), table_name: []const u8) !std.ArrayList(ColumnDef) {
@@ -708,9 +707,9 @@ fn initContextColumns(allocator: mem.Allocator, table_def: TableDef) !std.ArrayL
     for (table_def.columns.items) |col| {
         columns.appendAssumeCapacity(.{
             .is_key = col.is_key,
-            .column_name = col.name,
-            .old_value = "",
-            .new_value = "",
+            .column_name = try allocator.dupe(u8, col.name),
+            .old_value = null,
+            .new_value = null,
             .has_changes = false,
         });
     }
@@ -734,9 +733,6 @@ fn setupClient(allocator: mem.Allocator, io: Io) !PgClient {
         .name = try allocator.dupe(u8, "addresses"),
         .columns = cols,
     });
-
-    var columns: std.ArrayList(types.ChangedColumn) = .empty;
-    try columns.ensureUnusedCapacity(allocator, 6);
 
     return .{
         .allocator = allocator,
@@ -764,7 +760,6 @@ fn setupClient(allocator: mem.Allocator, io: Io) !PgClient {
             .user_id = "",
             .ip_address = "",
             .primary_key = "",
-            .columns = columns,
         },
         .table_reg = table_reg,
         .wal_conn = null,
@@ -845,7 +840,6 @@ test "parsePgOutput maps RELATION correctly" {
             .user_id = "",
             .ip_address = "",
             .primary_key = "",
-            .columns = .empty,
         },
         .table_reg = .init(allocator),
         .wal_conn = null,
@@ -900,28 +894,44 @@ test "parsePgOutput maps INSERT correctly" {
 
     try testing.expectEqual(6, result.data.?.columns.items.len);
 
-    // Changed columns
-    try testing.expectEqual(true, result.data.?.columns.items[0].has_changes);
-    try testing.expectEqual(true, result.data.?.columns.items[1].has_changes);
-    try testing.expectEqual(false, result.data.?.columns.items[2].has_changes);
-    try testing.expectEqual(true, result.data.?.columns.items[3].has_changes);
-    try testing.expectEqual(true, result.data.?.columns.items[4].has_changes);
-    try testing.expectEqual(true, result.data.?.columns.items[5].has_changes);
+    const id = result.data.?.columns.items[0];
+    const address_line_1 = result.data.?.columns.items[1];
+    const address_line_2 = result.data.?.columns.items[2];
+    const postal_code = result.data.?.columns.items[3];
+    const city = result.data.?.columns.items[4];
+    const country = result.data.?.columns.items[5];
 
-    try testing.expectEqualStrings("1", result.data.?.columns.items[0].old_value);
-    try testing.expectEqualStrings("1 Apple Park Way", result.data.?.columns.items[1].old_value);
-    try testing.expectEqualStrings("", result.data.?.columns.items[2].old_value);
-    try testing.expectEqualStrings("95014", result.data.?.columns.items[3].old_value);
-    try testing.expectEqualStrings("Cupertino", result.data.?.columns.items[4].old_value);
-    try testing.expectEqualStrings("US", result.data.?.columns.items[5].old_value);
+    // Column names
+    try testing.expectEqualStrings("id", id.column_name);
+    try testing.expectEqualStrings("address_line_1", address_line_1.column_name);
+    try testing.expectEqualStrings("address_line_2", address_line_2.column_name);
+    try testing.expectEqualStrings("postal_code", postal_code.column_name);
+    try testing.expectEqualStrings("city", city.column_name);
+    try testing.expectEqualStrings("country", country.column_name);
+
+    // Changed columns
+    try testing.expectEqual(true, id.has_changes);
+    try testing.expectEqual(true, address_line_1.has_changes);
+    try testing.expectEqual(false, address_line_2.has_changes);
+    try testing.expectEqual(true, postal_code.has_changes);
+    try testing.expectEqual(true, city.has_changes);
+    try testing.expectEqual(true, country.has_changes);
+
+    // Old values
+    try testing.expectEqual(null, id.old_value);
+    try testing.expectEqual(null, address_line_1.old_value);
+    try testing.expectEqual(null, address_line_2.old_value);
+    try testing.expectEqual(null, postal_code.old_value);
+    try testing.expectEqual(null, city.old_value);
+    try testing.expectEqual(null, country.old_value);
 
     // New values
-    try testing.expectEqualStrings("1", result.data.?.columns.items[0].new_value);
-    try testing.expectEqualStrings("1 Apple Park Way", result.data.?.columns.items[1].new_value);
-    try testing.expectEqualStrings("", result.data.?.columns.items[2].new_value);
-    try testing.expectEqualStrings("95014", result.data.?.columns.items[3].new_value);
-    try testing.expectEqualStrings("Cupertino", result.data.?.columns.items[4].new_value);
-    try testing.expectEqualStrings("US", result.data.?.columns.items[5].new_value);
+    try testing.expectEqualStrings("1", id.new_value.?);
+    try testing.expectEqualStrings("1 Apple Park Way", address_line_1.new_value.?);
+    try testing.expectEqual(null, address_line_2.new_value);
+    try testing.expectEqualStrings("95014", postal_code.new_value.?);
+    try testing.expectEqualStrings("Cupertino", city.new_value.?);
+    try testing.expectEqualStrings("US", country.new_value.?);
 
     try testing.expectEqual(0, client.context.xid);
     try testing.expectEqualStrings("", client.context.ip_address);
@@ -956,29 +966,44 @@ test "parsePgOutput maps UPDATE correctly" {
 
     try testing.expectEqual(6, result.data.?.columns.items.len);
 
+    const id = result.data.?.columns.items[0];
+    const address_line_1 = result.data.?.columns.items[1];
+    const address_line_2 = result.data.?.columns.items[2];
+    const postal_code = result.data.?.columns.items[3];
+    const city = result.data.?.columns.items[4];
+    const country = result.data.?.columns.items[5];
+
+    // Column names
+    try testing.expectEqualStrings("id", id.column_name);
+    try testing.expectEqualStrings("address_line_1", address_line_1.column_name);
+    try testing.expectEqualStrings("address_line_2", address_line_2.column_name);
+    try testing.expectEqualStrings("postal_code", postal_code.column_name);
+    try testing.expectEqualStrings("city", city.column_name);
+    try testing.expectEqualStrings("country", country.column_name);
+
     // Changed columns
-    try testing.expectEqual(false, result.data.?.columns.items[0].has_changes);
-    try testing.expectEqual(true, result.data.?.columns.items[0].has_changes);
-    try testing.expectEqual(false, result.data.?.columns.items[0].has_changes);
-    try testing.expectEqual(true, result.data.?.columns.items[0].has_changes);
-    try testing.expectEqual(true, result.data.?.columns.items[0].has_changes);
-    try testing.expectEqual(false, result.data.?.columns.items[0].has_changes);
+    try testing.expectEqual(false, id.has_changes);
+    try testing.expectEqual(true, address_line_1.has_changes);
+    try testing.expectEqual(false, address_line_2.has_changes);
+    try testing.expectEqual(true, postal_code.has_changes);
+    try testing.expectEqual(true, city.has_changes);
+    try testing.expectEqual(false, country.has_changes);
 
     // Old values
-    try testing.expectEqualStrings("1", result.data.?.columns.items[0].old_value);
-    try testing.expectEqualStrings("1 Apple Park Way", result.data.?.columns.items[1].old_value);
-    try testing.expectEqualStrings("", result.data.?.columns.items[2].old_value);
-    try testing.expectEqualStrings("95014", result.data.?.columns.items[3].old_value);
-    try testing.expectEqualStrings("Cupertino", result.data.?.columns.items[4].old_value);
-    try testing.expectEqualStrings("US", result.data.?.columns.items[5].old_value);
+    try testing.expectEqualStrings("1", id.old_value.?);
+    try testing.expectEqualStrings("1 Apple Park Way", address_line_1.old_value.?);
+    try testing.expectEqual(null, address_line_2.old_value);
+    try testing.expectEqualStrings("95014", postal_code.old_value.?);
+    try testing.expectEqualStrings("Cupertino", city.old_value.?);
+    try testing.expectEqualStrings("US", country.old_value.?);
 
     // New values
-    try testing.expectEqualStrings("1", result.data.?.columns.items[0].new_value);
-    try testing.expectEqualStrings("Googleplex", result.data.?.columns.items[1].new_value);
-    try testing.expectEqualStrings("", result.data.?.columns.items[2].new_value);
-    try testing.expectEqualStrings("94043", result.data.?.columns.items[3].new_value);
-    try testing.expectEqualStrings("Mountain View", result.data.?.columns.items[4].new_value);
-    try testing.expectEqualStrings("US", result.data.?.columns.items[5].new_value);
+    try testing.expectEqualStrings("1", id.new_value.?);
+    try testing.expectEqualStrings("Googleplex", address_line_1.new_value.?);
+    try testing.expectEqual(null, address_line_2.new_value);
+    try testing.expectEqualStrings("94043", postal_code.new_value.?);
+    try testing.expectEqualStrings("Mountain View", city.new_value.?);
+    try testing.expectEqualStrings("US", country.new_value.?);
 
     try testing.expectEqual(0, client.context.xid);
     try testing.expectEqualStrings("", client.context.ip_address);
@@ -1009,29 +1034,44 @@ test "parsePgOutput maps DELETE correctly" {
 
     try testing.expectEqual(6, result.data.?.columns.items.len);
 
+    const id = result.data.?.columns.items[0];
+    const address_line_1 = result.data.?.columns.items[1];
+    const address_line_2 = result.data.?.columns.items[2];
+    const postal_code = result.data.?.columns.items[3];
+    const city = result.data.?.columns.items[4];
+    const country = result.data.?.columns.items[5];
+
+    // Column names
+    try testing.expectEqualStrings("id", id.column_name);
+    try testing.expectEqualStrings("address_line_1", address_line_1.column_name);
+    try testing.expectEqualStrings("address_line_2", address_line_2.column_name);
+    try testing.expectEqualStrings("postal_code", postal_code.column_name);
+    try testing.expectEqualStrings("city", city.column_name);
+    try testing.expectEqualStrings("country", country.column_name);
+
     // Changed columns
-    try testing.expectEqual(true, result.data.?.columns.items[0].has_changes);
-    try testing.expectEqual(true, result.data.?.columns.items[1].has_changes);
-    try testing.expectEqual(false, result.data.?.columns.items[2].has_changes);
-    try testing.expectEqual(true, result.data.?.columns.items[3].has_changes);
-    try testing.expectEqual(true, result.data.?.columns.items[4].has_changes);
-    try testing.expectEqual(true, result.data.?.columns.items[5].has_changes);
+    try testing.expectEqual(true, id.has_changes);
+    try testing.expectEqual(true, address_line_1.has_changes);
+    try testing.expectEqual(false, address_line_2.has_changes);
+    try testing.expectEqual(true, postal_code.has_changes);
+    try testing.expectEqual(true, city.has_changes);
+    try testing.expectEqual(true, country.has_changes);
 
     // Old values
-    try testing.expectEqualStrings("1", result.data.?.columns.items[0].old_value);
-    try testing.expectEqualStrings("Googleplex", result.data.?.columns.items[1].old_value);
-    try testing.expectEqualStrings("", result.data.?.columns.items[2].old_value);
-    try testing.expectEqualStrings("94043", result.data.?.columns.items[3].old_value);
-    try testing.expectEqualStrings("Mountain View", result.data.?.columns.items[4].old_value);
-    try testing.expectEqualStrings("US", result.data.?.columns.items[5].old_value);
+    try testing.expectEqualStrings("1", id.old_value.?);
+    try testing.expectEqualStrings("Googleplex", address_line_1.old_value.?);
+    try testing.expectEqual(null, address_line_2.old_value);
+    try testing.expectEqualStrings("94043", postal_code.old_value.?);
+    try testing.expectEqualStrings("Mountain View", city.old_value.?);
+    try testing.expectEqualStrings("US", country.old_value.?);
 
     // New values
-    try testing.expectEqualStrings("", result.data.?.columns.items[0].new_value);
-    try testing.expectEqualStrings("", result.data.?.columns.items[1].new_value);
-    try testing.expectEqualStrings("", result.data.?.columns.items[2].new_value);
-    try testing.expectEqualStrings("", result.data.?.columns.items[3].new_value);
-    try testing.expectEqualStrings("", result.data.?.columns.items[4].new_value);
-    try testing.expectEqualStrings("", result.data.?.columns.items[5].new_value);
+    try testing.expectEqual(null, id.new_value);
+    try testing.expectEqual(null, address_line_1.new_value);
+    try testing.expectEqual(null, address_line_2.new_value);
+    try testing.expectEqual(null, postal_code.new_value);
+    try testing.expectEqual(null, city.new_value);
+    try testing.expectEqual(null, country.new_value);
 
     try testing.expectEqual(0, client.context.xid);
     try testing.expectEqualStrings("", client.context.ip_address);
@@ -1108,15 +1148,19 @@ test "parseTupleData: correct parsing of input" {
 
     var reader = Io.Reader.fixed(commit_bytes);
 
-    client.context.columns = try initContextColumns(allocator, client.table_reg.get(16390).?);
-    try client.parseTupleData(&reader, .Insert);
+    const columns = try initContextColumns(allocator, client.table_reg.get(16390).?);
+    var result = try client.parseTupleData(&reader, columns, .Insert);
+    defer {
+        for (result.items) |*col| { col.deinit(allocator); }
+        result.deinit(allocator);
+    }
 
-    try testing.expectEqualStrings("1", client.context.columns.items[0].new_value);
-    try testing.expectEqualStrings("1 Apple Park Way", client.context.columns.items[0].new_value);
-    try testing.expectEqual(null, client.context.columns.items[0].new_value);
-    try testing.expectEqualStrings("95014", client.context.columns.items[0].new_value);
-    try testing.expectEqualStrings("Cupertino", client.context.columns.items[0].new_value);
-    try testing.expectEqualStrings("US", client.context.columns.items[0].new_value);
+    try testing.expectEqualStrings("1", result.items[0].new_value.?);
+    try testing.expectEqualStrings("1 Apple Park Way", result.items[1].new_value.?);
+    try testing.expectEqual(null, result.items[2].new_value);
+    try testing.expectEqualStrings("95014", result.items[3].new_value.?);
+    try testing.expectEqualStrings("Cupertino", result.items[4].new_value.?);
+    try testing.expectEqualStrings("US", result.items[5].new_value.?);
 
     try testing.expectEqual(0, client.context.xid);
     try testing.expectEqualStrings("", client.context.ip_address);

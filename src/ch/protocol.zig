@@ -457,7 +457,8 @@ test "readServerHello: ensure correct decoding" {
     try writeString(&writer, display);
     try writeVarInt(&writer, version_patch);
 
-    const server_info = try ServerInfo.read(allocator, &reader);
+    var server_info = try ServerInfo.read(allocator, &reader);
+    defer server_info.deinit(allocator);
 
     try std.testing.expectEqual(writer.end, reader.seek);
     try std.testing.expectEqualStrings(server_name, server_info.name);

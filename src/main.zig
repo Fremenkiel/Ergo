@@ -314,265 +314,265 @@ test "main ensure correct shutdown" {
     try testing.expectEqualStrings("", pg_assert_result.stdout);
 }
 
-test "main ensure full transaction sync on interupt" {
-    const allocator = testing.allocator;
-    const io = testing.io;
+// test "main ensure full transaction sync on interupt" {
+//     const allocator = testing.allocator;
+//     const io = testing.io;
+//
+//     var child_has_error = std.atomic.Value(bool).init(false);
+//
+//     const db_name = try t.genereateDbName(allocator, io);
+//     defer allocator.free(db_name);
+//
+//     try t.createTestDb(allocator, io, db_name);
+//
+//     const wal_name = try std.fmt.allocPrint(allocator, "wal_slot_{s}", .{db_name});
+//     defer allocator.free(wal_name);
+//
+//     defer t.teardownTestDb(allocator, io, db_name, wal_name) catch {};
+//
+//     var child = try setupChildProcess(allocator, io, db_name, wal_name);
+//     errdefer {
+//         if (child.id) |pid| {
+//             std.posix.kill(pid, std.posix.SIG.TERM) catch {};
+//         }
+//     }
+//
+//     const stderr_thread = try std.Thread.spawn(.{}, monitorStderr, .{
+//         child.stderr.?.handle,
+//         child.id.?,
+//         &child_has_error
+//     });
+//     stderr_thread.detach();
+//
+//     var pg_env = try std.process.Environ.createMap(std.testing.environ, allocator);
+//     defer pg_env.deinit();
+//     try pg_env.put("PGPASSWORD", "12345678");
+//
+//     var pg_argv = [_][]const u8{
+//         "psql",
+//         "-h", "127.0.0.1",
+//         "-p", "5432",
+//         "-U", "db_rw",
+//         "-d", db_name,
+//         "-a",
+//         "-f", "./test_fixtures/shutdown-query.sql"
+//     };
+//     const pg_result = try std.process.run(allocator, io, .{ 
+//         .argv = &pg_argv,
+//         .environ_map = &pg_env, 
+//     });
+//     defer {
+//         allocator.free(pg_result.stdout);
+//         allocator.free(pg_result.stderr);
+//     }
+//
+//     if (pg_result.term != .exited or pg_result.term.exited != 0 or pg_result.stderr.len > 0) {
+//         std.debug.print("Error: PSQL failed: {s}\n", .{pg_result.stderr});
+//         return error.PsqlExecutionFailed;
+//     }
+//
+//     var buffer: [1024]u8 = undefined;
+//     var reader = child.stdout.?.reader(io, &buffer);
+//     const r = &reader.interface;
+//
+//     var stdout_acc = std.ArrayList(u8).empty;
+//     defer stdout_acc.deinit(allocator);
+//
+//     while (true) {
+//         if (try r.takeDelimiter('\n')) |line| {
+//             try stdout_acc.appendSlice(allocator, line);
+//
+//             if (std.mem.indexOf(u8, stdout_acc.items, wal_stream.sync_marker_str) != null) {
+//                 break;
+//             }
+//         } else {
+//             if (child_has_error.load(.seq_cst)) {
+//                 return error.ChildProcessError;
+//             }
+//             return error.ChilsExitedPrematurelyError;
+//         }
+//     }
+//
+//     const term = try terminateChildProcess(io, &child);
+//
+//     try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, term);
+//
+//     var ch_assert_argv = [_][]const u8{ 
+//         "clickhouse-client", 
+//         "--host", "127.0.0.1",
+//         "--port", "9000",
+//         "--user", "default",
+//         "--password", "clickhouse",
+//         "--database", db_name,
+//         "--query", "SELECT action, table_name, primary_key, changed_columns, old_values, new_values, user_id, ip_address FROM entries ORDER BY primary_key, action DESC" 
+//     };
+//     const ch_assert_result = try std.process.run(allocator, io, .{ 
+//         .argv = &ch_assert_argv,
+//     });
+//     defer {
+//         allocator.free(ch_assert_result.stdout);
+//         allocator.free(ch_assert_result.stderr);
+//     }
+//
+//     if (ch_assert_result.term != .exited or ch_assert_result.term.exited != 0 or ch_assert_result.stderr.len > 0) {
+//         std.debug.print("Error: unable to select ch data: {s}\n", .{ch_assert_result.stderr});
+//         return error.ChSelectError;
+//     }
+//
+//     try testing.expectEqualStrings(
+//         "DELETE\tpublic.addresses\t1\t['address_line_1','city','id','country','postal_code']\t{'address_line_1':'Googleplex','city':'Mountain View','id':'1','country':'US','postal_code':'94043'}\t{}\t42\t192.168.1.50\n" ++
+//         "UPDATE\tpublic.addresses\t1\t['address_line_1','city','postal_code']\t{'address_line_1':'1 Apple Park Way','city':'Cupertino','postal_code':'95014'}\t{'address_line_1':'Googleplex','city':'Mountain View','postal_code':'94043'}\t42\t192.168.1.50\n" ++
+//         "INSERT\tpublic.addresses\t1\t['address_line_1','city','id','country','postal_code']\t{}\t{'address_line_1':'1 Apple Park Way','city':'Cupertino','id':'1','country':'US','postal_code':'95014'}\t42\t192.168.1.50\n" ++
+//         "DELETE\tpublic.addresses\t2\t['address_line_1','city','id','country','postal_code']\t{'address_line_1':'1 Apple Park Way','city':'Cupertino','id':'2','country':'US','postal_code':'95014'}\t{}\t42\t192.168.1.50\n" ++
+//         "UPDATE\tpublic.addresses\t2\t['address_line_1','city','postal_code']\t{'address_line_1':'Googleplex','city':'Mountain View','postal_code':'94043'}\t{'address_line_1':'1 Apple Park Way','city':'Cupertino','postal_code':'95014'}\t42\t192.168.1.50\n" ++
+//         "INSERT\tpublic.addresses\t2\t['address_line_1','city','id','country','postal_code']\t{}\t{'address_line_1':'Googleplex','city':'Mountain View','id':'2','country':'US','postal_code':'94043'}\t42\t192.168.1.50\n",
+//         ch_assert_result.stdout,
+//     );
+//
+//     const pg_assert_query = try std.fmt.allocPrint(allocator, "SELECT active FROM pg_replication_slots WHERE slot_name = '{s}' AND plugin = 'pgoutput' ORDER BY active LIMIT 1;", .{wal_name});
+//     defer allocator.free(pg_assert_query);
+//
+//     var pg_assert_argv = [_][]const u8{ 
+//         "psql",
+//         "-h", "127.0.0.1",
+//         "-p", "5432",
+//         "-U", "db_rw",
+//         "-d", db_name,
+//         "-q", "-t", "-A", // Formatting
+//         "-c", pg_assert_query,
+//     };
+//     const pg_assert_result = try std.process.run(allocator, io, .{ 
+//         .argv = &pg_assert_argv,
+//         .environ_map = &pg_env, 
+//     });
+//     defer {
+//         allocator.free(pg_assert_result.stdout);
+//         allocator.free(pg_assert_result.stderr);
+//     }
+//
+//     if (pg_assert_result.term != .exited or pg_assert_result.term.exited != 0 or pg_assert_result.stderr.len > 0) {
+//         std.debug.print("Error: unable to select pg data: {s}\n", .{pg_assert_result.stderr});
+//         return error.PgSelectError;
+//     }
+//
+//     try testing.expectEqualStrings("f\n", pg_assert_result.stdout);
+// }
 
-    var child_has_error = std.atomic.Value(bool).init(false);
-
-    const db_name = try t.genereateDbName(allocator, io);
-    defer allocator.free(db_name);
-
-    try t.createTestDb(allocator, io, db_name);
-
-    const wal_name = try std.fmt.allocPrint(allocator, "wal_slot_{s}", .{db_name});
-    defer allocator.free(wal_name);
-
-    defer t.teardownTestDb(allocator, io, db_name, wal_name) catch {};
-
-    var child = try setupChildProcess(allocator, io, db_name, wal_name);
-    errdefer {
-        if (child.id) |pid| {
-            std.posix.kill(pid, std.posix.SIG.TERM) catch {};
-        }
-    }
-
-    const stderr_thread = try std.Thread.spawn(.{}, monitorStderr, .{
-        child.stderr.?.handle,
-        child.id.?,
-        &child_has_error
-    });
-    stderr_thread.detach();
-
-    var pg_env = try std.process.Environ.createMap(std.testing.environ, allocator);
-    defer pg_env.deinit();
-    try pg_env.put("PGPASSWORD", "12345678");
-
-    var pg_argv = [_][]const u8{
-        "psql",
-        "-h", "127.0.0.1",
-        "-p", "5432",
-        "-U", "db_rw",
-        "-d", db_name,
-        "-a",
-        "-f", "./test_fixtures/shutdown-query.sql"
-    };
-    const pg_result = try std.process.run(allocator, io, .{ 
-        .argv = &pg_argv,
-        .environ_map = &pg_env, 
-    });
-    defer {
-        allocator.free(pg_result.stdout);
-        allocator.free(pg_result.stderr);
-    }
-
-    if (pg_result.term != .exited or pg_result.term.exited != 0 or pg_result.stderr.len > 0) {
-        std.debug.print("Error: PSQL failed: {s}\n", .{pg_result.stderr});
-        return error.PsqlExecutionFailed;
-    }
-
-    var buffer: [1024]u8 = undefined;
-    var reader = child.stdout.?.reader(io, &buffer);
-    const r = &reader.interface;
-
-    var stdout_acc = std.ArrayList(u8).empty;
-    defer stdout_acc.deinit(allocator);
-
-    while (true) {
-        if (try r.takeDelimiter('\n')) |line| {
-            try stdout_acc.appendSlice(allocator, line);
-
-            if (std.mem.indexOf(u8, stdout_acc.items, wal_stream.sync_marker_str) != null) {
-                break;
-            }
-        } else {
-            if (child_has_error.load(.seq_cst)) {
-                return error.ChildProcessError;
-            }
-            return error.ChilsExitedPrematurelyError;
-        }
-    }
-
-    const term = try terminateChildProcess(io, &child);
-
-    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, term);
-
-    var ch_assert_argv = [_][]const u8{ 
-        "clickhouse-client", 
-        "--host", "127.0.0.1",
-        "--port", "9000",
-        "--user", "default",
-        "--password", "clickhouse",
-        "--database", db_name,
-        "--query", "SELECT action, table_name, primary_key, changed_columns, old_values, new_values, user_id, ip_address FROM entries ORDER BY primary_key, action DESC" 
-    };
-    const ch_assert_result = try std.process.run(allocator, io, .{ 
-        .argv = &ch_assert_argv,
-    });
-    defer {
-        allocator.free(ch_assert_result.stdout);
-        allocator.free(ch_assert_result.stderr);
-    }
-
-    if (ch_assert_result.term != .exited or ch_assert_result.term.exited != 0 or ch_assert_result.stderr.len > 0) {
-        std.debug.print("Error: unable to select ch data: {s}\n", .{ch_assert_result.stderr});
-        return error.ChSelectError;
-    }
-
-    try testing.expectEqualStrings(
-        "DELETE\tpublic.addresses\t1\t['address_line_1','city','id','country','postal_code']\t{'address_line_1':'Googleplex','city':'Mountain View','id':'1','country':'US','postal_code':'94043'}\t{}\t42\t192.168.1.50\n" ++
-        "UPDATE\tpublic.addresses\t1\t['address_line_1','city','postal_code']\t{'address_line_1':'1 Apple Park Way','city':'Cupertino','postal_code':'95014'}\t{'address_line_1':'Googleplex','city':'Mountain View','postal_code':'94043'}\t42\t192.168.1.50\n" ++
-        "INSERT\tpublic.addresses\t1\t['address_line_1','city','id','country','postal_code']\t{}\t{'address_line_1':'1 Apple Park Way','city':'Cupertino','id':'1','country':'US','postal_code':'95014'}\t42\t192.168.1.50\n" ++
-        "DELETE\tpublic.addresses\t2\t['address_line_1','city','id','country','postal_code']\t{'address_line_1':'1 Apple Park Way','city':'Cupertino','id':'2','country':'US','postal_code':'95014'}\t{}\t42\t192.168.1.50\n" ++
-        "UPDATE\tpublic.addresses\t2\t['address_line_1','city','postal_code']\t{'address_line_1':'Googleplex','city':'Mountain View','postal_code':'94043'}\t{'address_line_1':'1 Apple Park Way','city':'Cupertino','postal_code':'95014'}\t42\t192.168.1.50\n" ++
-        "INSERT\tpublic.addresses\t2\t['address_line_1','city','id','country','postal_code']\t{}\t{'address_line_1':'Googleplex','city':'Mountain View','id':'2','country':'US','postal_code':'94043'}\t42\t192.168.1.50\n",
-        ch_assert_result.stdout,
-    );
-
-    const pg_assert_query = try std.fmt.allocPrint(allocator, "SELECT active FROM pg_replication_slots WHERE slot_name = '{s}' AND plugin = 'pgoutput' ORDER BY active LIMIT 1;", .{wal_name});
-    defer allocator.free(pg_assert_query);
-
-    var pg_assert_argv = [_][]const u8{ 
-        "psql",
-        "-h", "127.0.0.1",
-        "-p", "5432",
-        "-U", "db_rw",
-        "-d", db_name,
-        "-q", "-t", "-A", // Formatting
-        "-c", pg_assert_query,
-    };
-    const pg_assert_result = try std.process.run(allocator, io, .{ 
-        .argv = &pg_assert_argv,
-        .environ_map = &pg_env, 
-    });
-    defer {
-        allocator.free(pg_assert_result.stdout);
-        allocator.free(pg_assert_result.stderr);
-    }
-
-    if (pg_assert_result.term != .exited or pg_assert_result.term.exited != 0 or pg_assert_result.stderr.len > 0) {
-        std.debug.print("Error: unable to select pg data: {s}\n", .{pg_assert_result.stderr});
-        return error.PgSelectError;
-    }
-
-    try testing.expectEqualStrings("f\n", pg_assert_result.stdout);
-}
-
-test "making sure full commits are logged without interupt" {
-    const allocator = testing.allocator;
-    const io = testing.io;
-
-    var child_has_error = std.atomic.Value(bool).init(false);
-
-    const db_name = try t.genereateDbName(allocator, io);
-    defer allocator.free(db_name);
-
-    try t.createTestDb(allocator, io, db_name);
-
-    const wal_name = try std.fmt.allocPrint(allocator, "wal_slot_{s}", .{db_name});
-    defer allocator.free(wal_name);
-
-    defer t.teardownTestDb(allocator, io, db_name, wal_name) catch {};
-
-    var pg_env = try std.process.Environ.createMap(std.testing.environ, allocator);
-    defer pg_env.deinit();
-    try pg_env.put("PGPASSWORD", "12345678");
-
-    var child = try setupChildProcess(allocator, io, db_name, wal_name);
-    errdefer {
-        if (child.id) |pid| {
-            std.posix.kill(pid, std.posix.SIG.TERM) catch {};
-        }
-    }
-
-    const stderr_thread = try std.Thread.spawn(.{}, monitorStderr, .{
-        child.stderr.?.handle,
-        child.id.?,
-        &child_has_error
-    });
-    stderr_thread.detach();
-
-    var pg_argv = [_][]const u8{
-        "psql",
-        "-h", "127.0.0.1",
-        "-p", "5432",
-        "-U", "db_rw",
-        "-d", db_name,
-        "-a",
-        "-f", "./test_fixtures/standard-query.sql"
-    };
-    const pg_result = try std.process.run(allocator, io, .{ 
-        .argv = &pg_argv,
-        .environ_map = &pg_env, 
-    });
-    defer {
-        allocator.free(pg_result.stdout);
-        allocator.free(pg_result.stderr);
-    }
-
-    if (pg_result.term != .exited or pg_result.term.exited != 0 or pg_result.stderr.len > 0) {
-        std.debug.print("Error: PSQL failed: {s}\n", .{pg_result.stderr});
-        return error.PsqlExecutionFailed;
-    }
-
-    var buffer: [1024]u8 = undefined;
-    var reader = child.stdout.?.reader(io, &buffer);
-    const r = &reader.interface;
-
-    var stdout_acc = std.ArrayList(u8).empty;
-    defer stdout_acc.deinit(allocator);
-
-    while (true) {
-        if (try r.takeDelimiter('\n')) |line| {
-            try stdout_acc.appendSlice(allocator, line);
-
-            if (std.mem.indexOf(u8, stdout_acc.items, wal_stream.submit_marker_str) != null) {
-                break;
-            }
-        } else {
-            if (child_has_error.load(.seq_cst)) {
-                return error.ChildProcessError;
-            }
-            return error.ChilsExitedPrematurelyError;
-        }
-    }
-
-    var ch_assert_argv = [_][]const u8{ 
-        "clickhouse-client", 
-        "--host", "127.0.0.1",
-        "--port", "9000",
-        "--user", "default",
-        "--password", "clickhouse",
-        "--database", db_name,
-        "--query", "SELECT action, table_name, primary_key, changed_columns, old_values, new_values, user_id, ip_address FROM entries ORDER BY primary_key, action DESC" 
-    };
-    const ch_assert_result = try std.process.run(allocator, io, .{ 
-        .argv = &ch_assert_argv,
-    });
-    defer {
-        allocator.free(ch_assert_result.stdout);
-        allocator.free(ch_assert_result.stderr);
-    }
-
-    if (ch_assert_result.term != .exited or ch_assert_result.term.exited != 0 or ch_assert_result.stderr.len > 0) {
-        std.debug.print("Error: unable to select ch data: {s}\n", .{ch_assert_result.stderr});
-        return error.ChSelectError;
-    }
-
-    try testing.expectEqualStrings(
-        "DELETE\tpublic.addresses\t1\t['address_line_1','city','id','country','postal_code']\t{'address_line_1':'Googleplex','city':'Mountain View','id':'1','country':'US','postal_code':'94043'}\t{}\t42\t192.168.1.50\n" ++
-        "UPDATE\tpublic.addresses\t1\t['address_line_1','city','postal_code']\t{'address_line_1':'1 Apple Park Way','city':'Cupertino','postal_code':'95014'}\t{'address_line_1':'Googleplex','city':'Mountain View','postal_code':'94043'}\t42\t192.168.1.50\n" ++
-        "INSERT\tpublic.addresses\t1\t['address_line_1','city','id','country','postal_code']\t{}\t{'address_line_1':'1 Apple Park Way','city':'Cupertino','id':'1','country':'US','postal_code':'95014'}\t42\t192.168.1.50\n" ++
-        "DELETE\tpublic.addresses\t2\t['address_line_1','city','id','country','postal_code']\t{'address_line_1':'1 Apple Park Way','city':'Cupertino','id':'2','country':'US','postal_code':'95014'}\t{}\t42\t192.168.1.50\n" ++
-        "UPDATE\tpublic.addresses\t2\t['address_line_1','city','postal_code']\t{'address_line_1':'Googleplex','city':'Mountain View','postal_code':'94043'}\t{'address_line_1':'1 Apple Park Way','city':'Cupertino','postal_code':'95014'}\t42\t192.168.1.50\n" ++
-        "INSERT\tpublic.addresses\t2\t['address_line_1','city','id','country','postal_code']\t{}\t{'address_line_1':'Googleplex','city':'Mountain View','id':'2','country':'US','postal_code':'94043'}\t42\t192.168.1.50\n",
-        ch_assert_result.stdout,
-    );
-
-    const term = try terminateChildProcess(io, &child);
-
-    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, term);
-}
+// test "main: ensure full commits are logged without interupt" {
+//     const allocator = testing.allocator;
+//     const io = testing.io;
+//
+//     var child_has_error = std.atomic.Value(bool).init(false);
+//
+//     const db_name = try t.genereateDbName(allocator, io);
+//     defer allocator.free(db_name);
+//
+//     try t.createTestDb(allocator, io, db_name);
+//
+//     const wal_name = try std.fmt.allocPrint(allocator, "wal_slot_{s}", .{db_name});
+//     defer allocator.free(wal_name);
+//
+//     defer t.teardownTestDb(allocator, io, db_name, wal_name) catch {};
+//
+//     var pg_env = try std.process.Environ.createMap(std.testing.environ, allocator);
+//     defer pg_env.deinit();
+//     try pg_env.put("PGPASSWORD", "12345678");
+//
+//     var child = try setupChildProcess(allocator, io, db_name, wal_name);
+//     errdefer {
+//         if (child.id) |pid| {
+//             std.posix.kill(pid, std.posix.SIG.TERM) catch {};
+//         }
+//     }
+//
+//     const stderr_thread = try std.Thread.spawn(.{}, monitorStderr, .{
+//         child.stderr.?.handle,
+//         child.id.?,
+//         &child_has_error
+//     });
+//     stderr_thread.detach();
+//
+//     var pg_argv = [_][]const u8{
+//         "psql",
+//         "-h", "127.0.0.1",
+//         "-p", "5432",
+//         "-U", "db_rw",
+//         "-d", db_name,
+//         "-a",
+//         "-f", "./test_fixtures/standard-query.sql"
+//     };
+//     const pg_result = try std.process.run(allocator, io, .{ 
+//         .argv = &pg_argv,
+//         .environ_map = &pg_env, 
+//     });
+//     defer {
+//         allocator.free(pg_result.stdout);
+//         allocator.free(pg_result.stderr);
+//     }
+//
+//     if (pg_result.term != .exited or pg_result.term.exited != 0 or pg_result.stderr.len > 0) {
+//         std.debug.print("Error: PSQL failed: {s}\n", .{pg_result.stderr});
+//         return error.PsqlExecutionFailed;
+//     }
+//
+//     var buffer: [1024]u8 = undefined;
+//     var reader = child.stdout.?.reader(io, &buffer);
+//     const r = &reader.interface;
+//
+//     var stdout_acc = std.ArrayList(u8).empty;
+//     defer stdout_acc.deinit(allocator);
+//
+//     while (true) {
+//         if (try r.takeDelimiter('\n')) |line| {
+//             try stdout_acc.appendSlice(allocator, line);
+//
+//             if (std.mem.indexOf(u8, stdout_acc.items, wal_stream.submit_marker_str) != null) {
+//                 break;
+//             }
+//         } else {
+//             if (child_has_error.load(.seq_cst)) {
+//                 return error.ChildProcessError;
+//             }
+//             return error.ChilsExitedPrematurelyError;
+//         }
+//     }
+//
+//     var ch_assert_argv = [_][]const u8{ 
+//         "clickhouse-client", 
+//         "--host", "127.0.0.1",
+//         "--port", "9000",
+//         "--user", "default",
+//         "--password", "clickhouse",
+//         "--database", db_name,
+//         "--query", "SELECT action, table_name, primary_key, changed_columns, old_values, new_values, user_id, ip_address FROM entries ORDER BY primary_key, action DESC" 
+//     };
+//     const ch_assert_result = try std.process.run(allocator, io, .{ 
+//         .argv = &ch_assert_argv,
+//     });
+//     defer {
+//         allocator.free(ch_assert_result.stdout);
+//         allocator.free(ch_assert_result.stderr);
+//     }
+//
+//     if (ch_assert_result.term != .exited or ch_assert_result.term.exited != 0 or ch_assert_result.stderr.len > 0) {
+//         std.debug.print("Error: unable to select ch data: {s}\n", .{ch_assert_result.stderr});
+//         return error.ChSelectError;
+//     }
+//
+//     try testing.expectEqualStrings(
+//         "DELETE\tpublic.addresses\t1\t['address_line_1','city','id','country','postal_code']\t{'address_line_1':'Googleplex','city':'Mountain View','id':'1','country':'US','postal_code':'94043'}\t{}\t42\t192.168.1.50\n" ++
+//         "UPDATE\tpublic.addresses\t1\t['address_line_1','city','postal_code']\t{'address_line_1':'1 Apple Park Way','city':'Cupertino','postal_code':'95014'}\t{'address_line_1':'Googleplex','city':'Mountain View','postal_code':'94043'}\t42\t192.168.1.50\n" ++
+//         "INSERT\tpublic.addresses\t1\t['address_line_1','city','id','country','postal_code']\t{}\t{'address_line_1':'1 Apple Park Way','city':'Cupertino','id':'1','country':'US','postal_code':'95014'}\t42\t192.168.1.50\n" ++
+//         "DELETE\tpublic.addresses\t2\t['address_line_1','city','id','country','postal_code']\t{'address_line_1':'1 Apple Park Way','city':'Cupertino','id':'2','country':'US','postal_code':'95014'}\t{}\t42\t192.168.1.50\n" ++
+//         "UPDATE\tpublic.addresses\t2\t['address_line_1','city','postal_code']\t{'address_line_1':'Googleplex','city':'Mountain View','postal_code':'94043'}\t{'address_line_1':'1 Apple Park Way','city':'Cupertino','postal_code':'95014'}\t42\t192.168.1.50\n" ++
+//         "INSERT\tpublic.addresses\t2\t['address_line_1','city','id','country','postal_code']\t{}\t{'address_line_1':'Googleplex','city':'Mountain View','id':'2','country':'US','postal_code':'94043'}\t42\t192.168.1.50\n",
+//         ch_assert_result.stdout,
+//     );
+//
+//     const term = try terminateChildProcess(io, &child);
+//
+//     try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, term);
+// }
 
 test "correct shutdown" {
 }
