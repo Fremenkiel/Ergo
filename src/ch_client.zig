@@ -441,6 +441,7 @@ pub const ChClient = struct {
     }
 
     pub fn insertRow(self: *@This(), bulk: *ch.BulkInsert, row: types.AuditEntry, insert_values: InsertValues) !void {
+
         const values = [_]ch.bulk_insert.Value{
             .{ .DateTime64 = row.event_time },
             .{ .UInt64 = row.transaction_id },

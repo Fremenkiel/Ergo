@@ -29,7 +29,7 @@ const Options = struct {
 
     pg_host: []const u8 = "localhost",
     pg_port: u16 = 5432,
-    pg_user: []const u8 = "db_rp",
+    pg_user: []const u8 = "db_rw",
     pg_pass: []const u8 = "12345678",
     pg_db: []const u8 = "db",
     pg_wal: []const u8 = "wal_slot",
@@ -50,7 +50,7 @@ const Options = struct {
             .ch_db = try allocator.dupe(u8, environ_map.get("CH_DB") orelse "audit_log"),
 
             .pg_host = try allocator.dupe(u8, environ_map.get("PG_HOST") orelse "localhost"),
-            .pg_user = try allocator.dupe(u8, environ_map.get("PG_USER") orelse "db_rp"),
+            .pg_user = try allocator.dupe(u8, environ_map.get("PG_USER") orelse "db_rw"),
             .pg_pass = try allocator.dupe(u8, environ_map.get("PG_PASS") orelse "12345678"),
             .pg_db = try allocator.dupe(u8, environ_map.get("PG_DB") orelse "db"),
             .pg_wal = try allocator.dupe(u8, environ_map.get("PG_WAL") orelse "wal_slot"),
@@ -117,9 +117,6 @@ pub fn main(init: std.process.Init) !void {
     try Io.File.stdout().writeStreamingAll(io, ready_str);
     try Io.File.stdout().writeStreamingAll(io, "\n");
 
-    var startup_parameters: std.StringHashMap([]const u8) = .init(allocator); 
-    defer startup_parameters.deinit();
-
     var ch_client = ChClient.init(allocator, io, .{
         .host = options.ch_host,
         .port = options.ch_port,
@@ -142,7 +139,7 @@ pub fn main(init: std.process.Init) !void {
         .database = options.pg_db,
         .application_name = application_name,
         .timeout_ms = 10_000,
-        .startup_parameters = startup_parameters
+        .startup_parameters = null
     });
     defer pg_client.deinit();
     defer pg_client.cancel();

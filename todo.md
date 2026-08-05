@@ -23,4 +23,4 @@ Cache table schema and figure out a indicator of the schema having changed, to c
 simulated time on all wal stream to speed up timeout
 Remove unmanaged hash map
 Change PK to take all coumns and save Map(String, String)
-Nullable old_value and new_value
+Startup params based on env

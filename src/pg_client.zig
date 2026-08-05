@@ -16,6 +16,7 @@ DefaultConnectionNotInitialized,
 UnableToSendCopyDone,
 InvalidReadyForQueryMessage,
 InvalidCopyDoneMessage,
+InvalidMessage,
 TransactionErrorState,
 TransactionStateUnknown,
 WalConnectionUnableToStop,
@@ -89,8 +90,7 @@ pub const PgClient = struct {
     allocator: mem.Allocator,
     io: Io,
 
-    default_opts: pg.PgConfig,
-    wal_opts: pg.PgConfig,
+    opts: pg.PgConfig,
 
     last_lsn: u64,
     last_timestamp: i64,
@@ -98,36 +98,16 @@ pub const PgClient = struct {
     context: TransactionContext,
     table_reg: std.hash_map.HashMap(u32, TableDef, std.hash_map.AutoContext(u32), 80),
 
-    default_conn: ?*pg.Conn,
-    wal_conn: ?*pg.Conn,
+    conn: ?*pg.Conn,
 
     pub fn init(allocator: mem.Allocator, io: Io, opts: pg.PgConfig) !PgClient{
-        var wal_opts = opts;
-
-        wal_opts.startup_parameters = .init(allocator);
-        try wal_opts.startup_parameters.ensureUnusedCapacity(opts.startup_parameters.count() + 1);
-
-        var it = opts.startup_parameters.iterator();
-        while (it.next()) |entry| {
-            wal_opts.startup_parameters.putAssumeCapacity(try allocator.dupe(u8, entry.key_ptr.*), try allocator.dupe(u8, entry.value_ptr.*));
-        }
-
-        wal_opts.startup_parameters.putAssumeCapacity("replication", "database");
-
-        var default_conn = try createConn(allocator, io, opts);
-        errdefer default_conn.deinit();
-
-        var wal_conn = try createConn(allocator, io, wal_opts);
-        errdefer wal_conn.deinit();
-
-        var columns: std.ArrayList(types.ChangedColumn) = .empty;
-        try columns.ensureUnusedCapacity(allocator, 16);
+        var conn = try createConn(allocator, io, opts);
+        errdefer conn.deinit();
 
         return .{
             .allocator = allocator,
             .io = io,
-            .default_opts = opts,
-            .wal_opts = wal_opts,
+            .opts = opts,
             .last_lsn = 0,
             .last_timestamp = 0,
             .context = .{
@@ -137,20 +117,14 @@ pub const PgClient = struct {
                 .primary_key = "",
             },
             .table_reg = std.AutoHashMap(u32, TableDef).init(allocator),
-            .wal_conn = wal_conn,
-            .default_conn = default_conn,
+            .conn = conn,
         };
     }
 
     pub fn deinit(self: *@This()) void {
-        if (self.wal_conn) |wal_conn| {
-            wal_conn.deinit();
-            self.allocator.destroy(wal_conn);
-        }
-
-        if (self.default_conn) |default_conn| {
-            default_conn.deinit();
-            self.allocator.destroy(default_conn);
+        if (self.conn) |conn| {
+            conn.deinit();
+            self.allocator.destroy(conn);
         }
 
         var it = self.table_reg.valueIterator();
@@ -166,13 +140,12 @@ pub const PgClient = struct {
         self.table_reg.deinit();
         self.context.deinit(self.allocator);
 
-        self.wal_opts.startup_parameters.clearAndFree();
-        self.wal_opts.startup_parameters.deinit();
+        // self.opts.startup_parameters.clearAndFree();
+        // self.opts.startup_parameters.deinit();
     }
 
     pub fn cancel(self: *@This()) void {
-        if (self.wal_conn) |conn| conn.cancel();
-        if (self.default_conn) |conn| conn.cancel();
+        if (self.conn) |conn| conn.cancel();
     }
 
     fn resetContext(self: *@This()) void {
@@ -189,55 +162,53 @@ pub const PgClient = struct {
     }
 
     pub fn startWALReader(self: *@This(), timeout_ms: i32) !void {
-        if (self.default_conn == null) return PgClientError.DefaultConnectionNotInitialized;
-        if (self.wal_conn == null) return PgClientError.WalConnectionNotInitialized;
+        if (self.conn == null) return PgClientError.WalConnectionNotInitialized;
 
-        const query = try std.fmt.allocPrint(self.allocator, "START_REPLICATION SLOT {s} LOGICAL 0/0 (proto_version '1', publication_names 'db_pub', messages 'true');", .{self.wal_opts.wal});
+        const query = try std.fmt.allocPrint(self.allocator, "START_REPLICATION SLOT {s} LOGICAL 0/0 (proto_version '1', publication_names 'db_pub', messages 'true');", .{self.opts.wal});
         defer self.allocator.free(query);
 
         const msg_len: u32 = @as(u32, @intCast(query.len)) + 4 + 1;
         var len_buf: [4]u8 = undefined;
         mem.writeInt(u32, &len_buf, msg_len, .big);
 
-        if (self.wal_conn) |wal_conn| {
-            try wal_conn.write("Q");
-            try wal_conn.write(&len_buf);
-            try wal_conn.write(query);
-            try wal_conn.write(&[_]u8{0});
+        if (self.conn) |conn| {
+            try conn.write("Q");
+            try conn.write(&len_buf);
+            try conn.write(query);
+            try conn.write(&[_]u8{0});
+
+            try conn.reader.startFlow(timeout_ms);
         } else {
             return PgClientError.WalConnectionNotInitialized;
         }
-
-        try self.wal_conn.?.reader.startFlow(timeout_ms);
     }
 
     pub fn endWALReader(self: *@This()) !void {
-        if (self.default_conn == null) return PgClientError.DefaultConnectionNotInitialized;
-        if (self.wal_conn == null) return PgClientError.WalConnectionNotInitialized;
+        if (self.conn == null) return PgClientError.WalConnectionNotInitialized;
 
-        const query = try std.fmt.allocPrint(self.allocator, "DROP_REPLICATION SLOT {s};", .{self.wal_opts.wal});
+        const query = try std.fmt.allocPrint(self.allocator, "DROP_REPLICATION SLOT {s};", .{self.opts.wal});
         defer self.allocator.free(query);
 
         const msg_len: u32 = @as(u32, @intCast(query.len)) + 4 + 1;
         var len_buf: [4]u8 = undefined;
         mem.writeInt(u32, &len_buf, msg_len, .big);
 
-        if (self.wal_conn) |wal_conn| {
-            try wal_conn.write("Q");
-            try wal_conn.write(&len_buf);
-            try wal_conn.write(query);
-            try wal_conn.write(&[_]u8{0});
+        if (self.conn) |conn| {
+            try conn.write("Q");
+            try conn.write(&len_buf);
+            try conn.write(query);
+            try conn.write(&[_]u8{0});
+
+            try conn.reader.endFlow();
         } else {
             return PgClientError.WalConnectionUnableToStop;
         }
-
-        try self.wal_conn.?.reader.endFlow();
     }
 
     pub fn readWAL(self: *@This()) !?ReadResponse {
-        if (self.wal_conn == null) return PgClientError.WalConnectionNotInitialized;
+        if (self.conn == null) return PgClientError.WalConnectionNotInitialized;
 
-        const msg = try self.wal_conn.?.reader.next();
+        const msg = try self.conn.?.reader.next();
 
         switch (msg.type) {
             'W' => {
@@ -285,7 +256,7 @@ pub const PgClient = struct {
                         }
 
                         // Proactively acknowledge this processed WAL chunk
-                        try self.wal_conn.?.sendStandbyStatusUpdate(self.last_lsn, self.last_timestamp);
+                        try self.conn.?.sendStandbyStatusUpdate(self.last_lsn, self.last_timestamp);
                     },
                     'k' => {
                         response.message = pg.packet.ServerPacket.Keepalive;
@@ -304,7 +275,7 @@ pub const PgClient = struct {
                         }
 
                         if (reply_requested == 1) {
-                            try self.wal_conn.?.sendStandbyStatusUpdate(self.last_lsn, self.last_timestamp);
+                            try self.conn.?.sendStandbyStatusUpdate(self.last_lsn, self.last_timestamp);
                         }
                     },
                     else => {}
@@ -361,11 +332,11 @@ pub const PgClient = struct {
     }
 
     pub fn sendCopyDone(self: *@This()) !void {
-        if (self.wal_conn == null) {
+        if (self.conn == null) {
             return PgClientError.UnableToSendCopyDone;
         }
 
-        try pg.protocol.CopyDone.write(&self.wal_conn.?.stream);
+        try pg.protocol.CopyDone.write(&self.conn.?.stream);
     }
 
     pub fn parsePgOutput(self: *@This(), payload: []const u8) !ParseResponse {
@@ -405,18 +376,20 @@ pub const PgClient = struct {
                 // Relation: send before any insert or update
                 const rel_id = try reader.takeInt(u32, .big);
 
-                const namespace = try self.allocator.dupe(u8, try reader.takeDelimiterExclusive(0));
-                _ = try reader.takeByte();
+                const namespace = try reader.takeDelimiter(0);
+                if (namespace == null) {
+                    return PgClientError.InvalidMessage;
+                }
 
-                const rel_name = try self.allocator.dupe(u8, try reader.takeDelimiterExclusive(0));
-                _ = try reader.takeByte();
+                const rel_name = try reader.takeDelimiter(0);
+                if (rel_name == null) {
+                    return PgClientError.InvalidMessage;
+                }
 
                 const repl_ident = try reader.takeByte();
                 _ = repl_ident;
 
                 const num_columns = try reader.takeInt(u16, .big);
-                const table_name = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{namespace, rel_name});
-                defer self.allocator.free(table_name);
 
                 // const columns = try self.readSchemaKeys(table_name);
                 var columns = std.ArrayList(ColumnDef).empty;
@@ -426,8 +399,10 @@ pub const PgClient = struct {
                     const flag = try reader.takeByte();
 
                     // col name
-                    const column_name = try reader.takeDelimiterExclusive(0);
-                    _ = try reader.takeByte();
+                    const column_name = try reader.takeDelimiter(0);
+                    if (column_name == null) {
+                        return PgClientError.InvalidMessage;
+                    }
 
                     // type_id
                     _ = try reader.takeInt(u32, .big);
@@ -435,12 +410,12 @@ pub const PgClient = struct {
                     // typemod
                     _ = try reader.takeInt(u32, .big);
 
-                    try columns.append(self.allocator, .{ .name = try self.allocator.dupe(u8, column_name), .is_key = flag == 1 });
+                    try columns.append(self.allocator, .{ .name = try self.allocator.dupe(u8, column_name.?), .is_key = flag == 1 });
                 }
 
                 try self.table_reg.put(rel_id, .{
-                    .namespace = namespace,
-                    .name = rel_name,
+                    .namespace = try self.allocator.dupe(u8, namespace.?),
+                    .name = try self.allocator.dupe(u8, rel_name.?),
                     .columns = columns,
                 });
 
@@ -527,8 +502,10 @@ pub const PgClient = struct {
                 const flags = try reader.takeByte();
                 const lsn = try reader.takeInt(u64, .big);
 
-                const prefix = try reader.takeDelimiterExclusive(0);
-                _ = try reader.takeByte();
+                const prefix = try reader.takeDelimiter(0);
+                if (prefix == null) {
+                    return PgClientError.InvalidMessage;
+                }
 
                 const content_len = try reader.takeInt(u32, .big);
 
@@ -536,7 +513,7 @@ pub const PgClient = struct {
 
                 _ = flags;
                 _ = lsn;
-                if (mem.eql(u8, prefix, "ergo_meta")) {
+                if (mem.eql(u8, prefix.?, "ergo_meta")) {
                     var it = mem.splitAny(u8, content, ",");
 
                     const user_id_str = it.next() orelse return error.InvalidMapType;
@@ -572,6 +549,19 @@ pub const PgClient = struct {
                     self.context.user_id = try self.allocator.dupe(u8, user_id_value);
                     self.context.ip_address = try self.allocator.dupe(u8, ip_address_value);
                 }
+            },
+            'Y' => {
+                // XID
+                _ = try reader.takeInt(i32, .big);
+
+                // OID
+                _ = try reader.takeInt(i32, .big);
+                
+                // namespace
+                _ = try reader.takeDelimiter(0);
+                
+                // data type name
+                _ = try reader.takeDelimiter(0);
             },
             else => {
                 std.debug.print("Unknown pgoutput message type: {c}\n", .{msg_type});
@@ -633,35 +623,6 @@ pub const PgClient = struct {
 
         return columns;
     }
-
-    // fn readSchemaKeys(self: *@This(), table_name: []const u8) !std.ArrayList(ColumnDef) {
-    //     if (self.default_conn == null) return PgClientError.DefaultConnectionNotInitialized;
-    //
-    //     const query = try std.fmt.allocPrint(self.allocator,
-    //     \\ SELECT
-    //     \\   a.attname AS column_name,
-    //     \\   COALESCE((SELECT string_agg(c.contype::text, '') FROM pg_constraint c WHERE a.attnum = ANY(c.conkey) AND c.conrelid = a.attrelid), '') AS constraint_types
-    //     \\ FROM pg_attribute a
-    //     \\ WHERE a.attrelid = '{s}'::regclass AND a.attnum > 0 AND NOT a.attisdropped
-    //     \\ ORDER BY a.attnum;
-    //     , .{ table_name });
-    //     defer self.allocator.free(query);
-    //
-    //     var result = try self.default_conn.?.query(query, .{ .column_names = true });
-    //     defer result.deinit(self.allocator);
-    //
-    //     var columns = std.ArrayList(ColumnDef).empty;
-    //     const column_name_index = result.columnIndex("column_name").?;
-    //     const constraint_types_index = result.columnIndex("constraint_types").?;
-    //     while (try result.next()) |row| {
-    //         const column_name_raw = try row.get(column_name_index);
-    //         const column_name = try self.allocator.dupe(u8, column_name_raw);
-    //
-    //         const constraint_types = try row.get(constraint_types_index);
-    //         try columns.append(self.allocator, .{ .name = column_name, .is_key = mem.containsAtLeast(u8, constraint_types, 1, "p") });
-    //     }
-    //     return columns;
-    // }
 
     pub fn createConn(allocator: mem.Allocator, io:  Io, opts: pg.PgConfig) !*pg.Conn {
         var conn = try allocator.create(pg.Conn);
@@ -737,21 +698,13 @@ fn setupClient(allocator: mem.Allocator, io: Io) !PgClient {
     return .{
         .allocator = allocator,
         .io = io,
-        .default_opts = .{
+        .opts = .{
             .host = "localhost",
             .port = 5432,
             .database = "db",
             .username = "db_rw",
             .application_name = "Ergo test",
-            .startup_parameters = .init(allocator),
-        },
-        .wal_opts = .{
-            .host = "localhost",
-            .port = 5432,
-            .database = "db",
-            .username = "db_rw",
-            .application_name = "Ergo test",
-            .startup_parameters = .init(allocator),
+            .startup_parameters = null,
         },
         .last_lsn = 0,
         .last_timestamp = 0,
@@ -762,8 +715,7 @@ fn setupClient(allocator: mem.Allocator, io: Io) !PgClient {
             .primary_key = "",
         },
         .table_reg = table_reg,
-        .wal_conn = null,
-        .default_conn = null,
+        .conn = null,
     };
 }
 
@@ -825,14 +777,10 @@ test "parsePgOutput maps RELATION correctly" {
     const allocator = testing.allocator;
     const io = testing.io;
 
-    var startup_parameters: std.StringHashMap([]const u8) = .init(allocator); 
-    defer startup_parameters.deinit();
-
     var client = PgClient{
         .allocator = allocator,
         .io = io,
-        .default_opts = undefined,
-        .wal_opts = undefined,
+        .opts = undefined,
         .last_lsn = 0,
         .last_timestamp = 0,
         .context = .{
@@ -842,18 +790,7 @@ test "parsePgOutput maps RELATION correctly" {
             .primary_key = "",
         },
         .table_reg = .init(allocator),
-        .wal_conn = null,
-        .default_conn = try PgClient.createConn(allocator, io, .{
-            .port = 5432,
-            .host = "localhost",
-            .wal = "wal_slot",
-            .username = "db_rp",
-            .password = "12345678",
-            .database = "db",
-            .timeout_ms = 500,
-            .startup_parameters = startup_parameters,
-            .application_name = "Ergo test",
-        }),
+        .conn = null,
     };
     defer client.deinit();
 
@@ -1166,94 +1103,6 @@ test "parseTupleData: correct parsing of input" {
     try testing.expectEqualStrings("", client.context.ip_address);
     try testing.expectEqualStrings("", client.context.user_id);
 }
-
-// test "readSchemaKeys: ensure correct read" {
-//     const allocator = testing.allocator;
-//     const io = testing.io;
-//
-//     var startup_parameters: std.StringHashMap([]const u8) = .init(allocator); 
-//     defer startup_parameters.deinit();
-//
-//     var client = PgClient{
-//         .allocator = allocator,
-//         .io = undefined,
-//         .context = undefined,
-//         .default_opts = undefined,
-//         .wal_opts = undefined,
-//         .last_lsn = undefined,
-//         .last_timestamp = undefined,
-//         .default_conn = try PgClient.createConn(allocator, io, .{
-//             .port = 5432,
-//             .host = "localhost",
-//             .wal = "wal_slot",
-//             .username = "db_rp",
-//             .password = "12345678",
-//             .database = "db",
-//             .timeout_ms = 500,
-//             .startup_parameters = startup_parameters,
-//             .application_name = "Ergo test",
-//         }),
-//         .table_reg = undefined,
-//         .wal_conn = null,
-//     };
-//     defer client.deinit();
-//
-//     var columns = try client.readSchemaKeys("all_types");
-//     defer {
-//         for (columns.items) |col| {
-//             allocator.free(col.name);
-//         }
-//         columns.deinit(allocator);
-//     }
-//
-//     try testing.expectEqual(43, columns.items.len);
-//
-//     for (columns.items) |item| if (std.meta.stringToEnum(t.AllTypesColumn, item.name)) |field| switch (field) {
-//         .id => try testing.expectEqual(true, item.is_key),
-//         .col_int2 => try testing.expectEqual(false, item.is_key),
-//         .col_int2_arr => try testing.expectEqual(false, item.is_key),
-//         .col_int4 => try testing.expectEqual(false, item.is_key),
-//         .col_int4_arr => try testing.expectEqual(false, item.is_key),
-//         .col_int8 => try testing.expectEqual(false, item.is_key),
-//         .col_int8_arr => try testing.expectEqual(false, item.is_key),
-//         .col_float4 => try testing.expectEqual(false, item.is_key),
-//         .col_float4_arr => try testing.expectEqual(false, item.is_key),
-//         .col_float8 => try testing.expectEqual(false, item.is_key),
-//         .col_float8_arr => try testing.expectEqual(false, item.is_key),
-//         .col_bool => try testing.expectEqual(false, item.is_key),
-//         .col_bool_arr => try testing.expectEqual(false, item.is_key),
-//         .col_text => try testing.expectEqual(false, item.is_key),
-//         .col_text_arr => try testing.expectEqual(false, item.is_key),
-//         .col_bytea => try testing.expectEqual(false, item.is_key),
-//         .col_bytea_arr => try testing.expectEqual(false, item.is_key),
-//         .col_enum => try testing.expectEqual(false, item.is_key),
-//         .col_enum_arr => try testing.expectEqual(false, item.is_key),
-//         .col_uuid => try testing.expectEqual(false, item.is_key),
-//         .col_uuid_arr => try testing.expectEqual(false, item.is_key),
-//         .col_numeric => try testing.expectEqual(false, item.is_key),
-//         .col_numeric_arr => try testing.expectEqual(false, item.is_key),
-//         .col_timestamp => try testing.expectEqual(false, item.is_key),
-//         .col_timestamp_arr => try testing.expectEqual(false, item.is_key),
-//         .col_json => try testing.expectEqual(false, item.is_key),
-//         .col_json_arr => try testing.expectEqual(false, item.is_key),
-//         .col_jsonb => try testing.expectEqual(false, item.is_key),
-//         .col_jsonb_arr => try testing.expectEqual(false, item.is_key),
-//         .col_char => try testing.expectEqual(false, item.is_key),
-//         .col_char_arr => try testing.expectEqual(false, item.is_key),
-//         .col_charn => try testing.expectEqual(false, item.is_key),
-//         .col_charn_arr => try testing.expectEqual(false, item.is_key),
-//         .col_timestamptz => try testing.expectEqual(false, item.is_key),
-//         .col_timestamptz_arr => try testing.expectEqual(false, item.is_key),
-//         .col_cidr => try testing.expectEqual(false, item.is_key),
-//         .col_cidr_arr => try testing.expectEqual(false, item.is_key),
-//         .col_inet => try testing.expectEqual(false, item.is_key),
-//         .col_inet_arr => try testing.expectEqual(false, item.is_key),
-//         .col_macaddr => try testing.expectEqual(false, item.is_key),
-//         .col_macaddr_arr => try testing.expectEqual(false, item.is_key),
-//         .col_macaddr8 => try testing.expectEqual(false, item.is_key),
-//         .col_macaddr8_arr => try testing.expectEqual(false, item.is_key),
-//     };
-// }
 
 test "update from value to null" {
 }

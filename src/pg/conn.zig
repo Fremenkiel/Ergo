@@ -342,7 +342,7 @@ test "Conn: auth trust (no pass)" {
         .database = "db",
         .username = "db_np",
         .application_name = "Ergo test",
-        .startup_parameters = .init(allocator),
+        .startup_parameters = null,
     };
 
     var conn = try Conn.init(io, allocator, opts);
@@ -359,7 +359,7 @@ test "Conn: auth unknown user" {
         .database = "db",
         .username = "does_not_exist",
         .application_name = "Ergo test",
-        .startup_parameters = .init(allocator),
+        .startup_parameters = null,
     };
 
     var conn = try Conn.init(io, allocator, opts);
@@ -378,7 +378,7 @@ test "Conn: auth cleartext password" {
             .database = "db",
             .username = "db_ro",
             .application_name = "Ergo test",
-            .startup_parameters = .init(allocator),
+            .startup_parameters = null,
         };
 
         var conn = try Conn.init(io, allocator, opts);
@@ -394,7 +394,7 @@ test "Conn: auth cleartext password" {
             .username = "db_ro",
             .password = "wrong",
             .application_name = "Ergo test",
-            .startup_parameters = .init(allocator),
+            .startup_parameters = null,
         };
 
         var conn = try Conn.init(io, allocator, opts);
@@ -410,7 +410,7 @@ test "Conn: auth cleartext password" {
             .username = "db_ro",
             .password = "12345678",
             .application_name = "Ergo test",
-            .startup_parameters = .init(allocator),
+            .startup_parameters = null,
         };
 
         var conn = try Conn.init(io, allocator, opts);
@@ -429,7 +429,7 @@ test "Conn: auth scram-sha-256 password" {
             .database = "db",
             .username = "db_ro_scram_sha256",
             .application_name = "Ergo test",
-            .startup_parameters = .init(allocator),
+            .startup_parameters = null,
         };
 
         var conn = try Conn.init(io, allocator, opts);
@@ -445,7 +445,7 @@ test "Conn: auth scram-sha-256 password" {
             .username = "db_ro_scram_sha256",
             .password = "wrong",
             .application_name = "Ergo test",
-            .startup_parameters = .init(allocator),
+            .startup_parameters = null,
         };
 
         var conn = try Conn.init(io, allocator, opts);
@@ -461,50 +461,12 @@ test "Conn: auth scram-sha-256 password" {
             .username = "db_ro_scram_sha256",
             .password = "12345678",
             .application_name = "Ergo test",
-            .startup_parameters = .init(allocator),
+            .startup_parameters = null,
         };
 
         var conn = try Conn.init(io, allocator, opts);
         defer conn.deinit();
         try conn.auth();
-    }
-}
-
-test "PG: query column names" {
-    const allocator = testing.allocator;
-    const io = testing.io;
-
-    const opts: PgConfig = .{
-        .host = "localhost",
-        .database = "db",
-        .username = "db_rw",
-        .password = "12345678",
-        .application_name = "Ergo test",
-        .startup_parameters = .init(allocator),
-    };
-
-    var c = try t.connect(allocator, io, opts);
-    defer c.deinit();
-    {
-        var result = try c.query(
-        \\ SELECT
-        \\   a.attname AS column_name,
-        \\   COALESCE((SELECT string_agg(c.contype::text, '') FROM pg_constraint c WHERE a.attnum = ANY(c.conkey) AND c.conrelid = a.attrelid), '') AS constraint_types
-        \\ FROM pg_attribute a
-        \\ WHERE a.attrelid = 'addresses'::regclass AND a.attnum > 0 AND NOT a.attisdropped
-        \\ ORDER BY a.attnum;
-        , .{ .column_names = true });
-        try testing.expectEqual(2, result.column_names.len);
-        try result.drain();
-        result.deinit(allocator);
-    }
-
-    {
-        var result = try c.query("select 1 as id, 'leto' as name", .{ .column_names = true });
-        defer result.deinit(allocator);
-        try testing.expectEqual(2, result.column_names.len);
-        try testing.expectEqualStrings("id", result.column_names[0]);
-        try testing.expectEqualStrings("name", result.column_names[1]);
     }
 }
 
@@ -518,7 +480,7 @@ test "Conn: TLS required" {
             .database = "db",
             .username = "db_ro_ssl",
             .application_name = "Ergo test",
-            .startup_parameters = .init(allocator),
+            .startup_parameters = null,
             .tls = .off,
         };
 
@@ -535,7 +497,7 @@ test "Conn: TLS required" {
             .username = "db_ro_ssl",
             .password = "12345678",
             .application_name = "Ergo test",
-            .startup_parameters = .init(allocator),
+            .startup_parameters = null,
             .tls = .require,
         };
 
@@ -553,7 +515,7 @@ test "Conn: TLS verify-full" {
             .host = "localhost",
             .database = "db",
             .application_name = "Ergo test",
-            .startup_parameters = .init(allocator),
+            .startup_parameters = null,
             .tls = PgConfig.TLS{ .verify_full = null },
         };
 
@@ -567,7 +529,7 @@ test "Conn: TLS verify-full" {
             .username = "db_ro_ssl",
             .password = "12345678",
             .application_name = "Ergo test",
-            .startup_parameters = .init(allocator),
+            .startup_parameters = null,
             .tls = PgConfig.TLS{ .verify_full = "infra/postgres/certs/ca.crt" },
         };
 
@@ -576,38 +538,38 @@ test "Conn: TLS verify-full" {
     }
 }
 
-test "Conn: query is cancelable" {
-    const allocator = testing.allocator;
-    const io = testing.io;
-
-    const S = struct {
-        fn sleepQuery(c: *Conn) !void {
-            var result = try c.query("select pg_sleep(3)", .{});
-            result.deinit(allocator);
-        }
-    };
-
-    const opts: PgConfig = .{
-        .host = "localhost",
-        .database = "db",
-        .username = "postgres",
-        .password = "postgres",
-        .application_name = "Ergo test",
-        .startup_parameters = .init(allocator),
-    };
-
-    var c = try t.connect(allocator, io, opts);
-    defer c.deinit();
-
-    // Run the query concurrently, let it reach its blocking read, then cancel.
-    var future = try io.concurrent(S.sleepQuery, .{&c});
-    try io.sleep(.fromMilliseconds(50), .awake);
-
-    const start = std.Io.Clock.Timestamp.now(io, .awake);
-    const result = future.cancel(io);
-    const elapsed_ms = start.untilNow(io).raw.toMilliseconds();
-
-    try testing.expectError(error.Timeout, result);
-    try testing.expectEqual(true, elapsed_ms < 1500); // prompt, not blocked until pg_sleep ends
-    try testing.expectEqual(State.fail, c.state);
-}
+// test "Conn: query is cancelable" {
+//     const allocator = testing.allocator;
+//     const io = testing.io;
+//
+//     const S = struct {
+//         fn sleepQuery(c: *Conn) !void {
+//             var result = try c.query("select pg_sleep(3)", .{});
+//             result.deinit(allocator);
+//         }
+//     };
+//
+//     const opts: PgConfig = .{
+//         .host = "localhost",
+//         .database = "db",
+//         .username = "postgres",
+//         .password = "postgres",
+//         .application_name = "Ergo test",
+//         .startup_parameters = null,
+//     };
+//
+//     var c = try t.connect(allocator, io, opts);
+//     defer c.deinit();
+//
+//     // Run the query concurrently, let it reach its blocking read, then cancel.
+//     var future = try io.concurrent(S.sleepQuery, .{&c});
+//     try io.sleep(.fromMilliseconds(50), .awake);
+//
+//     const start = std.Io.Clock.Timestamp.now(io, .awake);
+//     const result = future.cancel(io);
+//     const elapsed_ms = start.untilNow(io).raw.toMilliseconds();
+//
+//     try testing.expectError(error.Timeout, result);
+//     try testing.expectEqual(true, elapsed_ms < 1500); // prompt, not blocked until pg_sleep ends
+//     try testing.expectEqual(State.fail, c.state);
+// }

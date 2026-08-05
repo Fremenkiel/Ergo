@@ -15,11 +15,6 @@ BEGIN
         CREATE ROLE db_ro LOGIN PASSWORD '12345678';
     END IF;
 
-    -- Read only / publication
-    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'db_rp') THEN
-        CREATE ROLE db_rp LOGIN PASSWORD '12345678';
-    END IF;
-
     -- No password
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'db_np') THEN
         CREATE ROLE db_np LOGIN;
@@ -128,32 +123,31 @@ ALTER TABLE simple_table REPLICA IDENTITY FULL;
 GRANT USAGE ON SCHEMA public TO db_rw;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO db_rw;
 GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO db_rw;
+ALTER ROLE db_rw REPLICATION;
 
 -- Readonly user
 GRANT USAGE ON SCHEMA public TO db_ro;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO db_ro;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO db_ro;
-
--- Replication user
-GRANT USAGE ON SCHEMA public TO db_rp;
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO db_rp;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO db_rp;
-ALTER ROLE db_rp REPLICATION;
+ALTER ROLE db_ro REPLICATION;
 
 -- Readonly no password user
 GRANT USAGE ON SCHEMA public TO db_np;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO db_np;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO db_np;
+ALTER ROLE db_np REPLICATION;
 
 -- Readonly scram sha256 user
 GRANT USAGE ON SCHEMA public TO db_ro_scram_sha256;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO db_ro_scram_sha256;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO db_ro_scram_sha256;
+ALTER ROLE db_ro_scram_sha256 REPLICATION;
 
 -- Readonly ssl
 GRANT USAGE ON SCHEMA public TO db_ro_ssl;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO db_ro_ssl;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO db_ro_ssl;
+ALTER ROLE db_ro_ssl REPLICATION;
 
 -- Default privileges for FUTURE objects created by db_migrator
 ALTER DEFAULT PRIVILEGES FOR ROLE db_migrator IN SCHEMA public
@@ -161,9 +155,6 @@ ALTER DEFAULT PRIVILEGES FOR ROLE db_migrator IN SCHEMA public
 
 ALTER DEFAULT PRIVILEGES FOR ROLE db_migrator IN SCHEMA public
     GRANT SELECT ON TABLES TO db_ro;
-
-ALTER DEFAULT PRIVILEGES FOR ROLE db_migrator IN SCHEMA public
-    GRANT SELECT ON TABLES TO db_rp;
 
 ALTER DEFAULT PRIVILEGES FOR ROLE db_migrator IN SCHEMA public
     GRANT SELECT ON TABLES TO db_np;
@@ -181,9 +172,6 @@ ALTER DEFAULT PRIVILEGES FOR ROLE db_migrator IN SCHEMA public
     GRANT USAGE, SELECT ON SEQUENCES TO db_ro;
 
 ALTER DEFAULT PRIVILEGES FOR ROLE db_migrator IN SCHEMA public
-    GRANT USAGE, SELECT ON SEQUENCES TO db_rp;
-
-ALTER DEFAULT PRIVILEGES FOR ROLE db_migrator IN SCHEMA public
     GRANT USAGE, SELECT ON SEQUENCES TO db_np;
 
 ALTER DEFAULT PRIVILEGES FOR ROLE db_migrator IN SCHEMA public
@@ -193,7 +181,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE db_migrator IN SCHEMA public
     GRANT USAGE, SELECT ON SEQUENCES TO db_ro_ssl;
 
 -- Allow connections
-GRANT CONNECT ON DATABASE db TO db_migrator, db_rw, db_ro, db_rp, db_np, db_ro_scram_sha256, db_ro_ssl;
+GRANT CONNECT ON DATABASE db TO db_migrator, db_rw, db_ro, db_np, db_ro_scram_sha256, db_ro_ssl;
 
 -- db publication
 CREATE PUBLICATION db_pub FOR ALL TABLES;

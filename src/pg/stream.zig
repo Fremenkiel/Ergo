@@ -283,7 +283,8 @@ test "cancel stream while read" {
         .host = "localhost",
         .database = "db",
         .application_name = "Ergo test",
-        .startup_parameters = .init(allocator) }, null);
+        .startup_parameters = null 
+    }, null);
     defer allocator.free(stream.buffer);
 
     const pipes = try Io.Threaded.pipe2(.{ .CLOEXEC = true });

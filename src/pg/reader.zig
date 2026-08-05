@@ -750,7 +750,7 @@ test "Reader: read with timeout" {
 
     const R = ReaderT(*stream.Stream);
 
-    var conn_stream = try stream.Stream.init(allocator, io, .{ .port = 5432, .host = "localhost", .database = "db", .application_name = "Ergo test", .startup_parameters = .init(allocator) }, null);
+    var conn_stream = try stream.Stream.init(allocator, io, .{ .port = 5432, .host = "localhost", .database = "db", .application_name = "Ergo test", .startup_parameters = null }, null);
     defer allocator.free(conn_stream.buffer);
 
     const pipes = try Io.Threaded.pipe2(.{ .CLOEXEC = true });

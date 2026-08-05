@@ -14,6 +14,9 @@ const Stream = @import("stream.zig").Stream;
 const user_key = "user";
 const database_key = "database";
 const application_name_key = "application_name";
+const replication_key = "replication";
+const replication_value = "database";
+
 
 // Custom assert to ensure correct error testing. 
 // Should be replaced with native zig handling if implemented.
@@ -33,11 +36,14 @@ pub fn StartupMessageT(comptime ProtocolStream: type) type {
             payload_len += user_key.len + opts.username.len + 2;
             payload_len += database_key.len + opts.database.len + 2;
             payload_len += application_name_key.len + opts.application_name.len + 2;
+            payload_len += replication_key.len + replication_value.len + 2;
 
-            var it = opts.startup_parameters.iterator();
-            while (it.next()) |kv| {
-                // +2 because both key and value are null-terminated
-                payload_len += kv.key_ptr.len + kv.value_ptr.len + 2;
+            if (opts.startup_parameters) |startup_parameters| {
+                var it = startup_parameters.iterator();
+                while (it.next()) |kv| {
+                    // +2 because both key and value are null-terminated
+                    payload_len += kv.key_ptr.len + kv.value_ptr.len + 2;
+                }
             }
 
             var buf: []u8 = undefined;
@@ -64,13 +70,21 @@ pub fn StartupMessageT(comptime ProtocolStream: type) type {
             try writer.writeAll(opts.application_name);
             try writer.writeByte(0);
 
-            it = opts.startup_parameters.iterator();
-            while (it.next()) |kv| {
-                try writer.writeAll(kv.key_ptr.*);
-                try writer.writeByte(0);
-                try writer.writeAll(kv.value_ptr.*);
-                try writer.writeByte(0);
+            if (opts.startup_parameters) |startup_parameters| {
+                var it = startup_parameters.iterator();
+                while (it.next()) |kv| {
+                    try writer.writeAll(kv.key_ptr.*);
+                    try writer.writeByte(0);
+                    try writer.writeAll(kv.value_ptr.*);
+                    try writer.writeByte(0);
+                }
             }
+
+            try writer.writeAll(replication_key);
+            try writer.writeByte(0);
+            try writer.writeAll(replication_value);
+            try writer.writeByte(0);
+
             try writer.writeByte(0);
 
             try stream.writeAll(buf);
@@ -354,7 +368,7 @@ test "StartupMessage: write" {
     defer mock_stream.deinit();
 
     const TestStartupMessage = StartupMessageT(t.Stream);
-    try TestStartupMessage.write(allocator, &mock_stream, .{ .username = "james", .database = "doe", .host = "localhost", .application_name = "Ergo test", .startup_parameters = .init(allocator) });
+    try TestStartupMessage.write(allocator, &mock_stream, .{ .username = "james", .database = "doe", .host = "localhost", .application_name = "Ergo test", .startup_parameters = null });
 
     var reader = Io.Reader.fixed(mock_stream.toString());
     const startup_protocol_length = try reader.takeInt(u32, .big);
@@ -365,8 +379,10 @@ test "StartupMessage: write" {
     const startup_database_value = try reader.takeDelimiter(0);
     const startup_application_name_key = try reader.takeDelimiter(0);
     const startup_application_name_value = try reader.takeDelimiter(0);
+    const replication_key_value = try reader.takeDelimiter(0);
+    const replication_value_value = try reader.takeDelimiter(0);
 
-    try testing.expectEqual(60, startup_protocol_length);
+    try testing.expectEqual(81, startup_protocol_length);
     try testing.expectEqual(196608, startup_protocol_version);
     try testing.expectEqualStrings(user_key, startup_user_key.?);
     try testing.expectEqualStrings("james", startup_user_value.?);
@@ -374,6 +390,8 @@ test "StartupMessage: write" {
     try testing.expectEqualStrings("doe", startup_database_value.?);
     try testing.expectEqualStrings(application_name_key, startup_application_name_key.?);
     try testing.expectEqualStrings("Ergo test", startup_application_name_value.?);
+    try testing.expectEqualStrings(replication_key, replication_key_value.?);
+    try testing.expectEqualStrings(replication_value, replication_value_value.?);
     try testing.expectEqualSlices(u8, &.{0}, try reader.take(1));
     try testing.expectError(error.EndOfStream, reader.take(1));
 }

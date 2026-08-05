@@ -21,7 +21,7 @@ pub const test_opts: PgConfig = .{
     .database = "db",
     .application_name = "Ergo",
     .timeout_ms = 10_000,
-    .startup_parameters = undefined,
+    .startup_parameters = null,
 };
 
 pub fn getRandom(io: Io) std.Random.DefaultPrng {

@@ -56,7 +56,7 @@ pub const AllTypesColumn = enum {
 pub const ChClient = struct {
     allocator: mem.Allocator,
     written_logs: std.ArrayList(types.AuditEntry) = .empty,
-    log_array: std.ArrayList(types.AuditEntry) = .empty,
+    // log_array: std.ArrayList(types.AuditEntry) = .empty,
 
     pub fn init(allocator: mem.Allocator) @This() {
         return .{.allocator = allocator};
@@ -65,8 +65,8 @@ pub const ChClient = struct {
     pub fn deinit(self: *@This()) void {
         for (self.written_logs.items) |*item| item.deinit(self.allocator);
         self.written_logs.deinit(self.allocator);
-        for (self.log_array.items) |*entry| entry.deinit(self.allocator);
-        self.log_array.deinit(self.allocator);
+        // for (self.log_array.items) |*entry| entry.deinit(self.allocator);
+        // self.log_array.deinit(self.allocator);
     }
 
     pub fn writeLog(self: *@This(), entries: []types.AuditEntry) !void {
@@ -78,7 +78,19 @@ pub const ChClient = struct {
             copy_slice[i].user_id = try self.allocator.dupe(u8, entry.user_id);
             copy_slice[i].ip_address = try self.allocator.dupe(u8, entry.ip_address);
 
-            copy_slice[i].columns = try entry.columns.clone(self.allocator);
+            // copy_slice[i].columns = try entry.columns.clone(self.allocator);
+            copy_slice[i].columns = .empty;
+            try copy_slice[i].columns.ensureUnusedCapacity(self.allocator, entry.columns.items.len);
+            
+            for (entry.columns.items) |col| {
+                copy_slice[i].columns.appendAssumeCapacity(.{
+                    .column_name = try self.allocator.dupe(u8, col.column_name),
+                    .has_changes = col.has_changes,
+                    .old_value = if (col.old_value) |old_value| try self.allocator.dupe(u8, old_value) else null,
+                    .new_value = if (col.new_value) |new_value| try self.allocator.dupe(u8, new_value) else null,
+                    .is_key = col.is_key,
+                });
+            }
         }
 
         try self.written_logs.appendSlice(self.allocator, copy_slice);
@@ -93,11 +105,9 @@ pub const PgClient = struct {
     responses: []pg_client.ReadResponse,
     read_response_index: ?u8,
 
-    default_opts: void,
-    wal_opts: void,
+    opts: void,
 
-    wal_conn: *bool,
-    default_conn: *bool,
+    conn: *bool,
 
     pub fn init(allocator: mem.Allocator, io: Io, responses: []pg_client.ReadResponse) !@This() {
         const conn = try allocator.create(bool);
@@ -107,28 +117,26 @@ pub const PgClient = struct {
             .io = io,
             .responses = responses,
             .read_response_index = null,
-            .default_opts = {},
-            .default_conn = undefined,
-            .wal_opts = {},
-            .wal_conn = conn,
+            .opts = {},
+            .conn = conn,
         };
     }
 
     pub fn cancel(self: *@This()) void {
-        self.wal_conn.* = false;
+        self.conn.* = false;
     }
 
     pub fn deinit(self: *@This()) void {
-        self.allocator.destroy(self.wal_conn);
+        self.allocator.destroy(self.conn);
     }
 
     pub fn startWALReader(self: *@This(), timeout_ms: i32) !void {
         _ = timeout_ms;
-        if (!self.wal_conn.*) return pg_client.PgClientError.WalConnectionNotInitialized;
+        if (!self.conn.*) return pg_client.PgClientError.WalConnectionNotInitialized;
     }
 
     pub fn endWALReader(self: *@This()) !void {
-        if (!self.wal_conn.*) return pg_client.PgClientError.WalConnectionNotInitialized;
+        if (!self.conn.*) return pg_client.PgClientError.WalConnectionNotInitialized;
     }
 
     pub fn sendCopyDone(self: *@This()) !void {

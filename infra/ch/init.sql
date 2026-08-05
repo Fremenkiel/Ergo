@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS entries
     action Enum8('INSERT' = 1, 'UPDATE' = 2, 'DELETE' = 3),
 
     table_name LowCardinality(String),
-    primary_key Map(String, String),
+    primary_keys Map(String, String),
 
     changed_columns Array(String),
     old_values Map(String, String),
@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS entries
 )
 ENGINE = MergeTree()
 -- TODO: This might need to be restructured based on read usage.
-ORDER BY (table_name, primary_key, event_time, user_id);
+ORDER BY (table_name, primary_keys, event_time, user_id);
 
 -- If a specific column ever needs to be read a lot for e.g. analytics, use cl materualized columns 
 -- ALTER TABLE erp_audit_log 

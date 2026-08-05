@@ -52,7 +52,7 @@ pub const PgConfig = struct {
     database: []const u8,
     timeout_ms: i32 = 500,
     application_name: []const u8,
-    startup_parameters: std.hash_map.StringHashMap([]const u8),
+    startup_parameters: ?std.hash_map.StringHashMap([]const u8),
 
     pub const TLS = union(enum) {
         off: void,

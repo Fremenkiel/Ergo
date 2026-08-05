@@ -46,28 +46,28 @@ pub const AuditEntry = struct {
     }
 };
 
-// test "AuditEntry ensure correct deinit" {
-//     const allocator = std.testing.allocator;
-//
-//     var columns: std.ArrayList(ChangedColumn) = .empty;
-//     try columns.ensureUnusedCapacity(allocator, 3);
-//
-//     for (columns.items) |*col| {
-//         col.column_name = try allocator.dupe(u8, "the_col_name");
-//         col.new_value = try allocator.dupe(u8, "old value");
-//         col.old_value = try allocator.dupe(u8, "new value"); 
-//         col.has_changes = true;
-//         col.is_key = false;
-//     }
-//
-//     var entry = AuditEntry{
-//         .event_time = 1244,
-//         .transaction_id = 10,
-//         .user_id = try allocator.dupe(u8, "43"),
-//         .table_name = try allocator.dupe(u8, "test"),
-//         .action = 1,
-//         .columns = columns,
-//         .ip_address = try allocator.dupe(u8, "192.168.1.50"),
-//     };
-//     entry.deinit(allocator);
-// }
+test "AuditEntry ensure correct deinit" {
+    const allocator = std.testing.allocator;
+
+    var columns: std.ArrayList(ChangedColumn) = .empty;
+    try columns.ensureUnusedCapacity(allocator, 3);
+
+    for (columns.items) |*col| {
+        col.column_name = try allocator.dupe(u8, "the_col_name");
+        col.new_value = try allocator.dupe(u8, "old value");
+        col.old_value = try allocator.dupe(u8, "new value"); 
+        col.has_changes = true;
+        col.is_key = false;
+    }
+
+    var entry = AuditEntry{
+        .event_time = 1244,
+        .transaction_id = 10,
+        .user_id = try allocator.dupe(u8, "43"),
+        .table_name = try allocator.dupe(u8, "test"),
+        .action = 1,
+        .columns = columns,
+        .ip_address = try allocator.dupe(u8, "192.168.1.50"),
+    };
+    entry.deinit(allocator);
+}
