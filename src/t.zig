@@ -5,7 +5,7 @@ const mem = std.mem;
 
 const pg = @import("pg");
 const pg_client = @import("pg_client.zig");
-const types = @import("types.zig");
+const types = @import("types");
 
 pub const AllTypesColumn = enum { 
     id,
@@ -130,13 +130,13 @@ pub const PgClient = struct {
         self.allocator.destroy(self.conn);
     }
 
-    pub fn startWALReader(self: *@This(), timeout_ms: i32) !void {
+    pub fn startFlow(self: *@This(), timeout_ms: i32) !void {
         _ = timeout_ms;
-        if (!self.conn.*) return pg_client.PgClientError.WalConnectionNotInitialized;
+        if (!self.conn.*) return pg.PgError.WalConnectionNotInitialized;
     }
 
-    pub fn endWALReader(self: *@This()) !void {
-        if (!self.conn.*) return pg_client.PgClientError.WalConnectionNotInitialized;
+    pub fn endFlow(self: *@This()) !void {
+        if (!self.conn.*) return pg.PgError.WalConnectionNotInitialized;
     }
 
     pub fn sendCopyDone(self: *@This()) !void {

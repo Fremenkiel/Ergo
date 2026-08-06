@@ -8,7 +8,7 @@ const assert = std.debug.assert;
 
 const pg = @import("pg");
 
-const types = @import("types.zig");
+const types = @import("types");
 const _pg_client = @import("pg_client.zig");
 
 const ChClient = @import("ch_client.zig").ChClient;
@@ -73,18 +73,18 @@ fn WalStreamT(comptime StreamChClient: type, comptime StreamPgClient: type) type
         }
 
         pub fn startStreaming(self: *@This()) !void {
-            self.pg_client.startWALReader(read_timeout_ms) catch |err| switch (err) {
-                PgClientError.WalConnectionNotInitialized => {
+            self.pg_client.startFlow(read_timeout_ms) catch |err| switch (err) {
+                pg.PgError.WalConnectionNotInitialized => {
                     self.pg_client.*.conn = try StreamPgClient.createConn(self.allocator, self.io, self.pg_client.*.opts);
 
-                    try self.pg_client.startWALReader(read_timeout_ms);
+                    try self.pg_client.startFlow(read_timeout_ms);
                 },
                 else => return err,
             };
         }
 
         pub fn endStreaming(self: *@This()) !void {
-            return self.pg_client.endWALReader();
+            return self.pg_client.endFlow();
         }
 
         pub fn stream(self: *@This(), flag: *std.atomic.Value(bool)) !void {

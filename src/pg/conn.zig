@@ -18,9 +18,7 @@ const Message = @import("reader.zig").Message;
 const PgConfig = root.PgConfig;
 const PgError = root.PgError;
 const Reader = @import("reader.zig").Reader;
-const Result = @import("result.zig").Result;
 const Stream = @import("stream.zig").Stream;
-const Stmt = @import("stmt.zig").Stmt;
 
 const sendTerminate = @import("stream.zig").sendTerminate;
 
@@ -61,22 +59,6 @@ pub const Conn = struct {
 
     io: Io,
 
-    // Holds information describing the query that we're executing. If the query
-    // returns more columns than an appropriately sized ResultState is created as
-    // needed.
-    result_state: Result.State,
-
-    // Holds information describing the parameters that PG is expecting. If the
-    // query has more parameters, than an appropriately sized one is created.
-    // This is separate from result_state because:
-    //   (a) they are populated separately
-    //   (b) have distinct lifetimes
-    //   (c) they likely have different lengths;
-    param_oids: []i32,
-
-    // cache_name => data necessary to re-execute previously prepared statement.
-    prepared_statements: std.hash_map.StringHashMapUnmanaged(Stmt.Describe),
-
     opts: PgConfig,
 
     pub const QueryOpts = struct {
@@ -106,12 +88,6 @@ pub const Conn = struct {
         const reader = try Reader.init(allocator, opts.read_buffer orelse 4096, stream);
         errdefer reader.deinit();
 
-        const result_state = try Result.State.init(allocator, opts.result_state_size);
-        errdefer result_state.deinit(allocator);
-
-        const param_oids = try allocator.alloc(i32, opts.result_state_size);
-        errdefer param_oids.free(allocator);
-
         return .{
             .err = null,
             .ssl_ctx = ssl_ctx,
@@ -121,9 +97,6 @@ pub const Conn = struct {
             .state = .idle,
             .allocator = allocator,
             .io = io,
-            .param_oids = param_oids,
-            .result_state = result_state,
-            .prepared_statements = .{},
             .opts = opts,
         };
     }
@@ -137,14 +110,10 @@ pub const Conn = struct {
             self.allocator.free(err_data);
         }
         self.reader.deinit();
-        self.allocator.free(self.param_oids);
-        self.result_state.deinit(self.allocator);
 
         sendTerminate(&self.stream, self.io);
         ssl.freeSSLContext(self.ssl_ctx);
         self.stream.deinit(self.allocator);
-
-        self.prepared_statements.deinit(self.allocator);
     }
 
     pub fn auth(self: *@This()) !void {
@@ -168,72 +137,6 @@ pub const Conn = struct {
                 else => return self.unexpectedDBMessage(),
             }
         }
-    }
-
-    pub fn query(self: *@This(), sql: []const u8, opts: QueryOpts) !*Result {
-        if (self.canQuery() == false) {
-            return error.ConnectionBusy;
-        }
-
-        var cached = false;
-        var stmt: Stmt = undefined;
-        defer stmt.deinit();
-
-        const name = opts.cache_name;
-
-        const buf = try self.allocator.alloc(u8, 1028);
-        defer self.allocator.free(buf);
-
-        if (name) |n| {
-            if (self.prepared_statements.getPtr(n)) |describe| {
-                cached = true;
-                stmt = try Stmt.fromDescribe(self.allocator, self, describe, opts);
-                errdefer stmt.endStmt();
-
-                try self.reader.startFlow(opts.timeout_ms);
-                // Send a "SYNC" command
-                try self.write(&.{ 'S', 0, 0, 0, 4 });
-                try stmt.prepareForBind(@intCast(describe.param_oids.len));
-            }
-        }
-
-        if (cached == false) {
-            // either this isn't supposed to be cached, or it is, but we don't
-            // have it in our cache
-            stmt = Stmt.init(self.allocator, self, opts) catch |err| {
-                return err;
-            };
-            errdefer stmt.endStmt();
-
-            if (name) |n| {
-                try stmt.prepare(sql);
-
-                const owned_name = try self.allocator.dupe(u8, n);
-                try self.prepared_statements.put(self.allocator, owned_name, .{
-                    .param_oids = stmt.param_oids,
-                    .result_state = stmt.result_state,
-                });
-            } else {
-                stmt.prepare(sql) catch |err| {
-                    if (self.err_data) |err_msg| {
-                        std.debug.print("Error: {s}\n", .{err_msg});
-                    }
-
-                    return err;
-                };
-            }
-        }
-
-        return stmt.execute() catch |err| {
-            stmt.endStmt();
-            return err;
-        };
-    }
-
-    pub fn peekForError(self: *@This()) !void {
-        const data = (try self.reader.peekForError()) orelse return;
-        try self.readyForQuery();
-        return self.setErr(data);
     }
 
     pub fn read(self: *@This()) !Message {

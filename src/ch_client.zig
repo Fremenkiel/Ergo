@@ -8,7 +8,7 @@ const mem = std.mem;
 const assert = std.debug.assert;
 
 const ch = @import("ch");
-const types = @import("types.zig");
+const types = @import("types");
 
 const column_definition = [10]ch.bulk_insert.ColumnDef{
     .{ .name = "event_time", .type_str = "DateTime64" },
@@ -64,9 +64,6 @@ const InsertValues = struct {
         try self.new_values.ensureUnusedCapacity(@as(u32, @truncate(row.columns.items.len)));
 
         for (row.columns.items) |col| {
-            // const column_name = try self.allocator.dupe(u8, col.column_name);
-            // const old_value = try self.allocator.dupe(u8, col.old_value);
-            // const new_value = try self.allocator.dupe(u8, col.new_value);
             const column_name = col.column_name;
             const old_value = col.old_value;
             const new_value = col.new_value;

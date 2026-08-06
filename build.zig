@@ -6,13 +6,10 @@ pub fn build(b: *std.Build) void {
         .preferred_optimize_mode = .ReleaseSafe
     });
 
-    const exe = b.addExecutable(.{
-        .name = "ergo",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+    const types_module = b.createModule(.{
+        .root_source_file = b.path("src/types.zig"),
+        .target = target,
+        .optimize = optimize,
     });
 
     // CH Module
@@ -20,13 +17,15 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/ch/root.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{
+            .{ .name = "types", .module = types_module },
+        },
     });
     ch_module.addCSourceFile(.{
         .file = b.path("deps/lz4/lib/lz4.c"),
         .flags = &[_][]const u8{"-std=c99"},
     });
     ch_module.addIncludePath(b.path("deps/lz4/lib"));
-    exe.root_module.addImport("ch", ch_module);
 
     // Pg Module
     const openssl_lib_name = b.option([]const u8, "openssl_lib_name", "");
@@ -51,6 +50,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/pg/root.zig"),
         .imports = &.{
             .{ .name = "openssl", .module = openssl_module },
+            .{ .name = "types", .module = types_module },
         },
     });
 
@@ -74,7 +74,19 @@ pub fn build(b: *std.Build) void {
         options.addOption(bool, "column_names", column_names);
         pg_module.addOptions("config", options);
     }
+
+
+    const exe = b.addExecutable(.{
+        .name = "ergo",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
     exe.root_module.addImport("pg", pg_module);
+    exe.root_module.addImport("ch", ch_module);
+    exe.root_module.addImport("types", types_module);
 
     b.installArtifact(exe);
 

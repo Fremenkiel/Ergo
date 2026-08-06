@@ -10,7 +10,6 @@ const conn = @import("conn.zig");
 const PgConfig = @import("root.zig").PgConfig;
 const Message = @import("reader.zig").Message;
 const Reader = @import("reader.zig").Reader;
-const Result = @import("result.zig").Result;
 const State = @import("conn.zig").State;
 
 pub const test_opts: PgConfig = .{
@@ -33,31 +32,18 @@ pub fn getRandom(io: Io) std.Random.DefaultPrng {
 pub const Conn = struct {
     state: State,
     reader: Reader,
-    param_oids: []i32,
-    result_state: Result.State,
 
     pub fn init(allocator: mem.Allocator) !@This() {
-        const result_state = try Result.State.init(allocator, 32);
-        errdefer result_state.deinit(allocator);
-
-        const param_oids = try allocator.alloc(i32, 32);
-        errdefer param_oids.free(allocator);
-
+        _ = allocator;
         return .{
             .state = .idle,
             .reader = undefined,
-            .param_oids = param_oids,
-            .result_state = result_state
         };
     }
 
-    pub fn deinit(self: *@This(), allcator: mem.Allocator) void {
-        allcator.free(self.param_oids);
-        self.result_state.deinit(allcator);
-    }
-
-    pub fn peekForError(self: *@This()) !void {
+    pub fn deinit(self: *@This(), allocator: mem.Allocator) void {
         _ = self;
+        _ = allocator;
     }
 
     pub fn unexpectedDBMessage(self: *@This()) error{UnexpectedDBMessage} {

@@ -9,7 +9,7 @@ const assert = std.debug.assert;
 
 const ch = @import("ch");
 const wal_stream = @import("wal_stream.zig");
-const types = @import("types.zig");
+const types = @import("types");
 
 const PgClient = @import("pg_client.zig").PgClient;
 const ChClient = @import("ch_client.zig").ChClient;

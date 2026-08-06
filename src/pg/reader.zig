@@ -1,21 +1,33 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const conn = @import("conn.zig");
-const stream = @import("stream.zig");
-const t = @import("t.zig");
-
 const Io = std.Io;
 const mem = std.mem;
 const posix = std.posix;
 const testing = std.testing;
 
-const Conn = conn.Conn;
+const assert = std.debug.assert;
+
+const _conn = @import("conn.zig");
+const packet = @import("packet.zig");
+const stream = @import("stream.zig");
+const t = @import("t.zig");
+const types = @import("types.zig");
+
+const Conn = _conn.Conn;
+const Error = @import("error.zig").Error;
+const PgError = @import("root.zig").PgError;
 
 // to everyone else, this is our reader
 pub const Reader = ReaderT(stream.Stream);
 
 const default_timeout_ms: i32 = 5;
+
+pub const Message = struct {
+    type: u8,
+    data: []const u8,
+    len: u32,
+};
 
 // generic just for testing within this file
 fn ReaderT(comptime T: type) type {
@@ -45,9 +57,7 @@ fn ReaderT(comptime T: type) type {
 
         stream: T,
 
-        const Self = @This();
-
-        pub fn init(allocator: mem.Allocator, size: usize, conn_stream: T) !Self {
+        pub fn init(allocator: mem.Allocator, size: usize, conn_stream: T) !@This() {
             const static = try allocator.alloc(u8, size);
             return .{
                 .buf = static,
@@ -57,7 +67,7 @@ fn ReaderT(comptime T: type) type {
             };
         }
 
-        pub fn deinit(self: Self) void {
+        pub fn deinit(self: @This()) void {
             if (self.static.ptr != self.buf.ptr) {
                 self.allocator.free(self.buf);
             }
@@ -68,13 +78,13 @@ fn ReaderT(comptime T: type) type {
         // dynamic buffer it creates. The idea beind this is that if reading 1 row
         // requires more than static.len other rows within the same result might
         // as well.
-        pub fn startFlow(self: *Self, timeout_ms: ?i32) !void {
+        pub fn startFlow(self: *@This(), timeout_ms: ?i32) !void {
             if (timeout_ms) |timeout_val| {
                 self.timeout_ms = timeout_val;
             }
         }
 
-        pub fn endFlow(self: *Self) !void {
+        pub fn endFlow(self: *@This()) !void {
             const buf = self.buf;
 
             if (self.static.ptr == buf.ptr) {
@@ -122,30 +132,43 @@ fn ReaderT(comptime T: type) type {
             self.timeout_ms = default_timeout_ms;
         }
 
-        // If you execute "select * from invalid_table", PostgreSQL will return
-        // an error early in the process of preparing the statement - as part
-        // of parsing the statement, it knows that "invalid_table" isn't a valid table.
+        pub fn startWALFlow(self: *@This(), wal_name: []const u8, timeout_ms: i32) !void {
+            const query = try std.fmt.allocPrint(self.allocator, "START_REPLICATION SLOT {s} LOGICAL 0/0 (proto_version '1', publication_names 'db_pub', messages 'true');", .{wal_name});
+            defer self.allocator.free(query);
 
-        // But if you execute "create table already_exists", the error is is only
-        // returned once you try to read the result.
-        //
-        // This difference results in an inconsistent api: some error are returned
-        // immediately by conn.query() and some errors are only returned when
-        // result.next() is first called.
-        //
-        // Here we attempt to fix this by eagerly reading the next message. If it's
-        // an error, we return it. If it isn't an error, we put it back for the next
-        // successful read.
-        pub fn peekForError(self: *Self) !?[]const u8 {
-            const message = self.buffered(self.pos, true) orelse try self.read(true);
-            return if (message.type == 'E') message.data else null;
+            const msg_len: u32 = @as(u32, @intCast(query.len)) + 4 + 1;
+            var len_buf: [4]u8 = undefined;
+            mem.writeInt(u32, &len_buf, msg_len, .big);
+
+            try self.stream.writeAll("Q");
+            try self.stream.writeAll(&len_buf);
+            try self.stream.writeAll(query);
+            try self.stream.writeAll(&[_]u8{0});
+
+            try self.startFlow(timeout_ms);
         }
 
-        pub fn next(self: *Self) !Message {
+        pub fn endWALFlow(self: *@This(), wal_name: []const u8) !void {
+            const query = try std.fmt.allocPrint(self.allocator, "DROP_REPLICATION SLOT {s};", .{wal_name});
+            defer self.allocator.free(query);
+
+            const msg_len: u32 = @as(u32, @intCast(query.len)) + 4 + 1;
+            var len_buf: [4]u8 = undefined;
+            mem.writeInt(u32, &len_buf, msg_len, .big);
+
+            try self.stream.writeAll("Q");
+            try self.stream.writeAll(&len_buf);
+            try self.stream.writeAll(query);
+            try self.stream.writeAll(&[_]u8{0});
+
+            try self.endFlow();
+        }
+
+        pub fn next(self: *@This()) !Message {
             return self.buffered(self.pos, false) orelse self.read(false);
         }
 
-        fn read(self: *Self, error_peek: bool) !Message {
+        fn read(self: *@This(), error_peek: bool) !Message {
             // Every PG message has 1 type byte followed by a 4 byte length prefix.
             // Since the length prefix includes itself (but not the type byte) the
             // minimum possible length is 4. We use 0 to denote "unknown".
@@ -212,42 +235,8 @@ fn ReaderT(comptime T: type) type {
             }
         }
 
-        pub fn discardBytes(self: *Self, amount: usize) !void {
-            // A small temporary buffer to hold the garbage data
-            var dummy_buf: [512]u8 = undefined;
-            var bytes_left = amount;
-
-            while (bytes_left > 0) {
-                // Only read up to the size of our dummy buffer, or whatever is left
-                const to_read = @min(bytes_left, dummy_buf.len);
-
-                // Actually pull the bytes off the TCP stream
-                const bytes_read = try self.stream.readWithTimeout(dummy_buf[0..to_read], self.timeout_ms);
-
-                if (bytes_read == 0) {
-                    // The connection closed unexpectedly before we finished skipping
-                    return error.EndOfStream;
-                }
-
-                bytes_left -= bytes_read;
-            }
-        }
-
-
-        pub fn readExact(self: *Self, buffer: []u8) !void {
-            var total_read: usize = 0;
-
-            while (total_read < buffer.len) {
-                const bytes_read = try self.stream.readWithTimeout(buffer[total_read..], self.timeout_ms);
-                if (bytes_read == 0) {
-                    return error.EndOfStream;
-                }
-                total_read += bytes_read;
-            }
-        }
-
         // checks and consume if we already have a message buffered
-        fn buffered(self: *Self, pos: usize, error_peek: bool) ?Message {
+        fn buffered(self: *@This(), pos: usize, error_peek: bool) ?Message {
             const start = self.start;
             const available = pos - start;
 
@@ -294,12 +283,6 @@ fn ReaderT(comptime T: type) type {
         }
     };
 }
-
-pub const Message = struct {
-    type: u8,
-    data: []const u8,
-    len: u32,
-};
 
 test "Reader: next" {
     const allocator = testing.allocator;

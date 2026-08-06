@@ -7,11 +7,10 @@ const assert = std.debug.assert;
 
 const pg = @import("pg");
 const t = @import("t.zig");
-const types = @import("types.zig");
+const types = @import("types");
 
 pub const PgClientError = error{
 PostgresReplicationError,
-WalConnectionNotInitialized,
 DefaultConnectionNotInitialized,
 UnableToSendCopyDone,
 InvalidReadyForQueryMessage,
@@ -63,6 +62,18 @@ pub const TransactionContext = struct {
         if (self.user_id.len > 0) allocator.free(self.user_id);
         if (self.ip_address.len > 0) allocator.free(self.ip_address);
     }
+
+    fn reset(self: *@This(), allocator: mem.Allocator) void {
+        self.xid = 0;
+
+        if (self.user_id.len > 0) allocator.free(self.user_id);
+        self.user_id = "";
+
+        if (self.ip_address.len > 0) allocator.free(self.ip_address);
+        self.ip_address = "";
+
+        self.primary_key = "";
+    }
 };
 
 pub const ColumnDef = struct {
@@ -73,7 +84,6 @@ pub const ColumnDef = struct {
 pub const TableDef = struct {
     namespace: []const u8,
     name: []const u8,
-    // indicates whether the column is pk or not.
     columns: std.ArrayList(ColumnDef),
 
     pub fn deinit(self: *@This(), allocator: mem.Allocator) void {
@@ -139,9 +149,6 @@ pub const PgClient = struct {
 
         self.table_reg.deinit();
         self.context.deinit(self.allocator);
-
-        // self.opts.startup_parameters.clearAndFree();
-        // self.opts.startup_parameters.deinit();
     }
 
     pub fn cancel(self: *@This()) void {
@@ -149,64 +156,25 @@ pub const PgClient = struct {
     }
 
     fn resetContext(self: *@This()) void {
-        self.context.xid = 0;
-        if (self.context.user_id.len > 0) self.allocator.free(self.context.user_id);
-        self.context.user_id = "";
-        if (self.context.ip_address.len > 0) self.allocator.free(self.context.ip_address);
-        self.context.ip_address = "";
-        self.context.primary_key = "";
+        self.context.reset(self.allocator);
 
         var it = self.table_reg.iterator(); 
         while (it.next()) |table_reg| { table_reg.value_ptr.*.deinit(self.allocator); }
         self.table_reg.clearRetainingCapacity();
     }
 
-    pub fn startWALReader(self: *@This(), timeout_ms: i32) !void {
-        if (self.conn == null) return PgClientError.WalConnectionNotInitialized;
-
-        const query = try std.fmt.allocPrint(self.allocator, "START_REPLICATION SLOT {s} LOGICAL 0/0 (proto_version '1', publication_names 'db_pub', messages 'true');", .{self.opts.wal});
-        defer self.allocator.free(query);
-
-        const msg_len: u32 = @as(u32, @intCast(query.len)) + 4 + 1;
-        var len_buf: [4]u8 = undefined;
-        mem.writeInt(u32, &len_buf, msg_len, .big);
-
-        if (self.conn) |conn| {
-            try conn.write("Q");
-            try conn.write(&len_buf);
-            try conn.write(query);
-            try conn.write(&[_]u8{0});
-
-            try conn.reader.startFlow(timeout_ms);
-        } else {
-            return PgClientError.WalConnectionNotInitialized;
-        }
+    pub fn startFlow(self: *@This(), timeout_ms: i32) !void {
+        if (self.conn == null) return pg.PgError.WalConnectionNotInitialized;
+        try self.conn.?.reader.startWALFlow(self.opts.wal, timeout_ms);
     }
 
-    pub fn endWALReader(self: *@This()) !void {
-        if (self.conn == null) return PgClientError.WalConnectionNotInitialized;
-
-        const query = try std.fmt.allocPrint(self.allocator, "DROP_REPLICATION SLOT {s};", .{self.opts.wal});
-        defer self.allocator.free(query);
-
-        const msg_len: u32 = @as(u32, @intCast(query.len)) + 4 + 1;
-        var len_buf: [4]u8 = undefined;
-        mem.writeInt(u32, &len_buf, msg_len, .big);
-
-        if (self.conn) |conn| {
-            try conn.write("Q");
-            try conn.write(&len_buf);
-            try conn.write(query);
-            try conn.write(&[_]u8{0});
-
-            try conn.reader.endFlow();
-        } else {
-            return PgClientError.WalConnectionUnableToStop;
-        }
+    pub fn endFlow(self: *@This()) !void {
+        if (self.conn == null) return pg.PgError.WalConnectionNotInitialized;
+        try self.conn.?.reader.endWALFlow(self.opts.wal);
     }
 
     pub fn readWAL(self: *@This()) !?ReadResponse {
-        if (self.conn == null) return PgClientError.WalConnectionNotInitialized;
+        if (self.conn == null) return pg.PgError.WalConnectionNotInitialized;
 
         const msg = try self.conn.?.reader.next();
 
@@ -238,7 +206,7 @@ pub const PgClient = struct {
 
                         const payload = msg.data[25..];
 
-                        const parse_response = try self.parsePgOutput(payload);
+                        const parse_response = try pg.parser.parsePgOutput(payload);
 
                         if (parse_response.last_lsn) |lsn| {
                             response.timestamp = pgWalToClickHouseMs(parse_response.timestamp.?);
@@ -719,330 +687,6 @@ fn setupClient(allocator: mem.Allocator, io: Io) !PgClient {
     };
 }
 
-test "parsePgOutput maps BEGIN correctly" {
-    const allocator = testing.allocator;
-    const io = testing.io;
-
-    var client = try setupClient(allocator, io);
-    defer client.deinit();
-
-    const commit_hex = "420000000001c160880002f9a2afe34ece00000317";
-    const xid: u64 = 791;
-
-    const commit_bytes = try allocator.alloc(u8, commit_hex.len / 2);
-    defer allocator.free(commit_bytes);
-    _ = try std.fmt.hexToBytes(commit_bytes, commit_hex);
-
-    var result = try client.parsePgOutput(commit_bytes);
-    defer result.deinit(allocator);
-
-    try testing.expectEqual(xid, client.context.xid);
-    try testing.expectEqualStrings("", client.context.ip_address);
-    try testing.expectEqualStrings("", client.context.user_id);
-    try testing.expectEqual(null, result.data);
-    try testing.expectEqual(null, result.last_lsn);
-    try testing.expectEqual(null, result.timestamp);
-}
-
-test "parsePgOutput maps METADATA correctly" {
-    const allocator = testing.allocator;
-    const io = testing.io;
-
-    var client = try setupClient(allocator, io);
-    defer client.deinit();
-
-    // PERFORM pg_logical_emit_message(
-    //     true, 
-    //     'ergo_meta', 
-    //     '"user_id": "42", "ip": "192.168.1.50"'
-    // );
-    const metadata_hex = "4d010000000001c15f186572676f5f6d657461000000002522757365725f6964223a20223432222c20226970223a20223139322e3136382e312e353022";
-
-    const metadata_bytes = try allocator.alloc(u8, metadata_hex.len / 2);
-    defer allocator.free(metadata_bytes);
-    _ = try std.fmt.hexToBytes(metadata_bytes, metadata_hex);
-
-    var result = try client.parsePgOutput(metadata_bytes);
-    defer result.deinit(allocator);
-
-    try testing.expectEqualStrings("42", client.context.user_id);
-    try testing.expectEqualStrings("192.168.1.50", client.context.ip_address);
-
-    try testing.expectEqual(null, result.data);
-    try testing.expectEqual(null, result.last_lsn);
-    try testing.expectEqual(null, result.timestamp);
-}
-
-test "parsePgOutput maps RELATION correctly" {
-    const allocator = testing.allocator;
-    const io = testing.io;
-
-    var client = PgClient{
-        .allocator = allocator,
-        .io = io,
-        .opts = undefined,
-        .last_lsn = 0,
-        .last_timestamp = 0,
-        .context = .{
-            .xid = 0,
-            .user_id = "",
-            .ip_address = "",
-            .primary_key = "",
-        },
-        .table_reg = .init(allocator),
-        .conn = null,
-    };
-    defer client.deinit();
-
-    // INSERT INTO addresses (address_line_1, postal_code, city, country) 
-    // VALUES ('1 Apple Park Way', '95014', 'Cupertino', 'US');
-    const insert_hex = "52000040067075626c696300616464726573736573006600060169640000000014ffffffff01616464726573735f6c696e655f3100000004130000010301616464726573735f6c696e655f3200000004130000010301706f7374616c5f636f6465000000041300000014016369747900000004130000010301636f756e747279000000041300000006";
-
-    const insert_bytes = try allocator.alloc(u8, insert_hex.len / 2);
-    defer allocator.free(insert_bytes);
-    _ = try std.fmt.hexToBytes(insert_bytes, insert_hex);
-
-    var result = try client.parsePgOutput(insert_bytes);
-    defer result.deinit(allocator);
-
-    try testing.expectEqual(1, client.table_reg.count());
-}
-
-test "parsePgOutput maps INSERT correctly" {
-    const allocator = testing.allocator;
-    const io = testing.io;
-
-    var client = try setupClient(allocator, io);
-    defer client.deinit();
-
-    // INSERT INTO addresses (address_line_1, postal_code, city, country) 
-    // VALUES ('1 Apple Park Way', '95014', 'Cupertino', 'US');
-    const insert_hex = "49000040064e0006740000000131740000001031204170706c65205061726b205761796e740000000539353031347400000009437570657274696e6f74000000025553";
-
-    const insert_bytes = try allocator.alloc(u8, insert_hex.len / 2);
-    defer allocator.free(insert_bytes);
-    _ = try std.fmt.hexToBytes(insert_bytes, insert_hex);
-
-    var result = try client.parsePgOutput(insert_bytes);
-    defer result.deinit(allocator);
-
-    try testing.expectEqual(1, result.data.?.action);
-    try testing.expectEqualStrings("public.addresses", result.data.?.table_name);
-
-    try testing.expectEqual(6, result.data.?.columns.items.len);
-
-    const id = result.data.?.columns.items[0];
-    const address_line_1 = result.data.?.columns.items[1];
-    const address_line_2 = result.data.?.columns.items[2];
-    const postal_code = result.data.?.columns.items[3];
-    const city = result.data.?.columns.items[4];
-    const country = result.data.?.columns.items[5];
-
-    // Column names
-    try testing.expectEqualStrings("id", id.column_name);
-    try testing.expectEqualStrings("address_line_1", address_line_1.column_name);
-    try testing.expectEqualStrings("address_line_2", address_line_2.column_name);
-    try testing.expectEqualStrings("postal_code", postal_code.column_name);
-    try testing.expectEqualStrings("city", city.column_name);
-    try testing.expectEqualStrings("country", country.column_name);
-
-    // Changed columns
-    try testing.expectEqual(true, id.has_changes);
-    try testing.expectEqual(true, address_line_1.has_changes);
-    try testing.expectEqual(false, address_line_2.has_changes);
-    try testing.expectEqual(true, postal_code.has_changes);
-    try testing.expectEqual(true, city.has_changes);
-    try testing.expectEqual(true, country.has_changes);
-
-    // Old values
-    try testing.expectEqual(null, id.old_value);
-    try testing.expectEqual(null, address_line_1.old_value);
-    try testing.expectEqual(null, address_line_2.old_value);
-    try testing.expectEqual(null, postal_code.old_value);
-    try testing.expectEqual(null, city.old_value);
-    try testing.expectEqual(null, country.old_value);
-
-    // New values
-    try testing.expectEqualStrings("1", id.new_value.?);
-    try testing.expectEqualStrings("1 Apple Park Way", address_line_1.new_value.?);
-    try testing.expectEqual(null, address_line_2.new_value);
-    try testing.expectEqualStrings("95014", postal_code.new_value.?);
-    try testing.expectEqualStrings("Cupertino", city.new_value.?);
-    try testing.expectEqualStrings("US", country.new_value.?);
-
-    try testing.expectEqual(0, client.context.xid);
-    try testing.expectEqualStrings("", client.context.ip_address);
-    try testing.expectEqualStrings("", client.context.user_id);
-    try testing.expectEqual(null, result.last_lsn);
-    try testing.expectEqual(null, result.timestamp);
-}
-
-test "parsePgOutput maps UPDATE correctly" {
-    const allocator = testing.allocator;
-    const io = testing.io;
-
-    var client = try setupClient(allocator, io);
-    defer client.deinit();
-
-    // UPDATE addresses SET 
-    //  address_line_1 = 'Googleplex',
-    //  city = 'Mountain View',
-    //  postal_code = '94043'
-    // WHERE id = 1;
-    const update_hex = "55000040064f0006740000000131740000001031204170706c65205061726b205761796e740000000539353031347400000009437570657274696e6f740000000255534e0006740000000131740000000a476f6f676c65706c65786e74000000053934303433740000000d4d6f756e7461696e205669657774000000025553";
-
-    const update_bytes = try allocator.alloc(u8, update_hex.len / 2);
-    defer allocator.free(update_bytes);
-    _ = try std.fmt.hexToBytes(update_bytes, update_hex);
-
-    var result = try client.parsePgOutput(update_bytes);
-    defer result.deinit(allocator);
-
-    try testing.expectEqual(2, result.data.?.action);
-    try testing.expectEqualStrings("public.addresses", result.data.?.table_name);
-
-    try testing.expectEqual(6, result.data.?.columns.items.len);
-
-    const id = result.data.?.columns.items[0];
-    const address_line_1 = result.data.?.columns.items[1];
-    const address_line_2 = result.data.?.columns.items[2];
-    const postal_code = result.data.?.columns.items[3];
-    const city = result.data.?.columns.items[4];
-    const country = result.data.?.columns.items[5];
-
-    // Column names
-    try testing.expectEqualStrings("id", id.column_name);
-    try testing.expectEqualStrings("address_line_1", address_line_1.column_name);
-    try testing.expectEqualStrings("address_line_2", address_line_2.column_name);
-    try testing.expectEqualStrings("postal_code", postal_code.column_name);
-    try testing.expectEqualStrings("city", city.column_name);
-    try testing.expectEqualStrings("country", country.column_name);
-
-    // Changed columns
-    try testing.expectEqual(false, id.has_changes);
-    try testing.expectEqual(true, address_line_1.has_changes);
-    try testing.expectEqual(false, address_line_2.has_changes);
-    try testing.expectEqual(true, postal_code.has_changes);
-    try testing.expectEqual(true, city.has_changes);
-    try testing.expectEqual(false, country.has_changes);
-
-    // Old values
-    try testing.expectEqualStrings("1", id.old_value.?);
-    try testing.expectEqualStrings("1 Apple Park Way", address_line_1.old_value.?);
-    try testing.expectEqual(null, address_line_2.old_value);
-    try testing.expectEqualStrings("95014", postal_code.old_value.?);
-    try testing.expectEqualStrings("Cupertino", city.old_value.?);
-    try testing.expectEqualStrings("US", country.old_value.?);
-
-    // New values
-    try testing.expectEqualStrings("1", id.new_value.?);
-    try testing.expectEqualStrings("Googleplex", address_line_1.new_value.?);
-    try testing.expectEqual(null, address_line_2.new_value);
-    try testing.expectEqualStrings("94043", postal_code.new_value.?);
-    try testing.expectEqualStrings("Mountain View", city.new_value.?);
-    try testing.expectEqualStrings("US", country.new_value.?);
-
-    try testing.expectEqual(0, client.context.xid);
-    try testing.expectEqualStrings("", client.context.ip_address);
-    try testing.expectEqualStrings("", client.context.user_id);
-    try testing.expectEqual(null, result.last_lsn);
-    try testing.expectEqual(null, result.timestamp);
-}
-
-test "parsePgOutput maps DELETE correctly" {
-    const allocator = testing.allocator;
-    const io = testing.io;
-
-    var client = try setupClient(allocator, io);
-    defer client.deinit();
-
-    // DELETE FROM addresses WHERE id = 1;
-    const delete_hex = "44000040064f0006740000000131740000000a476f6f676c65706c65786e74000000053934303433740000000d4d6f756e7461696e205669657774000000025553";
-
-    const delete_bytes = try allocator.alloc(u8, delete_hex.len / 2);
-    defer allocator.free(delete_bytes);
-    _ = try std.fmt.hexToBytes(delete_bytes, delete_hex);
-
-    var result = try client.parsePgOutput(delete_bytes);
-    defer result.deinit(allocator);
-
-    try testing.expectEqual(3, result.data.?.action);
-    try testing.expectEqualStrings("public.addresses", result.data.?.table_name);
-
-    try testing.expectEqual(6, result.data.?.columns.items.len);
-
-    const id = result.data.?.columns.items[0];
-    const address_line_1 = result.data.?.columns.items[1];
-    const address_line_2 = result.data.?.columns.items[2];
-    const postal_code = result.data.?.columns.items[3];
-    const city = result.data.?.columns.items[4];
-    const country = result.data.?.columns.items[5];
-
-    // Column names
-    try testing.expectEqualStrings("id", id.column_name);
-    try testing.expectEqualStrings("address_line_1", address_line_1.column_name);
-    try testing.expectEqualStrings("address_line_2", address_line_2.column_name);
-    try testing.expectEqualStrings("postal_code", postal_code.column_name);
-    try testing.expectEqualStrings("city", city.column_name);
-    try testing.expectEqualStrings("country", country.column_name);
-
-    // Changed columns
-    try testing.expectEqual(true, id.has_changes);
-    try testing.expectEqual(true, address_line_1.has_changes);
-    try testing.expectEqual(false, address_line_2.has_changes);
-    try testing.expectEqual(true, postal_code.has_changes);
-    try testing.expectEqual(true, city.has_changes);
-    try testing.expectEqual(true, country.has_changes);
-
-    // Old values
-    try testing.expectEqualStrings("1", id.old_value.?);
-    try testing.expectEqualStrings("Googleplex", address_line_1.old_value.?);
-    try testing.expectEqual(null, address_line_2.old_value);
-    try testing.expectEqualStrings("94043", postal_code.old_value.?);
-    try testing.expectEqualStrings("Mountain View", city.old_value.?);
-    try testing.expectEqualStrings("US", country.old_value.?);
-
-    // New values
-    try testing.expectEqual(null, id.new_value);
-    try testing.expectEqual(null, address_line_1.new_value);
-    try testing.expectEqual(null, address_line_2.new_value);
-    try testing.expectEqual(null, postal_code.new_value);
-    try testing.expectEqual(null, city.new_value);
-    try testing.expectEqual(null, country.new_value);
-
-    try testing.expectEqual(0, client.context.xid);
-    try testing.expectEqualStrings("", client.context.ip_address);
-    try testing.expectEqualStrings("", client.context.user_id);
-    try testing.expectEqual(null, result.last_lsn);
-    try testing.expectEqual(null, result.timestamp);
-}
-
-test "parsePgOutput maps COMMIT correctly" {
-    const allocator = testing.allocator;
-    const io = testing.io;
-
-    var client = try setupClient(allocator, io);
-    defer client.deinit();
-
-    const insert_hex = "43000000000001c160880000000001c160b80002f9a2afe34ece";
-    const last_lsn: u64 = 29450424;
-    const commit_timestamp: u64 = 837427084349134;
-
-    const insert_bytes = try allocator.alloc(u8, insert_hex.len / 2);
-    defer allocator.free(insert_bytes);
-    _ = try std.fmt.hexToBytes(insert_bytes, insert_hex);
-
-    var result = try client.parsePgOutput(insert_bytes);
-    defer result.deinit(allocator);
-
-    try testing.expectEqual(0, client.context.xid);
-    try testing.expectEqualStrings("", client.context.ip_address);
-    try testing.expectEqualStrings("", client.context.user_id);
-    try testing.expectEqual(null, result.data);
-    try testing.expectEqual(last_lsn, result.last_lsn);
-    try testing.expectEqual(commit_timestamp, result.timestamp);
-}
-
 test "resetContext clears context correctly" {
     const allocator = testing.allocator;
     const io = testing.io;
@@ -1068,41 +712,4 @@ test "resetContext clears context correctly" {
     try testing.expectEqual(0, client.context.xid);
     try testing.expectEqualStrings("", client.context.ip_address);
     try testing.expectEqualStrings("", client.context.user_id);
-}
-
-test "parseTupleData: correct parsing of input" {
-    const allocator = testing.allocator;
-    const io = testing.io;
-
-    var client = try setupClient(allocator, io);
-    defer client.deinit();
-
-    const commit_hex = "0006740000000131740000001031204170706c65205061726b205761796e740000000539353031347400000009437570657274696e6f74000000025553";
-
-    const commit_bytes = try allocator.alloc(u8, commit_hex.len / 2);
-    defer allocator.free(commit_bytes);
-    _ = try std.fmt.hexToBytes(commit_bytes, commit_hex);
-
-    var reader = Io.Reader.fixed(commit_bytes);
-
-    const columns = try initContextColumns(allocator, client.table_reg.get(16390).?);
-    var result = try client.parseTupleData(&reader, columns, .Insert);
-    defer {
-        for (result.items) |*col| { col.deinit(allocator); }
-        result.deinit(allocator);
-    }
-
-    try testing.expectEqualStrings("1", result.items[0].new_value.?);
-    try testing.expectEqualStrings("1 Apple Park Way", result.items[1].new_value.?);
-    try testing.expectEqual(null, result.items[2].new_value);
-    try testing.expectEqualStrings("95014", result.items[3].new_value.?);
-    try testing.expectEqualStrings("Cupertino", result.items[4].new_value.?);
-    try testing.expectEqualStrings("US", result.items[5].new_value.?);
-
-    try testing.expectEqual(0, client.context.xid);
-    try testing.expectEqualStrings("", client.context.ip_address);
-    try testing.expectEqualStrings("", client.context.user_id);
-}
-
-test "update from value to null" {
 }

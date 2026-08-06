@@ -73,6 +73,17 @@ pub const String = struct {
     const encoding = &text_encoding;
 };
 
+pub const Timestamp = struct {
+    pub fn decode(pg_wal_us: u64) Io.Timestamp {
+        const seconds_between_epochs: i96 = 946_684_800;
+        const ns_between_epochs: i96 = seconds_between_epochs * 1_000_000_000;
+
+        const unix_ns: i96 = @as(i96, @intCast(pg_wal_us)) * 1000 + ns_between_epochs;
+
+        return std.Io.Timestamp.fromNanoseconds(unix_ns);
+    }
+};
+
 // Return the encoding we want PG to use for a particular OID
 fn resultEncodingFor(oid: i32) *const [2]u8 {
     return switch (oid) {
