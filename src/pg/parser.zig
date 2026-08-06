@@ -7,33 +7,33 @@ const testing = std.testing;
 const assert = std.debug.assert;
 
 const PgError = @import("root.zig").PgError;
+const Timestamp = @import("types.zig").Timestamp;
 const types = @import("types");
 
-pub const ColumnChange = struct {
-    column_name: []const u8,
-    old_value: ?[]const u8,
-    new_value: ?[]const u8,
-    has_changes: bool,
-    is_key: bool,
-
-    pub fn deinit(self: *@This(), allocator: mem.Allocator) void {
-        allocator.free(self.column_name);
-        if (self.old_value) |val| {
-            allocator.free(val);
-        }
-
-        if (self.new_value) |val| {
-            allocator.free(val);
-        }
-    }
-};
-
 pub const ParseResponse = struct {
-    data: ?types.AuditEntry,
+    data: ?types.Row,
     last_lsn: ?u64,
-    timestamp: ?u64,
+    timestamp: ?Io.Timestamp,
+    xid: ?u32,
+    user_id: ?[]const u8,
+    ip_address: ?[]const u8,
+
+    pub const empty: @This() = .{
+        .last_lsn = null,
+        .timestamp = null,
+        .data = null,
+        .xid = null,
+        .user_id = null,
+        .ip_address = null,
+    };
 
     pub fn deinit(self: *@This(), allocator: mem.Allocator) void {
+        if (self.user_id != null) self.allocator.free(self.user_id);
+        self.user_id = null;
+
+        if (self.ip_address != null) self.allocator.free(self.ip_address);
+        self.ip_address = null;
+
         if (self.data) |*entry| {
             entry.deinit(allocator);
         }
@@ -68,26 +68,32 @@ const Action = enum(u8) {
 };
 
 pub const PgOutput = struct {
-    xid: u32,
-    user_id: []const u8,
-    ip_address: []const u8,
-    primary_key: []const u8,
+    allocator: mem.Allocator,
 
-    pub fn init() @This() {
+    table_reg: std.hash_map.HashMap(u32, TableDef, std.hash_map.AutoContext(u32), 80),
+
+    pub fn init(allocator: mem.Allocator) @This() {
         return .{
-            .xid = undefined,
-            .user_id = undefined,
-            .ip_address = undefined,
-            .primary_key = undefined,
+            .allocator = allocator,
+            .table_reg = .init(allocator)
         };
     }
 
-    pub fn decode(self: *@This(), payload: []const u8) !ParseResponse {
-        var response = ParseResponse{
-            .last_lsn = null,
-            .timestamp = null,
-            .data = null,
-        };
+    pub fn deinit(self: *@This()) void {
+        var it = self.table_reg.iterator(); 
+        while (it.next()) |table_reg| { table_reg.value_ptr.*.deinit(self.allocator); }
+        self.table_reg.clearAndFree();
+        self.table_reg.deinit();
+    }
+
+    pub fn clear(self: *@This()) void {
+        var it = self.table_reg.iterator(); 
+        while (it.next()) |table_reg| { table_reg.value_ptr.*.deinit(self.allocator); }
+        self.table_reg.clearRetainingCapacity();
+    }
+
+    pub fn decode(self: *@This(), payload: []const u8) !?ParseResponse {
+        var response: ParseResponse = .empty; 
 
         if (payload.len == 0) return response;
 
@@ -99,20 +105,25 @@ pub const PgOutput = struct {
             'B' => {
                 // final lsn
                 _ = try reader.takeInt(u64, .big);
-                const timestamp = try reader.takeInt(u64, .big);
-                self.xid = try reader.takeInt(u32, .big);
 
-                _ = timestamp;
+                // timestamp
+                _ = try reader.takeInt(u64, .big);
+
+                response.xid = try reader.takeInt(u32, .big);
+
+                return response;
             },
             'C' => {
                 // flags
                 _ = try reader.takeByte();
+                
                 // lsn of commit
                 _ = try reader.takeInt(u64, .big);
-                response.last_lsn = try reader.takeInt(u64, .big);
-                response.timestamp = try reader.takeInt(u64, .big);
 
-                self.resetContext();
+                response.last_lsn = try reader.takeInt(u64, .big);
+                response.timestamp = Timestamp.decode(try reader.takeInt(u64, .big));
+
+                return response;
             },
             'R' => {
                 // Relation: send before any insert or update
@@ -161,6 +172,8 @@ pub const PgOutput = struct {
                     .columns = columns,
                 });
 
+                return response;
+
             },
             'I' => {
                 const rel_id = try reader.takeInt(u32, .big);
@@ -174,18 +187,16 @@ pub const PgOutput = struct {
                 if (self.table_reg.get(rel_id)) |table| {
                     const columns = try initContextColumns(self.allocator, table);
 
-                    response.data = types.AuditEntry{
-                        .event_time = undefined,
+                    response.data = .{
                         .table_name = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{table.namespace, table.name}),
                         .action = 1,
                         .columns = try self.parseTupleData(&reader, columns, .Insert),
-                        .transaction_id = self.xid,
-                        .user_id = if (self.user_id.len > 0) try self.allocator.dupe(u8, self.user_id) else "",
-                        .ip_address = if (self.ip_address.len > 0) try self.allocator.dupe(u8, self.ip_address) else "",
                     };
                 } else {
                     std.debug.print("Error: Received insert for unknown relation ID {d}\n", .{rel_id});
                 }
+
+                return response;
             },
             'U' => {
                 const rel_id = try reader.takeInt(u32, .big);
@@ -200,14 +211,10 @@ pub const PgOutput = struct {
                     }
 
                     if (tuple_type == 'N') {
-                        response.data = types.AuditEntry{
-                            .event_time = undefined,
+                        response.data = .{
                             .table_name = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{table.namespace, table.name}),
                             .action = 2,
                             .columns = try self.parseTupleData(&reader, columns, .UpdateNew),
-                            .transaction_id = self.xid,
-                            .user_id = if (self.user_id.len > 0) try self.allocator.dupe(u8, self.user_id) else "",
-                            .ip_address = if (self.ip_address.len > 0) try self.allocator.dupe(u8, self.ip_address) else "",
                         };
                     } else {
                         std.debug.print("Error: Expected 'N', got '{c}'\n", .{tuple_type});
@@ -215,6 +222,8 @@ pub const PgOutput = struct {
                 } else {
                     std.debug.print("Error: Received update for unknown relation ID {d}\n", .{rel_id});
                 }
+
+                return response;
             },
             'D' => {
                 const rel_id = try reader.takeInt(u32, .big);
@@ -224,14 +233,10 @@ pub const PgOutput = struct {
                 if (self.table_reg.get(rel_id)) |table| {
                     const columns = try initContextColumns(self.allocator, table);
                     if (tuple_type == 'O' or tuple_type == 'K') {
-                        response.data = types.AuditEntry{
-                            .event_time = undefined,
+                        response.data = .{
                             .table_name = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{table.namespace, table.name}),
                             .action = 3,
                             .columns = try self.parseTupleData(&reader, columns, .Delete),
-                            .transaction_id = self.xid,
-                            .user_id = if (self.user_id.len > 0) try self.allocator.dupe(u8, self.user_id) else "",
-                            .ip_address = if (self.ip_address.len > 0) try self.allocator.dupe(u8, self.ip_address) else "",
                         };
                     } else {
                         std.debug.print("Error: Expected 'O' or 'K', got '{c}'\n", .{tuple_type});
@@ -239,6 +244,8 @@ pub const PgOutput = struct {
                 } else {
                     std.debug.print("Error: Received delete for unknown relation ID {d}\n", .{rel_id});
                 }
+
+                return response;
             },
             'M' => {
                 const flags = try reader.takeByte();
@@ -288,9 +295,11 @@ pub const PgOutput = struct {
                     defer self.allocator.free(check_str);
                     assert(mem.eql(u8, check_str, content));
 
-                    self.user_id = try self.allocator.dupe(u8, user_id_value);
-                    self.ip_address = try self.allocator.dupe(u8, ip_address_value);
+                    response.user_id = try self.allocator.dupe(u8, user_id_value);
+                    response.ip_address = try self.allocator.dupe(u8, ip_address_value);
                 }
+
+                return response;
             },
             'Y' => {
                 // XID
@@ -304,16 +313,18 @@ pub const PgOutput = struct {
                 
                 // data type name
                 _ = try reader.takeDelimiter(0);
+
+                return response;
             },
             else => {
                 std.debug.print("Unknown pgoutput message type: {c}\n", .{msg_type});
             }
         }
 
-        return response;
+        return null;
     }
 
-    fn parseTupleData(self: *@This(), reader: *Io.Reader, columns: std.ArrayList(ColumnChange), action: Action) !std.ArrayList(types.ChangedColumn) {
+    fn parseTupleData(self: *@This(), reader: *Io.Reader, columns: std.ArrayList(types.ColumnChange), action: Action) !std.ArrayList(types.ColumnChange) {
         const num_columns = try reader.takeInt(u16, .big);
 
         if (num_columns > columns.items.len) {
@@ -368,8 +379,8 @@ pub const PgOutput = struct {
 
 };
 
-fn initContextColumns(allocator: mem.Allocator, table_def: TableDef) !std.ArrayList(types.ChangedColumn) {
-    var columns: std.ArrayList(types.ChangedColumn) = .empty;
+fn initContextColumns(allocator: mem.Allocator, table_def: TableDef) !std.ArrayList(types.ColumnChange) {
+    var columns: std.ArrayList(types.ColumnChange) = .empty;
     errdefer {
         columns.clearAndFree(allocator);
         columns.deinit(allocator);
@@ -400,16 +411,23 @@ test "parsePgOutput maps BEGIN correctly" {
     defer allocator.free(commit_bytes);
     _ = try std.fmt.hexToBytes(commit_bytes, commit_hex);
 
-    var parser = PgOutput.init();
-    var result = parser.decode(commit_bytes);
-    defer result.deinit(allocator);
+    var parser = PgOutput.init(allocator);
+    defer parser.deinit();
 
-    try testing.expectEqual(xid, parser.xid);
-    try testing.expectEqualStrings("", parser.ip_address);
-    try testing.expectEqualStrings("", parser.user_id);
-    try testing.expectEqual(null, result.data);
-    try testing.expectEqual(null, result.last_lsn);
-    try testing.expectEqual(null, result.timestamp);
+    var result = try parser.decode(commit_bytes);
+    defer {
+        if (result) |*res| {
+            res.deinit(allocator);
+        }
+    }
+
+    try testing.expectEqual(true, result != null);
+    try testing.expectEqual(xid, result.?.xid);
+    try testing.expectEqual(null, result.?.ip_address);
+    try testing.expectEqual(null, result.?.user_id);
+    try testing.expectEqual(null, result.?.data);
+    try testing.expectEqual(null, result.?.last_lsn);
+    try testing.expectEqual(null, result.?.timestamp);
 }
 
 test "parsePgOutput maps METADATA correctly" {
@@ -426,21 +444,27 @@ test "parsePgOutput maps METADATA correctly" {
     defer allocator.free(metadata_bytes);
     _ = try std.fmt.hexToBytes(metadata_bytes, metadata_hex);
 
-    var parser = PgOutput.init();
+    var parser = PgOutput.init(allocator);
+    defer parser.deinit();
+
     var result = try parser.decode(metadata_bytes);
-    defer result.deinit(allocator);
+    defer {
+        if (result) |*res| {
+            res.deinit(allocator);
+        }
+    }
 
     try testing.expectEqualStrings("42", parser.user_id);
     try testing.expectEqualStrings("192.168.1.50", parser.ip_address);
 
-    try testing.expectEqual(null, result.data);
-    try testing.expectEqual(null, result.last_lsn);
-    try testing.expectEqual(null, result.timestamp);
+    try testing.expectEqual(true, result != null);
+    try testing.expectEqual(null, result.?.data);
+    try testing.expectEqual(null, result.?.last_lsn);
+    try testing.expectEqual(null, result.?.timestamp);
 }
 
 test "parsePgOutput maps RELATION correctly" {
     const allocator = testing.allocator;
-    const io = testing.io;
 
     // INSERT INTO addresses (address_line_1, postal_code, city, country) 
     // VALUES ('1 Apple Park Way', '95014', 'Cupertino', 'US');
@@ -450,11 +474,17 @@ test "parsePgOutput maps RELATION correctly" {
     defer allocator.free(insert_bytes);
     _ = try std.fmt.hexToBytes(insert_bytes, insert_hex);
 
-    var parser = PgOutput.init();
-    var result = try parser.decode(insert_bytes);
-    defer result.deinit(allocator);
+    var parser = PgOutput.init(allocator);
+    defer parser.deinit();
 
-    try testing.expectEqual(1, client.table_reg.count());
+    var result = try parser.decode(insert_bytes);
+    defer {
+        if (result) |*res| {
+            res.deinit(allocator);
+        }
+    }
+
+    try testing.expectEqual(1, parser.table_reg.count());
 }
 
 test "parsePgOutput maps INSERT correctly" {
@@ -468,9 +498,15 @@ test "parsePgOutput maps INSERT correctly" {
     defer allocator.free(insert_bytes);
     _ = try std.fmt.hexToBytes(insert_bytes, insert_hex);
 
-    var parser = PgOutput.init();
+    var parser = PgOutput.init(allocator);
+    defer parser.deinit();
+
     var result = try parser.decode(insert_bytes);
-    defer result.deinit(allocator);
+    defer {
+        if (result) |*res| {
+            res.deinit(allocator);
+        }
+    }
 
     try testing.expectEqual(1, result.data.?.action);
     try testing.expectEqualStrings("public.addresses", result.data.?.table_name);
@@ -516,11 +552,12 @@ test "parsePgOutput maps INSERT correctly" {
     try testing.expectEqualStrings("Cupertino", city.new_value.?);
     try testing.expectEqualStrings("US", country.new_value.?);
 
-    try testing.expectEqual(0, parser.xid);
-    try testing.expectEqualStrings("", parser.ip_address);
-    try testing.expectEqualStrings("", parser.user_id);
-    try testing.expectEqual(null, result.last_lsn);
-    try testing.expectEqual(null, result.timestamp);
+    try testing.expectEqual(true, result != null);
+    try testing.expectEqual(null, result.?.xid);
+    try testing.expectEqual(null, result.?.ip_address);
+    try testing.expectEqual(null, result.?.user_id);
+    try testing.expectEqual(null, result.?.last_lsn);
+    try testing.expectEqual(null, result.?.timestamp);
 }
 
 test "parsePgOutput maps UPDATE correctly" {
@@ -537,9 +574,15 @@ test "parsePgOutput maps UPDATE correctly" {
     defer allocator.free(update_bytes);
     _ = try std.fmt.hexToBytes(update_bytes, update_hex);
 
-    var parser = PgOutput.init();
+    var parser = PgOutput.init(allocator);
+    defer parser.deinit();
+
     var result = try parser.decode(update_bytes);
-    defer result.deinit(allocator);
+    defer {
+        if (result) |*res| {
+            res.deinit(allocator);
+        }
+    }
 
     try testing.expectEqual(2, result.data.?.action);
     try testing.expectEqualStrings("public.addresses", result.data.?.table_name);
@@ -585,11 +628,12 @@ test "parsePgOutput maps UPDATE correctly" {
     try testing.expectEqualStrings("Mountain View", city.new_value.?);
     try testing.expectEqualStrings("US", country.new_value.?);
 
-    try testing.expectEqual(0, parser.xid);
-    try testing.expectEqualStrings("", parser.ip_address);
-    try testing.expectEqualStrings("", parser.user_id);
-    try testing.expectEqual(null, result.last_lsn);
-    try testing.expectEqual(null, result.timestamp);
+    try testing.expectEqual(true, result != null);
+    try testing.expectEqual(null, result.?.xid);
+    try testing.expectEqual(null, result.?.ip_address);
+    try testing.expectEqual(null, result.?.user_id);
+    try testing.expectEqual(null, result.?.last_lsn);
+    try testing.expectEqual(null, result.?.timestamp);
 }
 
 test "parsePgOutput maps DELETE correctly" {
@@ -602,9 +646,15 @@ test "parsePgOutput maps DELETE correctly" {
     defer allocator.free(delete_bytes);
     _ = try std.fmt.hexToBytes(delete_bytes, delete_hex);
 
-    var parser = PgOutput.init();
+    var parser = PgOutput.init(allocator);
+    defer parser.deinit();
+
     var result = try parser.decode(delete_bytes);
-    defer result.deinit(allocator);
+    defer {
+        if (result) |*res| {
+            res.deinit(allocator);
+        }
+    }
 
     try testing.expectEqual(3, result.data.?.action);
     try testing.expectEqualStrings("public.addresses", result.data.?.table_name);
@@ -650,11 +700,12 @@ test "parsePgOutput maps DELETE correctly" {
     try testing.expectEqual(null, city.new_value);
     try testing.expectEqual(null, country.new_value);
 
-    try testing.expectEqual(0, parser.xid);
-    try testing.expectEqualStrings("", parser.ip_address);
-    try testing.expectEqualStrings("", parser.user_id);
-    try testing.expectEqual(null, result.last_lsn);
-    try testing.expectEqual(null, result.timestamp);
+    try testing.expectEqual(true, result != null);
+    try testing.expectEqual(0, result.?.xid);
+    try testing.expectEqual(null, result.?.ip_address);
+    try testing.expectEqual(null, result.?.user_id);
+    try testing.expectEqual(null, result.?.last_lsn);
+    try testing.expectEqual(null, result.?.timestamp);
 }
 
 test "parsePgOutput maps COMMIT correctly" {
@@ -668,16 +719,23 @@ test "parsePgOutput maps COMMIT correctly" {
     defer allocator.free(insert_bytes);
     _ = try std.fmt.hexToBytes(insert_bytes, insert_hex);
 
-    var parser = PgOutput.init();
-    var result = try parser.decode(insert_bytes);
-    defer result.deinit(allocator);
+    var parser = PgOutput.init(allocator);
+    defer parser.deinit();
 
-    try testing.expectEqual(0, parser.xid);
-    try testing.expectEqualStrings("", parser.ip_address);
-    try testing.expectEqualStrings("", parser.user_id);
-    try testing.expectEqual(null, result.data);
-    try testing.expectEqual(last_lsn, result.last_lsn);
-    try testing.expectEqual(commit_timestamp, result.timestamp);
+    var result = try parser.decode(insert_bytes);
+    defer {
+        if (result) |*res| {
+            res.deinit(allocator);
+        }
+    }
+
+    try testing.expectEqual(true, result != null);
+    try testing.expectEqual(null, result.?.xid);
+    try testing.expectEqual(null, result.?.ip_address);
+    try testing.expectEqual(null, result.?.user_id);
+    try testing.expectEqual(null, result.?.data);
+    try testing.expectEqual(last_lsn, result.?.last_lsn);
+    try testing.expectEqual(commit_timestamp, result.?.timestamp);
 }
 
 // test "parseTupleData: correct parsing of input" {

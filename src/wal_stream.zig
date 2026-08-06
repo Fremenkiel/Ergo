@@ -195,7 +195,7 @@ test "startStreaming: read and parse correctly" {
     const allocator = testing.allocator;
     const io = testing.io;
 
-    var columns: std.ArrayList(types.ChangedColumn) = .empty;
+    var columns: std.ArrayList(types.ColumnChange) = .empty;
     errdefer {
         columns.clearAndFree(allocator);
         columns.deinit(allocator);
@@ -702,7 +702,7 @@ test "startStreaming: insert all types to null write correctly" {
     try t.createTestChDb(allocator, io, db_name);
     defer t.teardownTestChDb(allocator, io, db_name) catch {};
 
-    var columns: std.ArrayList(types.ChangedColumn) = .empty;
+    var columns: std.ArrayList(types.ColumnChange) = .empty;
     try columns.ensureUnusedCapacity(allocator, 6);
 
     columns.appendAssumeCapacity(.{ .has_changes = false, .old_value = try allocator.dupe(u8, "1"), .new_value = try allocator.dupe(u8, "1"), .column_name = try allocator.dupe(u8, "id"), .is_key = true });

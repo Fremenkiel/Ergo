@@ -792,7 +792,7 @@ test "writeLog" {
     defer audit_log.deinit(allocator);
     try audit_log.ensureUnusedCapacity(allocator, 4);
 
-    var columns: std.ArrayList(types.ChangedColumn) = .empty;
+    var columns: std.ArrayList(types.ColumnChange) = .empty;
     defer columns.deinit(allocator);
 
     audit_log.appendSliceAssumeCapacity(&[_]types.AuditEntry{
@@ -813,7 +813,7 @@ test "parseRow ensure correct output" {
     var client = try setupMockClient(allocator, io);
     defer client.deinit();
 
-    var columns: std.ArrayList(types.ChangedColumn) = .empty;
+    var columns: std.ArrayList(types.ColumnChange) = .empty;
 
     try columns.ensureUnusedCapacity(allocator, 6);
 

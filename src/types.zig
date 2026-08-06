@@ -1,7 +1,9 @@
 const std = @import("std");
+
+const Io = std.Io;
 const mem = std.mem;
 
-pub const ChangedColumn = struct {
+pub const ColumnChange = struct {
     column_name: []const u8,
     old_value: ?[]const u8,
     new_value: ?[]const u8,
@@ -20,13 +22,75 @@ pub const ChangedColumn = struct {
     }
 };
 
+pub const Row = struct {
+    table_name: []const u8,
+    action: i8,
+    columns: std.ArrayList(ColumnChange),
+
+    pub fn deinit(self: *@This(), allocator: mem.Allocator) void {
+        allocator.free(self.table_name);
+        for (self.columns.items) |*col| { 
+            col.deinit(allocator);
+        }
+
+        self.columns.clearAndFree(allocator);
+        self.columns.deinit(allocator);
+    }
+
+};
+
+pub const Transaction = struct {
+    event_time: Io.Timestamp,
+    transaction_id: u64,
+    user_id: []const u8,
+    rows: std.ArrayList(Row),
+    ip_address: []const u8,
+
+    pub const empty: @This() = .{
+        .event_time = undefined,
+        .transaction_id = undefined,
+        .user_id = undefined,
+        .rows = .empty,
+        .ip_address = undefined,
+    };
+
+    pub fn deinit(self: *@This(), allocator: mem.Allocator) void {
+        allocator.free(self.table_name);
+        if (self.user_id.len > 0) allocator.free(self.user_id);
+        if (self.ip_address.len > 0) allocator.free(self.ip_address);
+
+        for (self.rows.items) |*row| { 
+            row.deinit(allocator);
+        }
+        self.rows.deinit(allocator);
+    }
+
+    pub fn clearAndFree(self: *@This(), allocator: mem.Allocator) void {
+        for (self.rows.items) |*row| { 
+            for (row.items) |*col| { 
+                col.deinit(allocator);
+            }
+            row.clearAndFree(allocator);
+        }
+    }
+
+    pub fn clearRetainingCapacity(self: *@This(), allocator: mem.Allocator) void {
+        for (self.rows.items) |*row| { 
+            for (row.items) |*col| { 
+                col.deinit(allocator);
+            }
+            row.clearRetainingCapacity(allocator);
+        }
+    }
+};
+
 pub const AuditEntry = struct {
     event_time: i64,
     transaction_id: u64,
     user_id: []const u8,
     table_name: []const u8,
     action: i8,
-    columns: std.ArrayList(ChangedColumn),
+    columns: std.ArrayList(ColumnChange),
     ip_address: []const u8,
 
     pub fn deinit(self: *@This(), allocator: mem.Allocator) void {
@@ -49,7 +113,7 @@ pub const AuditEntry = struct {
 test "AuditEntry ensure correct deinit" {
     const allocator = std.testing.allocator;
 
-    var columns: std.ArrayList(ChangedColumn) = .empty;
+    var columns: std.ArrayList(ColumnChange) = .empty;
     try columns.ensureUnusedCapacity(allocator, 3);
 
     for (columns.items) |*col| {

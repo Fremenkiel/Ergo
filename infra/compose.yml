@@ -3,6 +3,7 @@ services:
     container_name: db
     image: postgres:18.4
     restart: always
+    pull_policy: missing
     env_file:
       - ../.env
       - ../.env.development.local
@@ -38,6 +39,7 @@ services:
     container_name: clickhouse
     image: clickhouse/clickhouse-server:24.12-alpine
     restart: always
+    pull_policy: missing
     environment:
       CLICKHOUSE_DB: audit_log
       CLICKHOUSE_USER: default
