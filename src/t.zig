@@ -55,8 +55,7 @@ pub const AllTypesColumn = enum {
 
 pub const ChClient = struct {
     allocator: mem.Allocator,
-    written_logs: std.ArrayList(types.AuditEntry) = .empty,
-    // log_array: std.ArrayList(types.AuditEntry) = .empty,
+    written_logs: std.ArrayList(types.Transaction) = .empty,
 
     pub fn init(allocator: mem.Allocator) @This() {
         return .{.allocator = allocator};
@@ -65,31 +64,39 @@ pub const ChClient = struct {
     pub fn deinit(self: *@This()) void {
         for (self.written_logs.items) |*item| item.deinit(self.allocator);
         self.written_logs.deinit(self.allocator);
-        // for (self.log_array.items) |*entry| entry.deinit(self.allocator);
-        // self.log_array.deinit(self.allocator);
     }
 
-    pub fn writeLog(self: *@This(), entries: []types.AuditEntry) !void {
-        var copy_slice = try self.allocator.alloc(types.AuditEntry, entries.len);
-        for (entries, 0..) |entry, i| {
-            copy_slice[i] = entry;
+    pub fn writeLog(self: *@This(), transactions: []types.Transaction) !void {
+        var copy_slice = try self.allocator.alloc(types.Transaction, transactions.len);
+        for (transactions, 0..) |transaction, i| {
 
-            copy_slice[i].table_name = try self.allocator.dupe(u8, entry.table_name);
-            copy_slice[i].user_id = try self.allocator.dupe(u8, entry.user_id);
-            copy_slice[i].ip_address = try self.allocator.dupe(u8, entry.ip_address);
+            copy_slice[i].meta.event_time = transaction.meta.event_time;
+            copy_slice[i].meta.transaction_id = transaction.meta.transaction_id;
+            copy_slice[i].meta.user_id = try self.allocator.dupe(u8, transaction.meta.user_id);
+            copy_slice[i].meta.ip_address = try self.allocator.dupe(u8, transaction.meta.ip_address);
 
-            // copy_slice[i].columns = try entry.columns.clone(self.allocator);
-            copy_slice[i].columns = .empty;
-            try copy_slice[i].columns.ensureUnusedCapacity(self.allocator, entry.columns.items.len);
-            
-            for (entry.columns.items) |col| {
-                copy_slice[i].columns.appendAssumeCapacity(.{
-                    .column_name = try self.allocator.dupe(u8, col.column_name),
-                    .has_changes = col.has_changes,
-                    .old_value = if (col.old_value) |old_value| try self.allocator.dupe(u8, old_value) else null,
-                    .new_value = if (col.new_value) |new_value| try self.allocator.dupe(u8, new_value) else null,
-                    .is_key = col.is_key,
-                });
+            copy_slice[i].rows = .empty;
+            try copy_slice[i].rows.ensureUnusedCapacity(self.allocator, transaction.rows.items.len);
+            for (transaction.rows.items) |row| {
+                var copy_row: types.Row = .{
+                    .action = row.action,
+                    .table_name = try self.allocator.dupe(u8, row.table_name),
+                    .columns = .empty,
+                };
+
+                try copy_row.columns.ensureUnusedCapacity(self.allocator, row.columns.items.len);
+
+                for (row.columns.items) |col| {
+                    copy_row.columns.appendAssumeCapacity(.{
+                        .column_name = try self.allocator.dupe(u8, col.column_name),
+                        .has_changes = col.has_changes,
+                        .old_value = if (col.old_value) |old_value| try self.allocator.dupe(u8, old_value) else null,
+                        .new_value = if (col.new_value) |new_value| try self.allocator.dupe(u8, new_value) else null,
+                        .is_key = col.is_key,
+                    });
+                }
+
+                copy_slice[i].rows.appendAssumeCapacity(copy_row);
             }
         }
 
@@ -102,23 +109,26 @@ pub const PgClient = struct {
     allocator: mem.Allocator,
     io: Io,
 
-    responses: []pg_client.ReadResponse,
-    read_response_index: ?u8,
+    responses: types.Transaction,
 
     opts: void,
 
+    server_status: pg.packet.ServerPacket,
+    parser: pg.parser.PgOutput,
+
     conn: *bool,
 
-    pub fn init(allocator: mem.Allocator, io: Io, responses: []pg_client.ReadResponse) !@This() {
+    pub fn init(allocator: mem.Allocator, io: Io, responses: types.Transaction) !@This() {
         const conn = try allocator.create(bool);
         conn.* = true;
         return .{
             .allocator = allocator,
             .io = io,
             .responses = responses,
-            .read_response_index = null,
             .opts = {},
             .conn = conn,
+            .server_status = .ReadyForQuery,
+            .parser = .init(allocator),
         };
     }
 
@@ -143,26 +153,8 @@ pub const PgClient = struct {
         _ = self;
     }
 
-    pub fn readWAL(self: *@This()) error{Timeout,WouldBlock,Canceled}!?pg_client.ReadResponse {
-        if (self.read_response_index == null) {
-            self.read_response_index = 0;
-        } else {
-            if (self.read_response_index.? > self.responses.len) {
-                try Io.sleep(self.io, Io.Duration{ .nanoseconds = 500 * std.time.ns_per_ms }, .real);
-                return error.Timeout;
-            }
-            self.read_response_index.? += 1;
-        }
-
-        if (self.read_response_index.? == self.responses.len) {
-            return .{
-                .data = null,
-                .timestamp = null,
-                .message = pg.packet.ServerPacket.ReadyForQuery,
-            };
-        }
-
-        return self.responses[self.read_response_index.?];
+    pub fn readWAL(self: *@This()) error{Timeout,WouldBlock,Canceled}!types.Transaction {
+        return self.responses;
     }
 
     pub fn createConn(allocator: mem.Allocator, io: Io, opts: anytype) !*bool {

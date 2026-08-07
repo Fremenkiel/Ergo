@@ -28,10 +28,10 @@ pub const ParseResponse = struct {
     };
 
     pub fn deinit(self: *@This(), allocator: mem.Allocator) void {
-        if (self.user_id != null) self.allocator.free(self.user_id);
+        if (self.user_id) |*user_id| allocator.free(user_id);
         self.user_id = null;
 
-        if (self.ip_address != null) self.allocator.free(self.ip_address);
+        if (self.ip_address) |*ip_address| allocator.free(ip_address);
         self.ip_address = null;
 
         if (self.data) |*entry| {
@@ -122,6 +122,8 @@ pub const PgOutput = struct {
 
                 response.last_lsn = try reader.takeInt(u64, .big);
                 response.timestamp = Timestamp.decode(try reader.takeInt(u64, .big));
+
+                self.clear();
 
                 return response;
             },
@@ -401,11 +403,34 @@ fn initContextColumns(allocator: mem.Allocator, table_def: TableDef) !std.ArrayL
     return columns;
 }
 
+fn setupParser(allocator: mem.Allocator) !PgOutput {
+    var cols = std.ArrayList(ColumnDef).empty;
+    try cols.ensureUnusedCapacity(allocator, 6);
+    try cols.append(allocator, .{ .name = try allocator.dupe(u8, "id"), .is_key = true });
+    try cols.append(allocator, .{ .name = try allocator.dupe(u8, "address_line_1"), .is_key = true });
+    try cols.append(allocator, .{ .name = try allocator.dupe(u8, "address_line_2"), .is_key = true });
+    try cols.append(allocator, .{ .name = try allocator.dupe(u8, "postal_code"), .is_key = true });
+    try cols.append(allocator, .{ .name = try allocator.dupe(u8, "city"), .is_key = true });
+    try cols.append(allocator, .{ .name = try allocator.dupe(u8, "country"), .is_key = true });
+
+    var table_reg = std.AutoHashMap(u32, TableDef).init(allocator);
+    try table_reg.put(16390, .{
+        .namespace = try allocator.dupe(u8, "public"),
+        .name = try allocator.dupe(u8, "addresses"),
+        .columns = cols,
+    });
+
+    return .{
+        .allocator = allocator,
+        .table_reg = table_reg,
+    };
+}
+
 test "parsePgOutput maps BEGIN correctly" {
     const allocator = testing.allocator;
 
     const commit_hex = "420000000001c160880002f9a2afe34ece00000317";
-    const xid: u64 = 791;
+    const xid: u32 = 791;
 
     const commit_bytes = try allocator.alloc(u8, commit_hex.len / 2);
     defer allocator.free(commit_bytes);
@@ -454,8 +479,10 @@ test "parsePgOutput maps METADATA correctly" {
         }
     }
 
-    try testing.expectEqualStrings("42", parser.user_id);
-    try testing.expectEqualStrings("192.168.1.50", parser.ip_address);
+    try testing.expectEqual(true, result != null);
+
+    try testing.expectEqualStrings("42", result.?.user_id.?);
+    try testing.expectEqualStrings("192.168.1.50", result.?.ip_address.?);
 
     try testing.expectEqual(true, result != null);
     try testing.expectEqual(null, result.?.data);
@@ -508,17 +535,18 @@ test "parsePgOutput maps INSERT correctly" {
         }
     }
 
-    try testing.expectEqual(1, result.data.?.action);
-    try testing.expectEqualStrings("public.addresses", result.data.?.table_name);
+    try testing.expectEqual(true, result != null);
+    try testing.expectEqual(1, result.?.data.?.action);
+    try testing.expectEqualStrings("public.addresses", result.?.data.?.table_name);
 
-    try testing.expectEqual(6, result.data.?.columns.items.len);
+    try testing.expectEqual(6, result.?.data.?.columns.items.len);
 
-    const id = result.data.?.columns.items[0];
-    const address_line_1 = result.data.?.columns.items[1];
-    const address_line_2 = result.data.?.columns.items[2];
-    const postal_code = result.data.?.columns.items[3];
-    const city = result.data.?.columns.items[4];
-    const country = result.data.?.columns.items[5];
+    const id = result.?.data.?.columns.items[0];
+    const address_line_1 = result.?.data.?.columns.items[1];
+    const address_line_2 = result.?.data.?.columns.items[2];
+    const postal_code = result.?.data.?.columns.items[3];
+    const city = result.?.data.?.columns.items[4];
+    const country = result.?.data.?.columns.items[5];
 
     // Column names
     try testing.expectEqualStrings("id", id.column_name);
@@ -552,7 +580,6 @@ test "parsePgOutput maps INSERT correctly" {
     try testing.expectEqualStrings("Cupertino", city.new_value.?);
     try testing.expectEqualStrings("US", country.new_value.?);
 
-    try testing.expectEqual(true, result != null);
     try testing.expectEqual(null, result.?.xid);
     try testing.expectEqual(null, result.?.ip_address);
     try testing.expectEqual(null, result.?.user_id);
@@ -584,17 +611,18 @@ test "parsePgOutput maps UPDATE correctly" {
         }
     }
 
-    try testing.expectEqual(2, result.data.?.action);
-    try testing.expectEqualStrings("public.addresses", result.data.?.table_name);
+    try testing.expectEqual(true, result != null);
+    try testing.expectEqual(2, result.?.data.?.action);
+    try testing.expectEqualStrings("public.addresses", result.?.data.?.table_name);
 
-    try testing.expectEqual(6, result.data.?.columns.items.len);
+    try testing.expectEqual(6, result.?.data.?.columns.items.len);
 
-    const id = result.data.?.columns.items[0];
-    const address_line_1 = result.data.?.columns.items[1];
-    const address_line_2 = result.data.?.columns.items[2];
-    const postal_code = result.data.?.columns.items[3];
-    const city = result.data.?.columns.items[4];
-    const country = result.data.?.columns.items[5];
+    const id = result.?.data.?.columns.items[0];
+    const address_line_1 = result.?.data.?.columns.items[1];
+    const address_line_2 = result.?.data.?.columns.items[2];
+    const postal_code = result.?.data.?.columns.items[3];
+    const city = result.?.data.?.columns.items[4];
+    const country = result.?.data.?.columns.items[5];
 
     // Column names
     try testing.expectEqualStrings("id", id.column_name);
@@ -628,7 +656,6 @@ test "parsePgOutput maps UPDATE correctly" {
     try testing.expectEqualStrings("Mountain View", city.new_value.?);
     try testing.expectEqualStrings("US", country.new_value.?);
 
-    try testing.expectEqual(true, result != null);
     try testing.expectEqual(null, result.?.xid);
     try testing.expectEqual(null, result.?.ip_address);
     try testing.expectEqual(null, result.?.user_id);
@@ -656,17 +683,18 @@ test "parsePgOutput maps DELETE correctly" {
         }
     }
 
-    try testing.expectEqual(3, result.data.?.action);
-    try testing.expectEqualStrings("public.addresses", result.data.?.table_name);
+    try testing.expectEqual(true, result != null);
+    try testing.expectEqual(3, result.?.data.?.action);
+    try testing.expectEqualStrings("public.addresses", result.?.data.?.table_name);
 
-    try testing.expectEqual(6, result.data.?.columns.items.len);
+    try testing.expectEqual(6, result.?.data.?.columns.items.len);
 
-    const id = result.data.?.columns.items[0];
-    const address_line_1 = result.data.?.columns.items[1];
-    const address_line_2 = result.data.?.columns.items[2];
-    const postal_code = result.data.?.columns.items[3];
-    const city = result.data.?.columns.items[4];
-    const country = result.data.?.columns.items[5];
+    const id = result.?.data.?.columns.items[0];
+    const address_line_1 = result.?.data.?.columns.items[1];
+    const address_line_2 = result.?.data.?.columns.items[2];
+    const postal_code = result.?.data.?.columns.items[3];
+    const city = result.?.data.?.columns.items[4];
+    const country = result.?.data.?.columns.items[5];
 
     // Column names
     try testing.expectEqualStrings("id", id.column_name);
@@ -700,7 +728,6 @@ test "parsePgOutput maps DELETE correctly" {
     try testing.expectEqual(null, city.new_value);
     try testing.expectEqual(null, country.new_value);
 
-    try testing.expectEqual(true, result != null);
     try testing.expectEqual(0, result.?.xid);
     try testing.expectEqual(null, result.?.ip_address);
     try testing.expectEqual(null, result.?.user_id);
@@ -713,7 +740,7 @@ test "parsePgOutput maps COMMIT correctly" {
 
     const insert_hex = "43000000000001c160880000000001c160b80002f9a2afe34ece";
     const last_lsn: u64 = 29450424;
-    const commit_timestamp: u64 = 837427084349134;
+    const commit_timestamp: Io.Timestamp = Io.Timestamp.fromNanoseconds(1784111884349134000);
 
     const insert_bytes = try allocator.alloc(u8, insert_hex.len / 2);
     defer allocator.free(insert_bytes);
@@ -769,6 +796,36 @@ test "parsePgOutput maps COMMIT correctly" {
 //     try testing.expectEqualStrings("", parser.ip_address);
 //     try testing.expectEqualStrings("", parser.user_id);
 // }
+
+test "clear: ensure context correctly" {
+    const allocator = testing.allocator;
+
+    var parser = try setupParser(allocator);
+    defer parser.deinit();
+
+    const commit_hex = "43000000000001c160880000000001c160b80002f9a2afe34ece";
+
+    const commit_bytes = try allocator.alloc(u8, commit_hex.len / 2);
+    defer allocator.free(commit_bytes);
+    _ = try std.fmt.hexToBytes(commit_bytes, commit_hex);
+
+    var result = try parser.decode(commit_bytes);
+
+    result.?.ip_address = try allocator.dupe(u8, "192.168.1.50");
+    result.?.user_id = try allocator.dupe(u8, "42");
+    result.?.xid = 791;
+
+        if (result) |*res| {
+            res.deinit(allocator);
+        }
+
+    try testing.expectEqual(true, result != null);
+    try testing.expectEqual(null, result.?.data);
+
+    try testing.expectEqual(0, result.?.xid);
+    try testing.expectEqual(undefined, result.?.ip_address);
+    try testing.expectEqual(undefined, result.?.user_id);
+}
 
 test "update from value to null" {
 }

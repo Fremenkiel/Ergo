@@ -14,7 +14,6 @@ const _pg_client = @import("pg_client.zig");
 const ChClient = @import("ch_client.zig").ChClient;
 const PgClient = _pg_client.PgClient;
 const PgClientError = _pg_client.PgClientError;
-const ReadResponse = _pg_client.ReadResponse;
 
 pub const sync_marker_str = "SYNC_MARKER_REACHED";
 pub const submit_marker_str = "CH_DATA_SUBMITTED_MARKER";
@@ -44,8 +43,7 @@ fn WalStreamT(comptime StreamChClient: type, comptime StreamPgClient: type) type
 
         duration: Io.Duration,
         last_write_timestamp: Io.Timestamp,
-        log_array: std.ArrayList(types.AuditEntry) = .empty,
-        transaction_array: std.ArrayList(types.AuditEntry) = .empty,
+        log_array: std.ArrayList(types.Transaction) = .empty,
 
         status: StreamStatus = .Idle,
 
@@ -67,9 +65,6 @@ fn WalStreamT(comptime StreamChClient: type, comptime StreamPgClient: type) type
         pub fn deinit(self: *@This()) void {
             for (self.log_array.items) |*entry| entry.deinit(self.allocator);
             self.log_array.deinit(self.allocator);
-
-            for (self.transaction_array.items) |*entry| entry.deinit(self.allocator);
-            self.transaction_array.deinit(self.allocator);
         }
 
         pub fn startStreaming(self: *@This()) !void {
@@ -112,44 +107,30 @@ fn WalStreamT(comptime StreamChClient: type, comptime StreamPgClient: type) type
                     }
                 }
 
-                var wal_response = self.pg_client.readWAL() catch |err| switch (err) {
+                var response = self.pg_client.readWAL() catch |err| switch (err) {
                     error.WouldBlock, error.Timeout => {
                         continue; 
                     },
                     else => return err,
                 };
 
-                if (wal_response) |*response| {
-                    switch (response.message) {
+                    switch (self.pg_client.server_status) {
                         pg.packet.ServerPacket.XLogData => {
                             if (self.status != .CopyData) self.status = .CopyData;
 
-                            if (response.data) |entry| {
-                                try self.transaction_array.append(self.allocator, entry);
-                                // remove linking
-                                response.data = null;
-                            }
-
-                            if (response.timestamp) |timestamp| {
-                                for (self.transaction_array.items) |*row| {
-                                    row.event_time = timestamp;
-                                }
-                                try self.log_array.appendSlice(self.allocator, self.transaction_array.items);
-                                self.transaction_array.clearRetainingCapacity();
-
-                            }
+                        if (response.rows.items.len > 0) {
                             // Test hook
-                            if (self.transaction_array.items.len > 0 and self.is_test) {
+                            if (self.is_test) {
                                 var marker_idx: ?usize = null;
-                                for (self.transaction_array.items, 0..) |*item, i| {
-                                    if (std.mem.eql(u8, "public.test_sync_marker", item.table_name)) {
+                                for (response.rows.items, 0..) |*row, i| {
+                                    if (std.mem.eql(u8, "public.test_sync_marker", row.table_name)) {
                                         marker_idx = i;
                                         break;
                                     }
                                 }
 
                                 if (marker_idx) |idx| {
-                                    _ = self.transaction_array.orderedRemove(idx);
+                                    _ = response.rows.orderedRemove(idx);
                                     try std.Io.File.stdout().writeStreamingAll(self.io, sync_marker_str);
                                     try Io.File.stdout().writeStreamingAll(self.io, "\n");
 
@@ -158,6 +139,10 @@ fn WalStreamT(comptime StreamChClient: type, comptime StreamPgClient: type) type
                                     }
                                 }
                             }
+
+                            try self.log_array.append(self.allocator, response);
+                        }
+
                         },
                         pg.packet.ServerPacket.Keepalive => {},
                         pg.packet.ServerPacket.CopyDone => {},
@@ -166,7 +151,6 @@ fn WalStreamT(comptime StreamChClient: type, comptime StreamPgClient: type) type
                             self.status = .Idle;
                         },
                     }
-                }
             }
         }
 
@@ -209,24 +193,27 @@ test "startStreaming: read and parse correctly" {
     columns.appendAssumeCapacity(.{ .has_changes = true, .old_value = try allocator.dupe(u8, "Mountain View"), .new_value = try allocator.dupe(u8, "Cupertino"), .column_name = try allocator.dupe(u8, "city"), .is_key = false });
     columns.appendAssumeCapacity(.{ .has_changes = false, .old_value = try allocator.dupe(u8, "US"), .new_value = try allocator.dupe(u8, "US"), .column_name = try allocator.dupe(u8, "country"), .is_key = false });
 
-    var res = [_]ReadResponse{
-        .{ 
-            .data = .{
-                .event_time = undefined,
-                .table_name = try allocator.dupe(u8, "test.addresses"),
-                .action = 1,
-                .columns = columns,
-                .transaction_id = 793,
-                .user_id = try allocator.dupe(u8, "42"),
-                .ip_address = try allocator.dupe(u8, "192.168.1.50"),
-            },
-            .timestamp = 10,
-            .message = pg.packet.ServerPacket.XLogData,
+    var rows: std.ArrayList(types.Row) = .empty;
+    try rows.append(allocator, .{
+        .table_name = try allocator.dupe(u8, "test.addresses"),
+        .action = 1,
+        .columns = columns,
+    });
+
+    const res: types.Transaction = .{
+        .meta = .{
+            .event_time = Io.Timestamp.fromNanoseconds(10000),
+            .transaction_id = 793,
+            .user_id = try allocator.dupe(u8, "42"),
+            .ip_address = try allocator.dupe(u8, "192.168.1.50"),
         },
+        .rows = rows
     };
 
-    var pg_client = try t.PgClient.init(allocator, io, &res);
+    var pg_client = try t.PgClient.init(allocator, io, res);
     defer pg_client.deinit();
+
+    pg_client.server_status = .XLogData;
 
     var ch_client = t.ChClient.init(allocator);
     defer ch_client.deinit();
@@ -255,23 +242,23 @@ test "startStreaming: read and parse correctly" {
     try stream.endStreaming();
 
     try testing.expectEqual(1, ch_client.written_logs.items.len);
-    try testing.expectEqual(1, ch_client.written_logs.items[0].action);
-    try testing.expectEqualStrings("test.addresses", ch_client.written_logs.items[0].table_name);
-    try testing.expectEqualStrings("42", ch_client.written_logs.items[0].user_id);
-    try testing.expectEqualStrings("192.168.1.50", ch_client.written_logs.items[0].ip_address);
-    try testing.expectEqual(true, ch_client.written_logs.items[0].columns.items[0].is_key);
-    try testing.expectEqualStrings("1", ch_client.written_logs.items[0].columns.items[0].new_value.?);
-    try testing.expectEqual(10, ch_client.written_logs.items[0].event_time);
-    try testing.expectEqual(793, ch_client.written_logs.items[0].transaction_id);
+    try testing.expectEqual(1, ch_client.written_logs.items[0].rows.items[0].action);
+    try testing.expectEqualStrings("test.addresses", ch_client.written_logs.items[0].rows.items[0].table_name);
+    try testing.expectEqualStrings("42", ch_client.written_logs.items[0].meta.user_id);
+    try testing.expectEqualStrings("192.168.1.50", ch_client.written_logs.items[0].meta.ip_address);
+    try testing.expectEqual(true, ch_client.written_logs.items[0].rows.items[0].columns.items[0].is_key);
+    try testing.expectEqualStrings("1", ch_client.written_logs.items[0].rows.items[0].columns.items[0].new_value.?);
+    try testing.expectEqual(10, ch_client.written_logs.items[0].meta.event_time.toMilliseconds());
+    try testing.expectEqual(793, ch_client.written_logs.items[0].meta.transaction_id);
 
-    try testing.expectEqual(6, ch_client.written_logs.items[0].columns.items.len);
+    try testing.expectEqual(6, ch_client.written_logs.items[0].rows.items[0].columns.items.len);
 
-    const id_column = ch_client.written_logs.items[0].columns.items[0];
-    const address_line_1_column = ch_client.written_logs.items[0].columns.items[1];
-    const address_line_2_column = ch_client.written_logs.items[0].columns.items[2];
-    const postal_code_column = ch_client.written_logs.items[0].columns.items[3];
-    const city_column = ch_client.written_logs.items[0].columns.items[4];
-    const country_column = ch_client.written_logs.items[0].columns.items[5];
+    const id_column = ch_client.written_logs.items[0].rows.items[0].columns.items[0];
+    const address_line_1_column = ch_client.written_logs.items[0].rows.items[0].columns.items[1];
+    const address_line_2_column = ch_client.written_logs.items[0].rows.items[0].columns.items[2];
+    const postal_code_column = ch_client.written_logs.items[0].rows.items[0].columns.items[3];
+    const city_column = ch_client.written_logs.items[0].rows.items[0].columns.items[4];
+    const country_column = ch_client.written_logs.items[0].rows.items[0].columns.items[5];
 
     try testing.expectEqualStrings("id", id_column.column_name);
     try testing.expectEqualStrings("address_line_1", address_line_1_column.column_name);
@@ -380,52 +367,52 @@ test "startStreaming: insert all types read correctly" {
     try stream.stream(&mock_is_shutting_down);
     try stream.endStreaming();
 
-    const id_new_values = ch_client.written_logs.items[0].columns.items[0].new_value;
-    const col_int2_value = ch_client.written_logs.items[0].columns.items[1].new_value;
-    const col_int2_arr_value = ch_client.written_logs.items[0].columns.items[2].new_value;
-    const col_int4_value = ch_client.written_logs.items[0].columns.items[3].new_value;
-    const col_int4_arr_value = ch_client.written_logs.items[0].columns.items[4].new_value;
-    const col_int8_value = ch_client.written_logs.items[0].columns.items[5].new_value;
-    const col_int8_arr_value = ch_client.written_logs.items[0].columns.items[6].new_value;
-    const col_float4_value = ch_client.written_logs.items[0].columns.items[7].new_value;
-    const col_float4_arr_value = ch_client.written_logs.items[0].columns.items[8].new_value;
-    const col_float8_value = ch_client.written_logs.items[0].columns.items[9].new_value;
-    const col_float8_arr_value = ch_client.written_logs.items[0].columns.items[10].new_value;
-    const col_bool_value = ch_client.written_logs.items[0].columns.items[11].new_value;
-    const col_bool_arr_value = ch_client.written_logs.items[0].columns.items[12].new_value;
-    const col_text_value = ch_client.written_logs.items[0].columns.items[13].new_value;
-    const col_text_arr_value = ch_client.written_logs.items[0].columns.items[14].new_value;
-    const col_bytea_value = ch_client.written_logs.items[0].columns.items[15].new_value;
-    const col_bytea_arr_value = ch_client.written_logs.items[0].columns.items[16].new_value;
-    const col_enum_value = ch_client.written_logs.items[0].columns.items[17].new_value;
-    const col_enum_arr_value = ch_client.written_logs.items[0].columns.items[18].new_value;
-    const col_uuid_value = ch_client.written_logs.items[0].columns.items[19].new_value;
-    const col_uuid_arr_value = ch_client.written_logs.items[0].columns.items[20].new_value;
-    const col_numeric_value = ch_client.written_logs.items[0].columns.items[21].new_value;
-    const col_numeric_arr_value = ch_client.written_logs.items[0].columns.items[22].new_value;
-    const col_timestamp_value = ch_client.written_logs.items[0].columns.items[23].new_value;
-    const col_timestamp_arr_value = ch_client.written_logs.items[0].columns.items[24].new_value;
-    const col_json_value = ch_client.written_logs.items[0].columns.items[25].new_value;
-    const col_json_arr_value = ch_client.written_logs.items[0].columns.items[26].new_value;
-    const col_jsonb_value = ch_client.written_logs.items[0].columns.items[27].new_value;
-    const col_jsonb_arr_value = ch_client.written_logs.items[0].columns.items[28].new_value;
-    const col_char_value = ch_client.written_logs.items[0].columns.items[29].new_value;
-    const col_char_arr_value = ch_client.written_logs.items[0].columns.items[30].new_value;
-    const col_charn_value = ch_client.written_logs.items[0].columns.items[31].new_value;
-    const col_charn_arr_value = ch_client.written_logs.items[0].columns.items[32].new_value;
-    const col_timestamptz_value = ch_client.written_logs.items[0].columns.items[33].new_value;
-    const col_timestamptz_arr_value = ch_client.written_logs.items[0].columns.items[34].new_value;
-    const col_cidr_value = ch_client.written_logs.items[0].columns.items[35].new_value;
-    const col_cidr_arr_value = ch_client.written_logs.items[0].columns.items[36].new_value;
-    const col_inet_value = ch_client.written_logs.items[0].columns.items[37].new_value;
-    const col_inet_arr_value = ch_client.written_logs.items[0].columns.items[38].new_value;
-    const col_macaddr_value = ch_client.written_logs.items[0].columns.items[39].new_value;
-    const col_macaddr_arr_value = ch_client.written_logs.items[0].columns.items[40].new_value;
-    const col_macaddr8_value = ch_client.written_logs.items[0].columns.items[41].new_value;
-    const col_macaddr8_arr_value = ch_client.written_logs.items[0].columns.items[42].new_value;
+    const id_new_values = ch_client.written_logs.items[0].rows.items[0].columns.items[0].new_value;
+    const col_int2_value = ch_client.written_logs.items[0].rows.items[0].columns.items[1].new_value;
+    const col_int2_arr_value = ch_client.written_logs.items[0].rows.items[0].columns.items[2].new_value;
+    const col_int4_value = ch_client.written_logs.items[0].rows.items[0].columns.items[3].new_value;
+    const col_int4_arr_value = ch_client.written_logs.items[0].rows.items[0].columns.items[4].new_value;
+    const col_int8_value = ch_client.written_logs.items[0].rows.items[0].columns.items[5].new_value;
+    const col_int8_arr_value = ch_client.written_logs.items[0].rows.items[0].columns.items[6].new_value;
+    const col_float4_value = ch_client.written_logs.items[0].rows.items[0].columns.items[7].new_value;
+    const col_float4_arr_value = ch_client.written_logs.items[0].rows.items[0].columns.items[8].new_value;
+    const col_float8_value = ch_client.written_logs.items[0].rows.items[0].columns.items[9].new_value;
+    const col_float8_arr_value = ch_client.written_logs.items[0].rows.items[0].columns.items[10].new_value;
+    const col_bool_value = ch_client.written_logs.items[0].rows.items[0].columns.items[11].new_value;
+    const col_bool_arr_value = ch_client.written_logs.items[0].rows.items[0].columns.items[12].new_value;
+    const col_text_value = ch_client.written_logs.items[0].rows.items[0].columns.items[13].new_value;
+    const col_text_arr_value = ch_client.written_logs.items[0].rows.items[0].columns.items[14].new_value;
+    const col_bytea_value = ch_client.written_logs.items[0].rows.items[0].columns.items[15].new_value;
+    const col_bytea_arr_value = ch_client.written_logs.items[0].rows.items[0].columns.items[16].new_value;
+    const col_enum_value = ch_client.written_logs.items[0].rows.items[0].columns.items[17].new_value;
+    const col_enum_arr_value = ch_client.written_logs.items[0].rows.items[0].columns.items[18].new_value;
+    const col_uuid_value = ch_client.written_logs.items[0].rows.items[0].columns.items[19].new_value;
+    const col_uuid_arr_value = ch_client.written_logs.items[0].rows.items[0].columns.items[20].new_value;
+    const col_numeric_value = ch_client.written_logs.items[0].rows.items[0].columns.items[21].new_value;
+    const col_numeric_arr_value = ch_client.written_logs.items[0].rows.items[0].columns.items[22].new_value;
+    const col_timestamp_value = ch_client.written_logs.items[0].rows.items[0].columns.items[23].new_value;
+    const col_timestamp_arr_value = ch_client.written_logs.items[0].rows.items[0].columns.items[24].new_value;
+    const col_json_value = ch_client.written_logs.items[0].rows.items[0].columns.items[25].new_value;
+    const col_json_arr_value = ch_client.written_logs.items[0].rows.items[0].columns.items[26].new_value;
+    const col_jsonb_value = ch_client.written_logs.items[0].rows.items[0].columns.items[27].new_value;
+    const col_jsonb_arr_value = ch_client.written_logs.items[0].rows.items[0].columns.items[28].new_value;
+    const col_char_value = ch_client.written_logs.items[0].rows.items[0].columns.items[29].new_value;
+    const col_char_arr_value = ch_client.written_logs.items[0].rows.items[0].columns.items[30].new_value;
+    const col_charn_value = ch_client.written_logs.items[0].rows.items[0].columns.items[31].new_value;
+    const col_charn_arr_value = ch_client.written_logs.items[0].rows.items[0].columns.items[32].new_value;
+    const col_timestamptz_value = ch_client.written_logs.items[0].rows.items[0].columns.items[33].new_value;
+    const col_timestamptz_arr_value = ch_client.written_logs.items[0].rows.items[0].columns.items[34].new_value;
+    const col_cidr_value = ch_client.written_logs.items[0].rows.items[0].columns.items[35].new_value;
+    const col_cidr_arr_value = ch_client.written_logs.items[0].rows.items[0].columns.items[36].new_value;
+    const col_inet_value = ch_client.written_logs.items[0].rows.items[0].columns.items[37].new_value;
+    const col_inet_arr_value = ch_client.written_logs.items[0].rows.items[0].columns.items[38].new_value;
+    const col_macaddr_value = ch_client.written_logs.items[0].rows.items[0].columns.items[39].new_value;
+    const col_macaddr_arr_value = ch_client.written_logs.items[0].rows.items[0].columns.items[40].new_value;
+    const col_macaddr8_value = ch_client.written_logs.items[0].rows.items[0].columns.items[41].new_value;
+    const col_macaddr8_arr_value = ch_client.written_logs.items[0].rows.items[0].columns.items[42].new_value;
 
     try testing.expectEqual(1, ch_client.written_logs.items.len);
-    try testing.expectEqual(43, ch_client.written_logs.items[0].columns.items.len);
+    try testing.expectEqual(43, ch_client.written_logs.items[0].rows.items[0].columns.items.len);
 
     try testing.expectEqualStrings("1", id_new_values.?);
     try testing.expectEqualStrings("-32768", col_int2_value.?);
@@ -556,52 +543,52 @@ test "startStreaming: update all types to null read correctly" {
     try stream.stream(&mock_is_shutting_down);
     try stream.endStreaming();
 
-    const id = ch_client.written_logs.items[1].columns.items[0];
-    const col_int2 = ch_client.written_logs.items[1].columns.items[1];
-    const col_int2_arr = ch_client.written_logs.items[1].columns.items[2];
-    const col_int4 = ch_client.written_logs.items[1].columns.items[3];
-    const col_int4_arr = ch_client.written_logs.items[1].columns.items[4];
-    const col_int8 = ch_client.written_logs.items[1].columns.items[5];
-    const col_int8_arr = ch_client.written_logs.items[1].columns.items[6];
-    const col_float4 = ch_client.written_logs.items[1].columns.items[7];
-    const col_float4_arr = ch_client.written_logs.items[1].columns.items[8];
-    const col_float8 = ch_client.written_logs.items[1].columns.items[9];
-    const col_float8_arr = ch_client.written_logs.items[1].columns.items[10];
-    const col_bool = ch_client.written_logs.items[1].columns.items[11];
-    const col_bool_arr = ch_client.written_logs.items[1].columns.items[12];
-    const col_text = ch_client.written_logs.items[1].columns.items[13];
-    const col_text_arr = ch_client.written_logs.items[1].columns.items[14];
-    const col_bytea = ch_client.written_logs.items[1].columns.items[15];
-    const col_bytea_arr = ch_client.written_logs.items[1].columns.items[16];
-    const col_enum = ch_client.written_logs.items[1].columns.items[17];
-    const col_enum_arr = ch_client.written_logs.items[1].columns.items[18];
-    const col_uuid = ch_client.written_logs.items[1].columns.items[19];
-    const col_uuid_arr = ch_client.written_logs.items[1].columns.items[20];
-    const col_numeric = ch_client.written_logs.items[1].columns.items[21];
-    const col_numeric_arr = ch_client.written_logs.items[1].columns.items[22];
-    const col_timestamp = ch_client.written_logs.items[1].columns.items[23];
-    const col_timestamp_arr = ch_client.written_logs.items[1].columns.items[24];
-    const col_json = ch_client.written_logs.items[1].columns.items[25];
-    const col_json_arr = ch_client.written_logs.items[1].columns.items[26];
-    const col_jsonb = ch_client.written_logs.items[1].columns.items[27];
-    const col_jsonb_arr = ch_client.written_logs.items[1].columns.items[28];
-    const col_char = ch_client.written_logs.items[1].columns.items[29];
-    const col_char_arr = ch_client.written_logs.items[1].columns.items[30];
-    const col_charn = ch_client.written_logs.items[1].columns.items[31];
-    const col_charn_arr = ch_client.written_logs.items[1].columns.items[32];
-    const col_timestamptz = ch_client.written_logs.items[1].columns.items[33];
-    const col_timestamptz_arr = ch_client.written_logs.items[1].columns.items[34];
-    const col_cidr = ch_client.written_logs.items[1].columns.items[35];
-    const col_cidr_arr = ch_client.written_logs.items[1].columns.items[36];
-    const col_inet = ch_client.written_logs.items[1].columns.items[37];
-    const col_inet_arr = ch_client.written_logs.items[1].columns.items[38];
-    const col_macaddr = ch_client.written_logs.items[1].columns.items[39];
-    const col_macaddr_arr = ch_client.written_logs.items[1].columns.items[40];
-    const col_macaddr8 = ch_client.written_logs.items[1].columns.items[41];
-    const col_macaddr8_arr = ch_client.written_logs.items[1].columns.items[42];
+    const id = ch_client.written_logs.items[1].rows.items[0].columns.items[0];
+    const col_int2 = ch_client.written_logs.items[1].rows.items[0].columns.items[1];
+    const col_int2_arr = ch_client.written_logs.items[1].rows.items[0].columns.items[2];
+    const col_int4 = ch_client.written_logs.items[1].rows.items[0].columns.items[3];
+    const col_int4_arr = ch_client.written_logs.items[1].rows.items[0].columns.items[4];
+    const col_int8 = ch_client.written_logs.items[1].rows.items[0].columns.items[5];
+    const col_int8_arr = ch_client.written_logs.items[1].rows.items[0].columns.items[6];
+    const col_float4 = ch_client.written_logs.items[1].rows.items[0].columns.items[7];
+    const col_float4_arr = ch_client.written_logs.items[1].rows.items[0].columns.items[8];
+    const col_float8 = ch_client.written_logs.items[1].rows.items[0].columns.items[9];
+    const col_float8_arr = ch_client.written_logs.items[1].rows.items[0].columns.items[10];
+    const col_bool = ch_client.written_logs.items[1].rows.items[0].columns.items[11];
+    const col_bool_arr = ch_client.written_logs.items[1].rows.items[0].columns.items[12];
+    const col_text = ch_client.written_logs.items[1].rows.items[0].columns.items[13];
+    const col_text_arr = ch_client.written_logs.items[1].rows.items[0].columns.items[14];
+    const col_bytea = ch_client.written_logs.items[1].rows.items[0].columns.items[15];
+    const col_bytea_arr = ch_client.written_logs.items[1].rows.items[0].columns.items[16];
+    const col_enum = ch_client.written_logs.items[1].rows.items[0].columns.items[17];
+    const col_enum_arr = ch_client.written_logs.items[1].rows.items[0].columns.items[18];
+    const col_uuid = ch_client.written_logs.items[1].rows.items[0].columns.items[19];
+    const col_uuid_arr = ch_client.written_logs.items[1].rows.items[0].columns.items[20];
+    const col_numeric = ch_client.written_logs.items[1].rows.items[0].columns.items[21];
+    const col_numeric_arr = ch_client.written_logs.items[1].rows.items[0].columns.items[22];
+    const col_timestamp = ch_client.written_logs.items[1].rows.items[0].columns.items[23];
+    const col_timestamp_arr = ch_client.written_logs.items[1].rows.items[0].columns.items[24];
+    const col_json = ch_client.written_logs.items[1].rows.items[0].columns.items[25];
+    const col_json_arr = ch_client.written_logs.items[1].rows.items[0].columns.items[26];
+    const col_jsonb = ch_client.written_logs.items[1].rows.items[0].columns.items[27];
+    const col_jsonb_arr = ch_client.written_logs.items[1].rows.items[0].columns.items[28];
+    const col_char = ch_client.written_logs.items[1].rows.items[0].columns.items[29];
+    const col_char_arr = ch_client.written_logs.items[1].rows.items[0].columns.items[30];
+    const col_charn = ch_client.written_logs.items[1].rows.items[0].columns.items[31];
+    const col_charn_arr = ch_client.written_logs.items[1].rows.items[0].columns.items[32];
+    const col_timestamptz = ch_client.written_logs.items[1].rows.items[0].columns.items[33];
+    const col_timestamptz_arr = ch_client.written_logs.items[1].rows.items[0].columns.items[34];
+    const col_cidr = ch_client.written_logs.items[1].rows.items[0].columns.items[35];
+    const col_cidr_arr = ch_client.written_logs.items[1].rows.items[0].columns.items[36];
+    const col_inet = ch_client.written_logs.items[1].rows.items[0].columns.items[37];
+    const col_inet_arr = ch_client.written_logs.items[1].rows.items[0].columns.items[38];
+    const col_macaddr = ch_client.written_logs.items[1].rows.items[0].columns.items[39];
+    const col_macaddr_arr = ch_client.written_logs.items[1].rows.items[0].columns.items[40];
+    const col_macaddr8 = ch_client.written_logs.items[1].rows.items[0].columns.items[41];
+    const col_macaddr8_arr = ch_client.written_logs.items[1].rows.items[0].columns.items[42];
 
     try testing.expectEqual(2, ch_client.written_logs.items.len);
-    try testing.expectEqual(43, ch_client.written_logs.items[0].columns.items.len);
+    try testing.expectEqual(43, ch_client.written_logs.items[0].rows.items[0].columns.items.len);
 
     try testing.expectEqualStrings("id", id.column_name);
     try testing.expectEqualStrings("col_int2", col_int2.column_name);
@@ -712,24 +699,27 @@ test "startStreaming: insert all types to null write correctly" {
     columns.appendAssumeCapacity(.{ .has_changes = true, .old_value = try allocator.dupe(u8, "Mountain View"), .new_value = try allocator.dupe(u8, "Cupertino"), .column_name = try allocator.dupe(u8, "city"), .is_key = false });
     columns.appendAssumeCapacity(.{ .has_changes = false, .old_value = try allocator.dupe(u8, "US"), .new_value = try allocator.dupe(u8, "US"), .column_name = try allocator.dupe(u8, "country"), .is_key = false });
 
-    var res = [_]ReadResponse{
-        .{ 
-            .data = .{
-                .event_time = undefined,
-                .table_name = try allocator.dupe(u8, "test.addresses"),
-                .action = 1,
-                .columns = columns,
-                .transaction_id = 793,
-                .user_id = try allocator.dupe(u8, "42"),
-                .ip_address = try allocator.dupe(u8, "192.168.1.50"),
-            },
-            .timestamp = 10,
-            .message = pg.packet.ServerPacket.XLogData,
+    var rows: std.ArrayList(types.Row) = .empty;
+    try rows.append(allocator, .{
+        .table_name = try allocator.dupe(u8, "test.addresses"),
+        .action = 1,
+        .columns = columns,
+    });
+
+    const res = types.Transaction{
+        .meta = .{
+            .event_time = Io.Timestamp.fromNanoseconds(10000),
+            .transaction_id = 793,
+            .user_id = try allocator.dupe(u8, "42"),
+            .ip_address = try allocator.dupe(u8, "192.168.1.50"),
         },
+        .rows = rows,
     };
 
-    var pg_client = try t.PgClient.init(allocator, io, &res);
+    var pg_client = try t.PgClient.init(allocator, io, res);
     defer pg_client.deinit();
+
+    pg_client.server_status =.XLogData;
 
     var ch_client = ChClient.init(allocator, io, .{
         .host = "localhost",

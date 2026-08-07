@@ -58,7 +58,7 @@ const InsertValues = struct {
         self.new_values.clearRetainingCapacity();
     }
 
-    pub fn parseRow(self: *@This(), row: types.AuditEntry) !void {
+    pub fn parseRow(self: *@This(), row: types.Row) !void {
         try self.changed_columns.ensureUnusedCapacity(self.allocator, row.columns.items.len);
         try self.old_values.ensureUnusedCapacity(@as(u32, @truncate(row.columns.items.len)));
         try self.new_values.ensureUnusedCapacity(@as(u32, @truncate(row.columns.items.len)));
@@ -392,7 +392,7 @@ pub const ChClient = struct {
         }
     }
 
-    pub fn writeLog(self: *@This(), data: []types.AuditEntry) !void {
+    pub fn writeLog(self: *@This(), transactions: []types.Transaction) !void {
         var bulk: ch.BulkInsert = try .init(self.allocator, "entries", &column_definition, 1000);
         defer bulk.deinit();
 
@@ -406,12 +406,14 @@ pub const ChClient = struct {
         var insert_values = try InsertValues.init(self.allocator);
         defer insert_values.deinit();
 
-        for (data) |row| {
-            insert_values.clearRetainingCapacity();
+        for (transactions) |transaction| {
+            for (transaction.rows.items) |row| {
+                insert_values.clearRetainingCapacity();
 
-            try insert_values.parseRow(row);
+                try insert_values.parseRow(row);
 
-            try self.insertRow(&bulk, row, insert_values);
+                try self.insertRow(&bulk, row.table_name, row.action, transaction.meta, insert_values);
+            }
         }
 
         // Flush any remaining rows
@@ -437,19 +439,18 @@ pub const ChClient = struct {
         }
     }
 
-    pub fn insertRow(self: *@This(), bulk: *ch.BulkInsert, row: types.AuditEntry, insert_values: InsertValues) !void {
-
+    pub fn insertRow(self: *@This(), bulk: *ch.BulkInsert, table_name: []const u8, action: i8, meta: types.TransactionMeta, insert_values: InsertValues) !void {
         const values = [_]ch.bulk_insert.Value{
-            .{ .DateTime64 = row.event_time },
-            .{ .UInt64 = row.transaction_id },
-            .{ .String = row.user_id},
-            .{ .LowCardinality = row.table_name },
-            .{ .Enum8 = row.action },
+            .{ .DateTime64 = meta.event_time.toMilliseconds() },
+            .{ .UInt64 = meta.transaction_id },
+            .{ .String = meta.user_id},
+            .{ .LowCardinality = table_name },
+            .{ .Enum8 = action },
             .{ .Map = insert_values.primary_keys },
             .{ .Array = insert_values.changed_columns.items },
             .{ .Map = insert_values.old_values },
             .{ .Map = insert_values.new_values },
-            .{ .IPv4 = row.ip_address },
+            .{ .IPv4 = meta.ip_address },
         };
 
         if (try bulk.addRow(&values)) {
@@ -788,18 +789,33 @@ test "writeLog" {
     try client.connect();
     defer client.disconnect();
 
-    var audit_log = std.ArrayList(types.AuditEntry).empty;
+    var audit_log = std.ArrayList(types.Transaction).empty;
     defer audit_log.deinit(allocator);
     try audit_log.ensureUnusedCapacity(allocator, 4);
+
+    var rows: std.ArrayList(types.Row) = .empty;
+    defer rows.deinit(allocator);
+
+    try rows.ensureUnusedCapacity(allocator, 4);
 
     var columns: std.ArrayList(types.ColumnChange) = .empty;
     defer columns.deinit(allocator);
 
-    audit_log.appendSliceAssumeCapacity(&[_]types.AuditEntry{
-        .{ .event_time = 53634634, .transaction_id = 10, .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "test.addresses"), .action = 1, .columns = columns,.ip_address = try allocator.dupe(u8, "192.168.1.50") },
-        .{ .event_time = 53634634, .transaction_id = 10, .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "test.addresses"), .action = 2, .columns = columns,.ip_address = try allocator.dupe(u8, "192.168.1.50") },
-        .{ .event_time = 53634634, .transaction_id = 10, .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "test.addresses"), .action = 3, .columns = columns,.ip_address = try allocator.dupe(u8, "192.168.1.50") },
-        .{ .event_time = 53634634, .transaction_id = 11, .user_id = try allocator.dupe(u8, "42"), .table_name = try allocator.dupe(u8, "test.addresses"), .action = 1, .columns = columns,.ip_address = try allocator.dupe(u8, "192.168.1.50") }
+    rows.appendAssumeCapacity(.{ .table_name = try allocator.dupe(u8, "test.addresses"), .action = 1, .columns = columns, });
+    rows.appendAssumeCapacity(.{ .table_name = try allocator.dupe(u8, "test.addresses"), .action = 2, .columns = columns, });
+    rows.appendAssumeCapacity(.{ .table_name = try allocator.dupe(u8, "test.addresses"), .action = 3, .columns = columns, });
+    rows.appendAssumeCapacity(.{ .table_name = try allocator.dupe(u8, "test.addresses"), .action = 1, .columns = columns, });
+
+    audit_log.appendSliceAssumeCapacity(&[_]types.Transaction{
+        .{
+            .meta = .{
+                .event_time = Io.Timestamp.fromNanoseconds(53634634000),
+                .transaction_id = 10,
+                .user_id = try allocator.dupe(u8, "42"),
+                .ip_address = try allocator.dupe(u8, "192.168.1.50"),
+            },
+            .rows = rows,
+        },
     });
 
     try client.writeLog(audit_log.items);
@@ -824,21 +840,19 @@ test "parseRow ensure correct output" {
     columns.appendAssumeCapacity(.{ .has_changes = true, .old_value = try allocator.dupe(u8, "Cupertino"), .new_value = try allocator.dupe(u8, "Mountain View"), .column_name = try allocator.dupe(u8, "city"), .is_key = false });
     columns.appendAssumeCapacity(.{ .has_changes = false, .old_value = try allocator.dupe(u8, "US"), .new_value = try allocator.dupe(u8, "US"), .column_name = try allocator.dupe(u8, "country"), .is_key = false });
 
-    var row: types.AuditEntry = .{
-        .event_time = 10,
+    var rows: std.ArrayList(types.Row) = .empty;
+    defer rows.deinit(allocator);
+
+    try rows.append(allocator, .{
         .table_name = try allocator.dupe(u8, "test.addresses"),
         .action = 2,
         .columns = columns,
-        .transaction_id = 793,
-        .user_id = try allocator.dupe(u8, "42"),
-        .ip_address = try allocator.dupe(u8, "192.168.1.50"),
-    };
-    defer row.deinit(allocator);
+    });
 
     var insert_values = try InsertValues.init(allocator);
     defer insert_values.deinit();
 
-    try insert_values.parseRow(row);
+    try insert_values.parseRow(rows.items[0]);
 
     try std.testing.expectEqual(3, insert_values.changed_columns.items.len);
     try std.testing.expectEqual(3, insert_values.new_values.count());
@@ -859,12 +873,12 @@ test "parseRow ensure correct output" {
     try std.testing.expectEqual(1, insert_values.primary_keys.count());
     try std.testing.expectEqualStrings("1", insert_values.primary_keys.get("id").?);
 
-    try std.testing.expectEqualStrings("42", row.user_id);
-    try std.testing.expectEqualStrings("192.168.1.50", row.ip_address);
-    try std.testing.expectEqualStrings("test.addresses", row.table_name);
-    try std.testing.expectEqual(2, row.action);
-    try std.testing.expectEqual(793, row.transaction_id);
-    try std.testing.expectEqual(10, row.event_time);
+    // try std.testing.expectEqualStrings("42", row.user_id);
+    // try std.testing.expectEqualStrings("192.168.1.50", row.ip_address);
+    // try std.testing.expectEqualStrings("test.addresses", row.table_name);
+    // try std.testing.expectEqual(2, row.action);
+    // try std.testing.expectEqual(793, row.transaction_id);
+    // try std.testing.expectEqual(10, row.event_time);
 }
 
 test "insertRow ensure correct insertion" {
@@ -918,6 +932,18 @@ test "insertRow ensure correct insertion" {
     old_values.putAssumeCapacity("postal_code", "95014");
     old_values.putAssumeCapacity("city", "Mountain View");
 
+    var rows: std.ArrayList(types.Row) = .empty;
+    defer {
+        for (rows.items) |*row| allocator.free(row.table_name);
+        rows.deinit(allocator);
+    }
+
+    try rows.append(allocator, .{
+            .table_name = try allocator.dupe(u8, "test.addresses"),
+            .action = 2,
+            .columns = undefined,
+    });
+
     const values = InsertValues{
         .allocator = allocator,
         .changed_columns = columns,
@@ -925,20 +951,19 @@ test "insertRow ensure correct insertion" {
         .new_values = new_values,
         .old_values = old_values,
     };
-    const row: types.AuditEntry = .{
-            .event_time = 10,
-            .table_name = try allocator.dupe(u8, "test.addresses"),
-            .action = 2,
-            .columns = undefined,
+    const row: types.Transaction = .{
+        .meta = .{
+            .event_time = Io.Timestamp.fromNanoseconds(10000),
             .transaction_id = 793,
             .user_id = try allocator.dupe(u8, "42"),
             .ip_address = try allocator.dupe(u8, "192.168.1.50"),
-        };
+        },
+        .rows = rows,
+    };
 
     defer {
-        allocator.free(row.table_name);
-        allocator.free(row.user_id);
-        allocator.free(row.ip_address);
+        allocator.free(row.meta.user_id);
+        allocator.free(row.meta.ip_address);
     }
 
     var bulk: ch.BulkInsert = try .init(allocator, "entries", &column_definition, 1000);
@@ -951,7 +976,7 @@ test "insertRow ensure correct insertion" {
         return err;
     };
 
-    try client.insertRow(&bulk, row, values);
+    try client.insertRow(&bulk, rows.items[0].table_name, rows.items[0].action, row.meta, values);
     bulk.flush(io, client.stream.?) catch |err| {
         std.debug.print("Error: Flush failed, {}\n", .{err});
         client.processQueryResponse() catch {};

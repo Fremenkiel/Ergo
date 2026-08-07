@@ -105,7 +105,7 @@ pub const PgClient = struct {
     last_lsn: u64,
     last_timestamp: i64,
 
-    transaction: types.Transaction,
+    server_status: pg.packet.ServerPacket,
     // rows: std.ArrayList(std.ArrayList(types.ColumnChange)) = .empty,
 
     // context: TransactionContext,
@@ -132,7 +132,7 @@ pub const PgClient = struct {
             //     .primary_key = "",
             // },
             // .table_reg = std.AutoHashMap(u32, TableDef).init(allocator),
-            .transaction = .empty,
+            .server_status = .ReadyForQuery,
             .parser = .init(allocator),
             .conn = conn,
         };
@@ -189,6 +189,8 @@ pub const PgClient = struct {
                         'w' => {
                             assert(msg.data.len >= 25);
 
+                            self.server_status = .XLogData;
+
                             const start_lsn = mem.readInt(u64, msg.data[1..9][0..8], .big);
                             const server_timestamp = mem.readInt(i64, msg.data[17..25][0..8], .big);
 
@@ -203,23 +205,23 @@ pub const PgClient = struct {
 
                             if (parse_response) |res| {
                                 if (res.data) |row| {
-                                    try self.transaction.rows.append(self.allocator, row);
+                                    try transaction.rows.append(self.allocator, row);
                                 }
 
                                 if (res.xid) |xid| {
-                                    self.transaction.transaction_id = xid;
+                                    transaction.meta.transaction_id = xid;
                                 }
 
                                 if (res.user_id) |user_id| {
-                                    self.transaction.user_id = user_id;
+                                    transaction.meta.user_id = user_id;
                                 }
 
                                 if (res.ip_address) |ip_address| {
-                                    self.transaction.ip_address = ip_address;
+                                    transaction.meta.ip_address = ip_address;
                                 }
 
                                 if (res.timestamp) |timestamp| {
-                                    self.transaction.event_time = timestamp;
+                                    transaction.meta.event_time = timestamp;
                                 }
 
                                 if (res.last_lsn) |lsn| {
@@ -239,6 +241,8 @@ pub const PgClient = struct {
                         },
                         'k' => {
                             assert(msg.data.len >= 18);
+
+                            self.server_status = .Keepalive;
 
                             const current_lsn = mem.readInt(u64, msg.data[1..9][0..8], .big);
                             const server_timestamp = mem.readInt(i64, msg.data[9..17][0..8], .big);
@@ -267,20 +271,18 @@ pub const PgClient = struct {
                 'c' => {
                     assert(msg.len == 4);
 
-                    return .{
-                        .message = pg.packet.ServerPacket.CopyDone,
-                        .data = null,
-                        .timestamp = null,
-                    };
+                    self.server_status = .CopyDone;
+
+                    return transaction;
                 },
                 'C' => {
-                    return .{
-                        .message = pg.packet.ServerPacket.CommandComplete,
-                        .data = null,
-                        .timestamp = null,
-                    };
+                    self.server_status = .CommandComplete;
+
+                    return transaction;
                 },
                 'Z' => {
+                    self.server_status = .ReadyForQuery;
+
                     const transaction_status = msg.data[0..1][0];
 
                     switch (transaction_status) {
@@ -294,11 +296,7 @@ pub const PgClient = struct {
                         else => return PgClientError.TransactionStateUnknown,
                     }
 
-                    return .{
-                        .message = pg.packet.ServerPacket.ReadyForQuery,
-                        .data = null,
-                        .timestamp = null,
-                    };
+                        return transaction;
                 },
                 else => {
                     // Ignore other messages
@@ -653,71 +651,3 @@ pub const PgClient = struct {
 //
 //     return columns;
 // }
-
-fn setupClient(allocator: mem.Allocator, io: Io) !PgClient {
-    var cols = std.ArrayList(types.ColumnDef).empty;
-    try cols.ensureUnusedCapacity(allocator, 6);
-    try cols.append(allocator, .{ .name = try allocator.dupe(u8, "id"), .is_key = true });
-    try cols.append(allocator, .{ .name = try allocator.dupe(u8, "address_line_1"), .is_key = true });
-    try cols.append(allocator, .{ .name = try allocator.dupe(u8, "address_line_2"), .is_key = true });
-    try cols.append(allocator, .{ .name = try allocator.dupe(u8, "postal_code"), .is_key = true });
-    try cols.append(allocator, .{ .name = try allocator.dupe(u8, "city"), .is_key = true });
-    try cols.append(allocator, .{ .name = try allocator.dupe(u8, "country"), .is_key = true });
-
-    var table_reg = std.AutoHashMap(u32, types.TableDef).init(allocator);
-    try table_reg.put(16390, .{
-        .namespace = try allocator.dupe(u8, "public"),
-        .name = try allocator.dupe(u8, "addresses"),
-        .columns = cols,
-    });
-
-    return .{
-        .allocator = allocator,
-        .io = io,
-        .opts = .{
-            .host = "localhost",
-            .port = 5432,
-            .database = "db",
-            .username = "db_rw",
-            .application_name = "Ergo test",
-            .startup_parameters = null,
-        },
-        .last_lsn = 0,
-        .last_timestamp = 0,
-        .context = .{
-            .xid = 0,
-            .user_id = "",
-            .ip_address = "",
-            .primary_key = "",
-        },
-        .table_reg = table_reg,
-        .conn = null,
-    };
-}
-
-test "resetContext clears context correctly" {
-    const allocator = testing.allocator;
-    const io = testing.io;
-
-    var client = try setupClient(allocator, io);
-    defer client.deinit();
-
-    client.context.ip_address = try allocator.dupe(u8, "192.168.1.50");
-    client.context.user_id = try allocator.dupe(u8, "42");
-    client.context.xid = 791;
-
-    const commit_hex = "43000000000001c160880000000001c160b80002f9a2afe34ece";
-
-    const commit_bytes = try allocator.alloc(u8, commit_hex.len / 2);
-    defer allocator.free(commit_bytes);
-    _ = try std.fmt.hexToBytes(commit_bytes, commit_hex);
-
-    var result = try client.parsePgOutput(commit_bytes);
-    result.deinit(allocator);
-
-    try testing.expectEqual(null, result.data);
-
-    try testing.expectEqual(0, client.context.xid);
-    try testing.expectEqualStrings("", client.context.ip_address);
-    try testing.expectEqualStrings("", client.context.user_id);
-}
