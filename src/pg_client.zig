@@ -1,4 +1,5 @@
 const std = @import("std");
+
 const Io = std.Io;
 const mem = std.mem;
 const testing = std.testing;
@@ -11,90 +12,10 @@ const types = @import("types");
 
 pub const PgClientError = error{
 PostgresReplicationError,
-DefaultConnectionNotInitialized,
 UnableToSendCopyDone,
-InvalidReadyForQueryMessage,
-InvalidCopyDoneMessage,
-InvalidMessage,
 TransactionErrorState,
 TransactionStateUnknown,
-WalConnectionUnableToStop,
 };
-
-// const Action = enum(u8) {
-//     Insert,
-//     UpdateOld,
-//     UpdateNew,
-//     Delete,
-// };
-//
-// pub const ReadResponse = struct {
-//     data: ?types.AuditEntry,
-//     timestamp: ?i64,
-//     message: pg.packet.ServerPacket,
-//
-//     pub fn deinit(self: *@This(), allocator: mem.Allocator) void {
-//         if (self.data) |*entry| {
-//             entry.deinit(allocator);
-//         }
-//     }
-// };
-//
-// pub const ParseResponse = struct {
-//     data: ?types.AuditEntry,
-//     last_lsn: ?u64,
-//     timestamp: ?u64,
-//
-//     pub fn deinit(self: *@This(), allocator: mem.Allocator) void {
-//         if (self.data) |*entry| {
-//             entry.deinit(allocator);
-//         }
-//     }
-// };
-//
-// pub const TransactionContext = struct {
-//     xid: u32,
-//     user_id: []const u8,
-//     ip_address: []const u8,
-//     primary_key: []const u8,
-//
-//     pub fn deinit(self: *@This(), allocator: mem.Allocator) void {
-//         if (self.user_id.len > 0) allocator.free(self.user_id);
-//         if (self.ip_address.len > 0) allocator.free(self.ip_address);
-//     }
-//
-//     fn reset(self: *@This(), allocator: mem.Allocator) void {
-//         self.xid = 0;
-//
-//         if (self.user_id.len > 0) allocator.free(self.user_id);
-//         self.user_id = "";
-//
-//         if (self.ip_address.len > 0) allocator.free(self.ip_address);
-//         self.ip_address = "";
-//
-//         self.primary_key = "";
-//     }
-// };
-//
-// pub const ColumnDef = struct {
-//     name: []const u8,
-//     is_key: bool,
-// };
-//
-// pub const TableDef = struct {
-//     namespace: []const u8,
-//     name: []const u8,
-//     columns: std.ArrayList(ColumnDef),
-//
-//     pub fn deinit(self: *@This(), allocator: mem.Allocator) void {
-//         for (self.columns.items) |*col| { allocator.free(col.name); }
-//         self.columns.clearAndFree(allocator);
-//         self.columns.deinit(allocator);
-//
-//         allocator.free(self.namespace);
-//         allocator.free(self.name);
-//     }
-// };
 
 pub const PgClient = struct {
     allocator: mem.Allocator,
@@ -106,10 +27,6 @@ pub const PgClient = struct {
     last_timestamp: i64,
 
     server_status: pg.packet.ServerPacket,
-    // rows: std.ArrayList(std.ArrayList(types.ColumnChange)) = .empty,
-
-    // context: TransactionContext,
-    // table_reg: std.hash_map.HashMap(u32, TableDef, std.hash_map.AutoContext(u32), 80),
 
     parser: pg.parser.PgOutput,
 
@@ -125,13 +42,6 @@ pub const PgClient = struct {
             .opts = opts,
             .last_lsn = 0,
             .last_timestamp = 0,
-            // .context = .{
-            //     .xid = 0,
-            //     .user_id = "",
-            //     .ip_address = "",
-            //     .primary_key = "",
-            // },
-            // .table_reg = std.AutoHashMap(u32, TableDef).init(allocator),
             .server_status = .ReadyForQuery,
             .parser = .init(allocator),
             .conn = conn,
@@ -143,19 +53,12 @@ pub const PgClient = struct {
             conn.deinit();
             self.allocator.destroy(conn);
         }
+        self.parser.deinit();
     }
 
     pub fn cancel(self: *@This()) void {
         if (self.conn) |conn| conn.cancel();
     }
-
-    // fn resetContext(self: *@This()) void {
-    //     self.context.reset(self.allocator);
-    //
-    //     var it = self.table_reg.iterator(); 
-    //     while (it.next()) |table_reg| { table_reg.value_ptr.*.deinit(self.allocator); }
-    //     self.table_reg.clearRetainingCapacity();
-    // }
 
     pub fn startFlow(self: *@This(), timeout_ms: i32) !void {
         if (self.conn == null) return pg.PgError.WalConnectionNotInitialized;
@@ -167,14 +70,21 @@ pub const PgClient = struct {
         try self.conn.?.reader.endWALFlow(self.opts.wal);
     }
 
-    pub fn readWAL(self: *@This()) !types.Transaction {
+    pub fn readWAL(self: *@This()) !?types.Transaction {
         if (self.conn == null) return pg.PgError.WalConnectionNotInitialized;
 
-        var transaction: types.Transaction = .empty;
-        defer transaction.deinit(self.allocator);
+        var transaction: ?types.Transaction = null;
 
         while(true) {
-            const msg = try self.conn.?.reader.next();
+            const msg = self.conn.?.reader.next() catch |err| switch (err) {
+                error.Timeout => {
+                    if (transaction == null) {
+                        return err;
+                    }
+                    continue; 
+                },
+                else => return err,
+            };
 
             switch (msg.type) {
                 'W' => {
@@ -191,6 +101,8 @@ pub const PgClient = struct {
 
                             self.server_status = .XLogData;
 
+                            if (transaction == null) transaction = .empty;
+
                             const start_lsn = mem.readInt(u64, msg.data[1..9][0..8], .big);
                             const server_timestamp = mem.readInt(i64, msg.data[17..25][0..8], .big);
 
@@ -205,23 +117,23 @@ pub const PgClient = struct {
 
                             if (parse_response) |res| {
                                 if (res.data) |row| {
-                                    try transaction.rows.append(self.allocator, row);
+                                    try transaction.?.rows.append(self.allocator, row);
                                 }
 
                                 if (res.xid) |xid| {
-                                    transaction.meta.transaction_id = xid;
+                                    transaction.?.meta.transaction_id = xid;
                                 }
 
                                 if (res.user_id) |user_id| {
-                                    transaction.meta.user_id = user_id;
+                                    transaction.?.meta.user_id = user_id;
                                 }
 
                                 if (res.ip_address) |ip_address| {
-                                    transaction.meta.ip_address = ip_address;
+                                    transaction.?.meta.ip_address = ip_address;
                                 }
 
                                 if (res.timestamp) |timestamp| {
-                                    transaction.meta.event_time = timestamp;
+                                    transaction.?.meta.event_time = timestamp;
                                 }
 
                                 if (res.last_lsn) |lsn| {
@@ -230,7 +142,7 @@ pub const PgClient = struct {
 
                                         self.parser.clear();
 
-                                        return transaction;
+                                        return transaction.?;
                                     }
                                 } else {
                                     if (start_lsn > self.last_lsn) {
@@ -273,12 +185,12 @@ pub const PgClient = struct {
 
                     self.server_status = .CopyDone;
 
-                    return transaction;
+                    return null;
                 },
                 'C' => {
                     self.server_status = .CommandComplete;
 
-                    return transaction;
+                    return null;
                 },
                 'Z' => {
                     self.server_status = .ReadyForQuery;
@@ -296,7 +208,7 @@ pub const PgClient = struct {
                         else => return PgClientError.TransactionStateUnknown,
                     }
 
-                        return transaction;
+                    return null;
                 },
                 else => {
                     // Ignore other messages
@@ -312,291 +224,6 @@ pub const PgClient = struct {
 
         try pg.protocol.CopyDone.write(&self.conn.?.stream);
     }
-
-    // pub fn parsePgOutput(self: *@This(), payload: []const u8) !ParseResponse {
-    //     var response = ParseResponse{
-    //         .last_lsn = null,
-    //         .timestamp = null,
-    //         .data = null,
-    //     };
-    //
-    //     if (payload.len == 0) return response;
-    //
-    //     var reader = Io.Reader.fixed(payload);
-    //
-    //     const msg_type = try reader.takeByte();
-    //
-    //     switch (msg_type) {
-    //         'B' => {
-    //             // final lsn
-    //             _ = try reader.takeInt(u64, .big);
-    //             const timestamp = try reader.takeInt(u64, .big);
-    //             const xid = try reader.takeInt(u32, .big);
-    //             self.context.xid = xid;
-    //
-    //             _ = timestamp;
-    //         },
-    //         'C' => {
-    //             // flags
-    //             _ = try reader.takeByte();
-    //             // lsn of commit
-    //             _ = try reader.takeInt(u64, .big);
-    //             response.last_lsn = try reader.takeInt(u64, .big);
-    //             response.timestamp = try reader.takeInt(u64, .big);
-    //
-    //             self.resetContext();
-    //         },
-    //         'R' => {
-    //             // Relation: send before any insert or update
-    //             const rel_id = try reader.takeInt(u32, .big);
-    //
-    //             const namespace = try reader.takeDelimiter(0);
-    //             if (namespace == null) {
-    //                 return PgClientError.InvalidMessage;
-    //             }
-    //
-    //             const rel_name = try reader.takeDelimiter(0);
-    //             if (rel_name == null) {
-    //                 return PgClientError.InvalidMessage;
-    //             }
-    //
-    //             const repl_ident = try reader.takeByte();
-    //             _ = repl_ident;
-    //
-    //             const num_columns = try reader.takeInt(u16, .big);
-    //
-    //             // const columns = try self.readSchemaKeys(table_name);
-    //             var columns = std.ArrayList(ColumnDef).empty;
-    //
-    //             var i: u16 = 0;
-    //             while (i < num_columns) : (i += 1) {
-    //                 const flag = try reader.takeByte();
-    //
-    //                 // col name
-    //                 const column_name = try reader.takeDelimiter(0);
-    //                 if (column_name == null) {
-    //                     return PgClientError.InvalidMessage;
-    //                 }
-    //
-    //                 // type_id
-    //                 _ = try reader.takeInt(u32, .big);
-    //
-    //                 // typemod
-    //                 _ = try reader.takeInt(u32, .big);
-    //
-    //                 try columns.append(self.allocator, .{ .name = try self.allocator.dupe(u8, column_name.?), .is_key = flag == 1 });
-    //             }
-    //
-    //             try self.table_reg.put(rel_id, .{
-    //                 .namespace = try self.allocator.dupe(u8, namespace.?),
-    //                 .name = try self.allocator.dupe(u8, rel_name.?),
-    //                 .columns = columns,
-    //             });
-    //
-    //         },
-    //         'I' => {
-    //             const rel_id = try reader.takeInt(u32, .big);
-    //             const tuple_type = try reader.takeByte();
-    //
-    //             if (tuple_type != 'N') {
-    //                 std.debug.print("Error: Received insert with invalid tuple type: {c}\n", .{tuple_type});
-    //             }
-    //
-    //
-    //             if (self.table_reg.get(rel_id)) |table| {
-    //                 const columns = try initContextColumns(self.allocator, table);
-    //
-    //                 response.data = types.AuditEntry{
-    //                     .event_time = undefined,
-    //                     .table_name = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{table.namespace, table.name}),
-    //                     .action = 1,
-    //                     .columns = try self.parseTupleData(&reader, columns, .Insert),
-    //                     .transaction_id = self.context.xid,
-    //                     .user_id = if (self.context.user_id.len > 0) try self.allocator.dupe(u8, self.context.user_id) else "",
-    //                     .ip_address = if (self.context.ip_address.len > 0) try self.allocator.dupe(u8, self.context.ip_address) else "",
-    //                 };
-    //             } else {
-    //                 std.debug.print("Error: Received insert for unknown relation ID {d}\n", .{rel_id});
-    //             }
-    //         },
-    //         'U' => {
-    //             const rel_id = try reader.takeInt(u32, .big);
-    //             var tuple_type = try reader.takeByte();
-    //
-    //             if (self.table_reg.get(rel_id)) |table| {
-    //                 var columns = try initContextColumns(self.allocator, table);
-    //                 if (tuple_type == 'O' or tuple_type == 'K') {
-    //                     columns = try self.parseTupleData(&reader, columns, .UpdateOld);
-    //
-    //                     tuple_type = try reader.takeByte();
-    //                 }
-    //
-    //                 if (tuple_type == 'N') {
-    //                     response.data = types.AuditEntry{
-    //                         .event_time = undefined,
-    //                         .table_name = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{table.namespace, table.name}),
-    //                         .action = 2,
-    //                         .columns = try self.parseTupleData(&reader, columns, .UpdateNew),
-    //                         .transaction_id = self.context.xid,
-    //                         .user_id = if (self.context.user_id.len > 0) try self.allocator.dupe(u8, self.context.user_id) else "",
-    //                         .ip_address = if (self.context.ip_address.len > 0) try self.allocator.dupe(u8, self.context.ip_address) else "",
-    //                     };
-    //                 } else {
-    //                     std.debug.print("Error: Expected 'N', got '{c}'\n", .{tuple_type});
-    //                 }
-    //             } else {
-    //                 std.debug.print("Error: Received update for unknown relation ID {d}\n", .{rel_id});
-    //             }
-    //         },
-    //         'D' => {
-    //             const rel_id = try reader.takeInt(u32, .big);
-    //
-    //             const tuple_type = try reader.takeByte();
-    //
-    //             if (self.table_reg.get(rel_id)) |table| {
-    //                 const columns = try initContextColumns(self.allocator, table);
-    //                 if (tuple_type == 'O' or tuple_type == 'K') {
-    //                     response.data = types.AuditEntry{
-    //                         .event_time = undefined,
-    //                         .table_name = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{table.namespace, table.name}),
-    //                         .action = 3,
-    //                         .columns = try self.parseTupleData(&reader, columns, .Delete),
-    //                         .transaction_id = self.context.xid,
-    //                         .user_id = if (self.context.user_id.len > 0) try self.allocator.dupe(u8, self.context.user_id) else "",
-    //                         .ip_address = if (self.context.ip_address.len > 0) try self.allocator.dupe(u8, self.context.ip_address) else "",
-    //                     };
-    //                 } else {
-    //                     std.debug.print("Error: Expected 'O' or 'K', got '{c}'\n", .{tuple_type});
-    //                 }
-    //             } else {
-    //                 std.debug.print("Error: Received delete for unknown relation ID {d}\n", .{rel_id});
-    //             }
-    //         },
-    //         'M' => {
-    //             const flags = try reader.takeByte();
-    //             const lsn = try reader.takeInt(u64, .big);
-    //
-    //             const prefix = try reader.takeDelimiter(0);
-    //             if (prefix == null) {
-    //                 return PgClientError.InvalidMessage;
-    //             }
-    //
-    //             const content_len = try reader.takeInt(u32, .big);
-    //
-    //             const content = try reader.take(content_len);
-    //
-    //             _ = flags;
-    //             _ = lsn;
-    //             if (mem.eql(u8, prefix.?, "ergo_meta")) {
-    //                 var it = mem.splitAny(u8, content, ",");
-    //
-    //                 const user_id_str = it.next() orelse return error.InvalidMapType;
-    //                 const ip_address_str = it.next() orelse return error.InvalidMapType;
-    //
-    //                 var user_id_it = mem.splitAny(u8, user_id_str, ":");
-    //                 var ip_address_it = mem.splitAny(u8, ip_address_str, ":");
-    //
-    //                 const user_id_key_str = user_id_it.next() orelse return error.InvalidMapType;
-    //                 const ip_address_key_str = ip_address_it.next() orelse return error.InvalidMapType;
-    //
-    //                 const user_id_key = mem.trim(u8, user_id_key_str, " ");
-    //                 const ip_address_key = mem.trim(u8, ip_address_key_str, " ");
-    //
-    //                 if (!mem.eql(u8, user_id_key, "\"user_id\"")) {
-    //                     return error.InvalidMapType;
-    //                 }
-    //
-    //                 if (!mem.eql(u8, ip_address_key, "\"ip\"")) {
-    //                     return error.InvalidMapType;
-    //                 }
-    //
-    //                 const user_id_value_str = user_id_it.next() orelse return error.InvalidMapType;
-    //                 const ip_address_value_str = ip_address_it.next() orelse return error.InvalidMapType;
-    //
-    //                 const user_id_value = mem.trim(u8, mem.trim(u8, user_id_value_str, " "), "\"");
-    //                 const ip_address_value = mem.trim(u8, mem.trim(u8, ip_address_value_str, " "), "\"");
-    //
-    //                 const check_str = try std.fmt.allocPrint(self.allocator, "{s}: \"{s}\", {s}: \"{s}\"", .{user_id_key, user_id_value, ip_address_key, ip_address_value});
-    //                 defer self.allocator.free(check_str);
-    //                 assert(mem.eql(u8, check_str, content));
-    //
-    //                 self.context.user_id = try self.allocator.dupe(u8, user_id_value);
-    //                 self.context.ip_address = try self.allocator.dupe(u8, ip_address_value);
-    //             }
-    //         },
-    //         'Y' => {
-    //             // XID
-    //             _ = try reader.takeInt(i32, .big);
-    //
-    //             // OID
-    //             _ = try reader.takeInt(i32, .big);
-    //
-    //             // namespace
-    //             _ = try reader.takeDelimiter(0);
-    //
-    //             // data type name
-    //             _ = try reader.takeDelimiter(0);
-    //         },
-    //         else => {
-    //             std.debug.print("Unknown pgoutput message type: {c}\n", .{msg_type});
-    //         }
-    //     }
-    //
-    //     return response;
-    // }
-    //
-    // fn parseTupleData(self: *@This(), reader: *Io.Reader, columns: std.ArrayList(types.ColumnChange), action: Action) !std.ArrayList(types.ColumnChange) {
-    //     const num_columns = try reader.takeInt(u16, .big);
-    //
-    //     if (num_columns > columns.items.len) {
-    //         return error.ColumnMismatch;
-    //     }
-    //
-    //     for (columns.items) |*col| {
-    //         const col_type = try reader.takeByte();
-    //
-    //         switch (col_type) {
-    //             'n' => {
-    //                 // Null
-    //             },
-    //             'u' => {
-    //                 // Unchanged TOAST
-    //             },
-    //             't' => {
-    //                 const col_len = try reader.takeInt(u32, .big);
-    //
-    //                 const val_raw = try reader.take(col_len);
-    //                 const val = try self.allocator.dupe(u8, val_raw);
-    //                 errdefer self.allocator.free(val);
-    //
-    //                 switch (action) {
-    //                     .Insert => {
-    //                         col.new_value = val;
-    //                         col.has_changes = true;
-    //                     },
-    //                     .UpdateNew => {
-    //                         col.new_value = val;
-    //
-    //                         if ((col.old_value == null) != (col.new_value == null) or 
-    //                             (col.old_value != null and col.new_value != null and !std.mem.eql(u8, col.old_value.?, col.new_value.?))) {
-    //                             col.has_changes = true;
-    //                         }
-    //                     },
-    //                     .UpdateOld => {
-    //                         col.old_value = val;
-    //                     },
-    //                     .Delete => {
-    //                         col.old_value = val;
-    //                         col.has_changes = true;
-    //                     },
-    //                 }
-    //             },
-    //             else => return error.UnknownTupleFormat,
-    //         }
-    //     }
-    //
-    //     return columns;
-    // }
 
     pub fn createConn(allocator: mem.Allocator, io:  Io, opts: pg.PgConfig) !*pg.Conn {
         var conn = try allocator.create(pg.Conn);
@@ -617,37 +244,4 @@ pub const PgClient = struct {
 
         return conn;
     }
-
-    pub fn pgWalToClickHouseMs(pg_wal_us: u64) i64 {
-        const seconds_between_epochs: u64 = 946_684_800;
-        const us_between_epochs: u64 = seconds_between_epochs * 1_000_000;
-
-        const unix_us: u64 = pg_wal_us + us_between_epochs;
-
-        const unix_ms: u64 = unix_us / 1000;
-
-        return @intCast(unix_ms);
-    }
 };
-
-// fn initContextColumns(allocator: mem.Allocator, table_def: TableDef) !std.ArrayList(types.ColumnChange) {
-//     var columns: std.ArrayList(types.ColumnChange) = .empty;
-//     errdefer {
-//         columns.clearAndFree(allocator);
-//         columns.deinit(allocator);
-//     }
-//
-//     try columns.ensureUnusedCapacity(allocator, table_def.columns.items.len);
-//
-//     for (table_def.columns.items) |col| {
-//         columns.appendAssumeCapacity(.{
-//             .is_key = col.is_key,
-//             .column_name = try allocator.dupe(u8, col.name),
-//             .old_value = null,
-//             .new_value = null,
-//             .has_changes = false,
-//         });
-//     }
-//
-//     return columns;
-// }

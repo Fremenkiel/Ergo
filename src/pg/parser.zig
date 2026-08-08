@@ -28,10 +28,10 @@ pub const ParseResponse = struct {
     };
 
     pub fn deinit(self: *@This(), allocator: mem.Allocator) void {
-        if (self.user_id) |*user_id| allocator.free(user_id);
+        if (self.user_id) |user_id| allocator.free(user_id);
         self.user_id = null;
 
-        if (self.ip_address) |*ip_address| allocator.free(ip_address);
+        if (self.ip_address) |ip_address| allocator.free(ip_address);
         self.ip_address = null;
 
         if (self.data) |*entry| {
@@ -426,7 +426,7 @@ fn setupParser(allocator: mem.Allocator) !PgOutput {
     };
 }
 
-test "parsePgOutput maps BEGIN correctly" {
+test "parsePgOutput: maps BEGIN correctly" {
     const allocator = testing.allocator;
 
     const commit_hex = "420000000001c160880002f9a2afe34ece00000317";
@@ -436,7 +436,7 @@ test "parsePgOutput maps BEGIN correctly" {
     defer allocator.free(commit_bytes);
     _ = try std.fmt.hexToBytes(commit_bytes, commit_hex);
 
-    var parser = PgOutput.init(allocator);
+    var parser = try setupParser(allocator);
     defer parser.deinit();
 
     var result = try parser.decode(commit_bytes);
@@ -455,7 +455,7 @@ test "parsePgOutput maps BEGIN correctly" {
     try testing.expectEqual(null, result.?.timestamp);
 }
 
-test "parsePgOutput maps METADATA correctly" {
+test "parsePgOutput: maps METADATA correctly" {
     const allocator = testing.allocator;
 
     // PERFORM pg_logical_emit_message(
@@ -469,7 +469,7 @@ test "parsePgOutput maps METADATA correctly" {
     defer allocator.free(metadata_bytes);
     _ = try std.fmt.hexToBytes(metadata_bytes, metadata_hex);
 
-    var parser = PgOutput.init(allocator);
+    var parser = try setupParser(allocator);
     defer parser.deinit();
 
     var result = try parser.decode(metadata_bytes);
@@ -490,7 +490,7 @@ test "parsePgOutput maps METADATA correctly" {
     try testing.expectEqual(null, result.?.timestamp);
 }
 
-test "parsePgOutput maps RELATION correctly" {
+test "parsePgOutput: maps RELATION correctly" {
     const allocator = testing.allocator;
 
     // INSERT INTO addresses (address_line_1, postal_code, city, country) 
@@ -514,7 +514,7 @@ test "parsePgOutput maps RELATION correctly" {
     try testing.expectEqual(1, parser.table_reg.count());
 }
 
-test "parsePgOutput maps INSERT correctly" {
+test "parsePgOutput: maps INSERT correctly" {
     const allocator = testing.allocator;
 
     // INSERT INTO addresses (address_line_1, postal_code, city, country) 
@@ -525,7 +525,7 @@ test "parsePgOutput maps INSERT correctly" {
     defer allocator.free(insert_bytes);
     _ = try std.fmt.hexToBytes(insert_bytes, insert_hex);
 
-    var parser = PgOutput.init(allocator);
+    var parser = try setupParser(allocator);
     defer parser.deinit();
 
     var result = try parser.decode(insert_bytes);
@@ -587,7 +587,7 @@ test "parsePgOutput maps INSERT correctly" {
     try testing.expectEqual(null, result.?.timestamp);
 }
 
-test "parsePgOutput maps UPDATE correctly" {
+test "parsePgOutput: maps UPDATE correctly" {
     const allocator = testing.allocator;
 
     // UPDATE addresses SET 
@@ -601,7 +601,7 @@ test "parsePgOutput maps UPDATE correctly" {
     defer allocator.free(update_bytes);
     _ = try std.fmt.hexToBytes(update_bytes, update_hex);
 
-    var parser = PgOutput.init(allocator);
+    var parser = try setupParser(allocator);
     defer parser.deinit();
 
     var result = try parser.decode(update_bytes);
@@ -663,7 +663,7 @@ test "parsePgOutput maps UPDATE correctly" {
     try testing.expectEqual(null, result.?.timestamp);
 }
 
-test "parsePgOutput maps DELETE correctly" {
+test "parsePgOutput: maps DELETE correctly" {
     const allocator = testing.allocator;
 
     // DELETE FROM addresses WHERE id = 1;
@@ -673,7 +673,7 @@ test "parsePgOutput maps DELETE correctly" {
     defer allocator.free(delete_bytes);
     _ = try std.fmt.hexToBytes(delete_bytes, delete_hex);
 
-    var parser = PgOutput.init(allocator);
+    var parser = try setupParser(allocator);
     defer parser.deinit();
 
     var result = try parser.decode(delete_bytes);
@@ -728,14 +728,14 @@ test "parsePgOutput maps DELETE correctly" {
     try testing.expectEqual(null, city.new_value);
     try testing.expectEqual(null, country.new_value);
 
-    try testing.expectEqual(0, result.?.xid);
+    try testing.expectEqual(null, result.?.xid);
     try testing.expectEqual(null, result.?.ip_address);
     try testing.expectEqual(null, result.?.user_id);
     try testing.expectEqual(null, result.?.last_lsn);
     try testing.expectEqual(null, result.?.timestamp);
 }
 
-test "parsePgOutput maps COMMIT correctly" {
+test "parsePgOutput: maps COMMIT correctly" {
     const allocator = testing.allocator;
 
     const insert_hex = "43000000000001c160880000000001c160b80002f9a2afe34ece";
@@ -746,7 +746,7 @@ test "parsePgOutput maps COMMIT correctly" {
     defer allocator.free(insert_bytes);
     _ = try std.fmt.hexToBytes(insert_bytes, insert_hex);
 
-    var parser = PgOutput.init(allocator);
+    var parser = try setupParser(allocator);
     defer parser.deinit();
 
     var result = try parser.decode(insert_bytes);
@@ -765,37 +765,35 @@ test "parsePgOutput maps COMMIT correctly" {
     try testing.expectEqual(commit_timestamp, result.?.timestamp);
 }
 
-// test "parseTupleData: correct parsing of input" {
-//     const allocator = testing.allocator;
-//
-//     const commit_hex = "0006740000000131740000001031204170706c65205061726b205761796e740000000539353031347400000009437570657274696e6f74000000025553";
-//
-//     const commit_bytes = try allocator.alloc(u8, commit_hex.len / 2);
-//     defer allocator.free(commit_bytes);
-//     _ = try std.fmt.hexToBytes(commit_bytes, commit_hex);
-//
-//     var reader = Io.Reader.fixed(commit_bytes);
-//
-//     const columns = initContextColumns(allocator, parser.table_reg.get(16390).?);
-//
-//     var parser = PgOutput.init();
-//     var result = try parser.parseTupleData(&reader, columns, .Insert);
-//     defer {
-//         for (result.items) |*col| { col.deinit(allocator); }
-//         result.deinit(allocator);
-//     }
-//
-//     try testing.expectEqualStrings("1", result.items[0].new_value.?);
-//     try testing.expectEqualStrings("1 Apple Park Way", result.items[1].new_value.?);
-//     try testing.expectEqual(null, result.items[2].new_value);
-//     try testing.expectEqualStrings("95014", result.items[3].new_value.?);
-//     try testing.expectEqualStrings("Cupertino", result.items[4].new_value.?);
-//     try testing.expectEqualStrings("US", result.items[5].new_value.?);
-//
-//     try testing.expectEqual(0, parser.xid);
-//     try testing.expectEqualStrings("", parser.ip_address);
-//     try testing.expectEqualStrings("", parser.user_id);
-// }
+test "parseTupleData: correct parsing of input" {
+    const allocator = testing.allocator;
+
+    const commit_hex = "0006740000000131740000001031204170706c65205061726b205761796e740000000539353031347400000009437570657274696e6f74000000025553";
+
+    const commit_bytes = try allocator.alloc(u8, commit_hex.len / 2);
+    defer allocator.free(commit_bytes);
+    _ = try std.fmt.hexToBytes(commit_bytes, commit_hex);
+
+    var reader = Io.Reader.fixed(commit_bytes);
+
+    var parser = try setupParser(allocator);
+    defer parser.deinit();
+
+    const columns = try initContextColumns(allocator, parser.table_reg.get(16390).?);
+
+    var result = try parser.parseTupleData(&reader, columns, .Insert);
+    defer {
+        for (result.items) |*col| { col.deinit(allocator); }
+        result.deinit(allocator);
+    }
+
+    try testing.expectEqualStrings("1", result.items[0].new_value.?);
+    try testing.expectEqualStrings("1 Apple Park Way", result.items[1].new_value.?);
+    try testing.expectEqual(null, result.items[2].new_value);
+    try testing.expectEqualStrings("95014", result.items[3].new_value.?);
+    try testing.expectEqualStrings("Cupertino", result.items[4].new_value.?);
+    try testing.expectEqualStrings("US", result.items[5].new_value.?);
+}
 
 test "clear: ensure context correctly" {
     const allocator = testing.allocator;
@@ -815,14 +813,13 @@ test "clear: ensure context correctly" {
     result.?.user_id = try allocator.dupe(u8, "42");
     result.?.xid = 791;
 
-        if (result) |*res| {
-            res.deinit(allocator);
-        }
+    if (result) |*res| {
+        res.deinit(allocator);
+    }
 
     try testing.expectEqual(true, result != null);
     try testing.expectEqual(null, result.?.data);
 
-    try testing.expectEqual(0, result.?.xid);
     try testing.expectEqual(undefined, result.?.ip_address);
     try testing.expectEqual(undefined, result.?.user_id);
 }

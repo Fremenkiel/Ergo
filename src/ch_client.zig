@@ -539,7 +539,7 @@ fn writeMockDataBlock(client: *ChClient) !void {
 
     try ch.protocol.writeVarInt(client.writer.?, 2);
     try client.writer.?.writeInt(i32, 0, .little); // bucket_num
-    
+
     try ch.protocol.writeVarInt(client.writer.?, 0);
 
     const num_columns = 10;
@@ -794,7 +794,7 @@ test "writeLog" {
     try audit_log.ensureUnusedCapacity(allocator, 4);
 
     var rows: std.ArrayList(types.Row) = .empty;
-    defer rows.deinit(allocator);
+    // deinit through types.Transaction
 
     try rows.ensureUnusedCapacity(allocator, 4);
 
@@ -819,7 +819,7 @@ test "writeLog" {
     });
 
     try client.writeLog(audit_log.items);
-    for (audit_log.items) |*item| item.deinit(allocator);
+    defer for (audit_log.items) |*item| item.deinit(allocator);
 }
 
 test "parseRow ensure correct output" {
@@ -841,7 +841,10 @@ test "parseRow ensure correct output" {
     columns.appendAssumeCapacity(.{ .has_changes = false, .old_value = try allocator.dupe(u8, "US"), .new_value = try allocator.dupe(u8, "US"), .column_name = try allocator.dupe(u8, "country"), .is_key = false });
 
     var rows: std.ArrayList(types.Row) = .empty;
-    defer rows.deinit(allocator);
+    defer {
+        for (rows.items) |*row| row.deinit(allocator);
+        rows.deinit(allocator);
+    }
 
     try rows.append(allocator, .{
         .table_name = try allocator.dupe(u8, "test.addresses"),

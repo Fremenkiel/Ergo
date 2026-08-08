@@ -27,10 +27,12 @@ dev-down:
 test:
 	zig build test -Dopenssl=true \
   -Dopenssl_lib_path=/opt/homebrew/opt/openssl@3/lib \
-  -Dopenssl_include_path=/opt/homebrew/opt/openssl@3/include
+  -Dopenssl_include_path=/opt/homebrew/opt/openssl@3/include \
+	-freference-trace=10
 
 test-ch:
-	zig build ch_test
+	zig build ch_test \
+	-freference-trace=10
 
 test-pg:
 	zig build pg_test -Dopenssl=true \

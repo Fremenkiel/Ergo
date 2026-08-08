@@ -75,7 +75,6 @@ pub fn build(b: *std.Build) void {
         pg_module.addOptions("config", options);
     }
 
-
     const exe = b.addExecutable(.{
         .name = "ergo",
         .root_module = b.createModule(.{
@@ -142,9 +141,12 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    debug_exe.root_module.addImport("ch", ch_module);
     debug_exe.root_module.addImport("pg", pg_module);
+    debug_exe.root_module.addImport("ch", ch_module);
+    debug_exe.root_module.addImport("types", types_module);
+
     b.installArtifact(debug_exe);
+
     const debug_step = b.step("debug", "Run the app in debug mode");
     const debug_cmd = b.addRunArtifact(debug_exe);
     debug_step.dependOn(&debug_cmd.step);

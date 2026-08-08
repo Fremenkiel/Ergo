@@ -43,12 +43,12 @@ pub fn main(init: process.Init) !void {
 
     var res: std.ArrayList(types.Transaction) = .empty;
     defer {
-        for (res.items) |*tx| tx.deinit(allocator);
+        for (res.items) |tx| tx.deinit(allocator);
         res.clearAndFree(allocator);
         res.deinit(allocator);
     }
 
-    try res.append(allocator, .{
+    res.append(allocator, .{
         .meta = .{
             .event_time = Io.Timestamp.fromNanoseconds(10000),
             .transaction_id = 793,

@@ -20,6 +20,16 @@ pub const ColumnChange = struct {
             allocator.free(val);
         }
     }
+
+    pub fn copy(self: *@This(), allocator: mem.Allocator) !@This() {
+        return .{
+            .column_name = try allocator.dupe(u8, self.column_name),
+            .old_value = if (self.old_value) |old_value| try allocator.dupe(u8, old_value) else null,
+            .new_value = if (self.new_value) |new_value| try allocator.dupe(u8, new_value) else null,
+            .has_changes = self.has_changes,
+            .is_key = self.is_key,
+        };
+    }
 };
 
 pub const Row = struct {
@@ -37,6 +47,20 @@ pub const Row = struct {
         self.columns.deinit(allocator);
     }
 
+    pub fn copy(self: *@This(), allocator: mem.Allocator) !@This() {
+        var copy_columns: std.ArrayList(ColumnChange) = .empty;
+        try copy_columns.ensureUnusedCapacity(allocator, self.columns.items.len);
+
+        for (self.columns.items) |*col| {
+            copy_columns.appendAssumeCapacity(try col.copy(allocator));
+        }
+
+        return .{
+            .table_name = try allocator.dupe(u8, self.table_name),
+            .action = self.action,
+            .columns = copy_columns,
+        };
+    }
 };
 
 pub const TransactionMeta = struct {
@@ -55,6 +79,15 @@ pub const TransactionMeta = struct {
     pub fn deinit(self: *@This(), allocator: mem.Allocator) void {
         if (self.user_id.len > 0) allocator.free(self.user_id);
         if (self.ip_address.len > 0) allocator.free(self.ip_address);
+    }
+
+    pub fn copy(self: *@This(), allocator: mem.Allocator) !@This() {
+        return .{
+            .event_time = self.event_time,
+            .transaction_id = self.transaction_id,
+            .user_id = try allocator.dupe(u8, self.user_id),
+            .ip_address = try allocator.dupe(u8, self.ip_address),
+        };
     }
 };
 
@@ -81,15 +114,23 @@ pub const Transaction = struct {
             for (row.columns.items) |*col| { 
                 col.deinit(allocator);
             }
+            row.columns.clearAndFree(allocator);
         }
+        self.rows.clearAndFree(allocator);
     }
 
-    pub fn clearRetainingCapacity(self: *@This(), allocator: mem.Allocator) void {
-        for (self.rows.items) |*row| { 
-            for (row.columns.items) |*col| { 
-                col.deinit(allocator);
-            }
+    pub fn copy(self: *@This(), allocator: mem.Allocator) !@This() {
+        var copy_rows: std.ArrayList(Row) = .empty;
+        try copy_rows.ensureUnusedCapacity(allocator, self.rows.items.len);
+
+        for (self.rows.items) |*row| {
+            copy_rows.appendAssumeCapacity(try row.copy(allocator));
         }
+
+        return .{
+            .meta = try self.meta.copy(allocator),
+            .rows = copy_rows,
+        };
     }
 };
 

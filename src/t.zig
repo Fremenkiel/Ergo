@@ -68,37 +68,7 @@ pub const ChClient = struct {
 
     pub fn writeLog(self: *@This(), transactions: []types.Transaction) !void {
         var copy_slice = try self.allocator.alloc(types.Transaction, transactions.len);
-        for (transactions, 0..) |transaction, i| {
-
-            copy_slice[i].meta.event_time = transaction.meta.event_time;
-            copy_slice[i].meta.transaction_id = transaction.meta.transaction_id;
-            copy_slice[i].meta.user_id = try self.allocator.dupe(u8, transaction.meta.user_id);
-            copy_slice[i].meta.ip_address = try self.allocator.dupe(u8, transaction.meta.ip_address);
-
-            copy_slice[i].rows = .empty;
-            try copy_slice[i].rows.ensureUnusedCapacity(self.allocator, transaction.rows.items.len);
-            for (transaction.rows.items) |row| {
-                var copy_row: types.Row = .{
-                    .action = row.action,
-                    .table_name = try self.allocator.dupe(u8, row.table_name),
-                    .columns = .empty,
-                };
-
-                try copy_row.columns.ensureUnusedCapacity(self.allocator, row.columns.items.len);
-
-                for (row.columns.items) |col| {
-                    copy_row.columns.appendAssumeCapacity(.{
-                        .column_name = try self.allocator.dupe(u8, col.column_name),
-                        .has_changes = col.has_changes,
-                        .old_value = if (col.old_value) |old_value| try self.allocator.dupe(u8, old_value) else null,
-                        .new_value = if (col.new_value) |new_value| try self.allocator.dupe(u8, new_value) else null,
-                        .is_key = col.is_key,
-                    });
-                }
-
-                copy_slice[i].rows.appendAssumeCapacity(copy_row);
-            }
-        }
+        for (transactions, 0..) |*transaction, i| copy_slice[i] = try transaction.copy(self.allocator);
 
         try self.written_logs.appendSlice(self.allocator, copy_slice);
         self.allocator.free(copy_slice);
@@ -109,7 +79,8 @@ pub const PgClient = struct {
     allocator: mem.Allocator,
     io: Io,
 
-    responses: types.Transaction,
+    responses: std.ArrayList(types.Transaction),
+    peek: u8 = 0,
 
     opts: void,
 
@@ -118,7 +89,7 @@ pub const PgClient = struct {
 
     conn: *bool,
 
-    pub fn init(allocator: mem.Allocator, io: Io, responses: types.Transaction) !@This() {
+    pub fn init(allocator: mem.Allocator, io: Io, responses: std.ArrayList(types.Transaction)) !@This() {
         const conn = try allocator.create(bool);
         conn.* = true;
         return .{
@@ -150,11 +121,19 @@ pub const PgClient = struct {
     }
 
     pub fn sendCopyDone(self: *@This()) !void {
-        _ = self;
+        self.server_status = .ReadyForQuery;
     }
 
-    pub fn readWAL(self: *@This()) error{Timeout,WouldBlock,Canceled}!types.Transaction {
-        return self.responses;
+    pub fn readWAL(self: *@This()) error{Timeout,WouldBlock,Canceled}!?types.Transaction {
+        if (self.peek == self.responses.items.len) {
+            return null;
+        }
+
+        self.server_status = .XLogData;
+        const response = self.responses.items[self.peek];
+        self.peek += 1;
+
+        return response;
     }
 
     pub fn createConn(allocator: mem.Allocator, io: Io, opts: anytype) !*bool {
