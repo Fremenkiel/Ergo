@@ -189,7 +189,7 @@ CREATE PUBLICATION db_pub FOR ALL TABLES;
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = 'wal_slot') THEN
-        PERFORM pg_create_logical_replication_slot('wal_slot', 'ergo-pgoutput');
+        PERFORM pg_create_logical_replication_slot('wal_slot', 'ergo_pgoutput');
     END IF;
 END
 $$;

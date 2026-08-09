@@ -126,7 +126,7 @@ BEGIN
     wal_name := concat('wal_slot_', current_database());
 
     IF NOT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = wal_name) THEN
-      PERFORM pg_create_logical_replication_slot(wal_name, 'pgoutput');
+      PERFORM pg_create_logical_replication_slot(wal_name, 'ergo_pgoutput');
     END IF;
 END
 $$;

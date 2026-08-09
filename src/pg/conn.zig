@@ -440,39 +440,3 @@ test "Conn: TLS verify-full" {
         defer c.deinit();
     }
 }
-
-// test "Conn: query is cancelable" {
-//     const allocator = testing.allocator;
-//     const io = testing.io;
-//
-//     const S = struct {
-//         fn sleepQuery(c: *Conn) !void {
-//             var result = try c.query("select pg_sleep(3)", .{});
-//             result.deinit(allocator);
-//         }
-//     };
-//
-//     const opts: PgConfig = .{
-//         .host = "localhost",
-//         .database = "db",
-//         .username = "postgres",
-//         .password = "postgres",
-//         .application_name = "Ergo test",
-//         .startup_parameters = null,
-//     };
-//
-//     var c = try t.connect(allocator, io, opts);
-//     defer c.deinit();
-//
-//     // Run the query concurrently, let it reach its blocking read, then cancel.
-//     var future = try io.concurrent(S.sleepQuery, .{&c});
-//     try io.sleep(.fromMilliseconds(50), .awake);
-//
-//     const start = std.Io.Clock.Timestamp.now(io, .awake);
-//     const result = future.cancel(io);
-//     const elapsed_ms = start.untilNow(io).raw.toMilliseconds();
-//
-//     try testing.expectError(error.Timeout, result);
-//     try testing.expectEqual(true, elapsed_ms < 1500); // prompt, not blocked until pg_sleep ends
-//     try testing.expectEqual(State.fail, c.state);
-// }

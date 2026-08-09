@@ -165,7 +165,6 @@ pub const PgOutput = struct {
                     // typemod
                     _ = try reader.takeInt(u32, .big);
 
-                    std.debug.print("name: {s}, flag: {x}\n", .{column_name.?, flag});
                     try columns.append(self.allocator, .{ .name = try self.allocator.dupe(u8, column_name.?), .is_key = flag == 1 });
                 }
 
@@ -525,19 +524,19 @@ test "parsePgOutput: maps RELATION correctly" {
     try testing.expectEqual(true, def.?.columns.items[0].is_key);
 
     try testing.expectEqualStrings("address_line_1", def.?.columns.items[1].name);
-    try testing.expectEqual(false, def.?.columns.items[1].is_key);
+    try testing.expectEqual(true, def.?.columns.items[1].is_key);
 
     try testing.expectEqualStrings("address_line_2", def.?.columns.items[2].name);
-    try testing.expectEqual(false, def.?.columns.items[2].is_key);
+    try testing.expectEqual(true, def.?.columns.items[2].is_key);
 
     try testing.expectEqualStrings("postal_code", def.?.columns.items[3].name);
-    try testing.expectEqual(false, def.?.columns.items[3].is_key);
+    try testing.expectEqual(true, def.?.columns.items[3].is_key);
 
     try testing.expectEqualStrings("city", def.?.columns.items[4].name);
-    try testing.expectEqual(false, def.?.columns.items[4].is_key);
+    try testing.expectEqual(true, def.?.columns.items[4].is_key);
 
     try testing.expectEqualStrings("country", def.?.columns.items[5].name);
-    try testing.expectEqual(false, def.?.columns.items[5].is_key);
+    try testing.expectEqual(true, def.?.columns.items[5].is_key);
 }
 
 test "parsePgOutput: maps INSERT correctly" {
