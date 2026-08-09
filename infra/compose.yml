@@ -1,7 +1,9 @@
 services:
   db:
     container_name: db
-    image: postgres:18.4
+    build:
+      context: ..
+      dockerfile: infra/postgres/Dockerfile
     restart: always
     pull_policy: missing
     env_file:

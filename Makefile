@@ -1,6 +1,6 @@
 # Makefile
 
-phony: ch-create, dev-up, dev-down, test, test-ch, test-pg, build, run, wal-logger
+phony: ch-create, dev-up, dev-down, test, test-ch, test-pg, build, run, wal-logger, rebuld-db
 
 CH_ADDR ?= localhost
 CH_PORT ?= 9000
@@ -55,3 +55,6 @@ wal-logger:
 	-Dopenssl_lib_path=/opt/homebrew/opt/openssl@3/lib \
   -Dopenssl_include_path=/opt/homebrew/opt/openssl@3/include \
 	-freference-trace=10
+
+rebuld-db:
+	docker compose -f infra/compose.yml build db

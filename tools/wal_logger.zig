@@ -203,7 +203,7 @@ const WALLogger = struct {
                     const type_id = try reader.takeInt(u32, .big);
                     const typemode = try reader.takeInt(u32, .big);
 
-                    std.log.info(" - RECEIVED: msg type: {s}, flag: {d}, column_name: {s}, type_id: {d}, typemode: {d}", .{[_]u8{msg_type}, flag, column_name.?, type_id, typemode});
+                    std.log.info(" -- flag: {d}, column_name: {s}, type_id: {d}, typemode: {d}", .{flag, column_name.?, type_id, typemode});
                 }
 
                 return;

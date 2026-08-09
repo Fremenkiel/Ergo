@@ -18,6 +18,8 @@ SELECT/PERFORM pg_logical_emit_message(
 No json parse func, string has to be this.
 
 ## Credits
+Extension based on PgOutput
+
 https://github.com/karlseguin/pg.zig
 https://github.com/0xrinegade/clickhouse-zig
 
@@ -54,3 +56,6 @@ zig build -Dopenssl=true \
 
 # Nice to have
 https://www.postgresql.org/docs/current/protocol-logicalrep-message-formats.html
+
+# TODO
+descrie the ergo-pgoutput extension and the install process

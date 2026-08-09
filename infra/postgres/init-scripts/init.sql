@@ -189,53 +189,7 @@ CREATE PUBLICATION db_pub FOR ALL TABLES;
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = 'wal_slot') THEN
-        PERFORM pg_create_logical_replication_slot('wal_slot', 'pgoutput');
+        PERFORM pg_create_logical_replication_slot('wal_slot', 'ergo-pgoutput');
     END IF;
 END
 $$;
-
-        -- \\ drop table if exists all_types;
-        -- \\ create table all_types (
-        -- \\   id integer primary key,
-        -- \\   col_int2 smallint,
-        -- \\   col_int4 integer,
-        -- \\   col_int8 bigint,
-        -- \\   col_float4 float4,
-        -- \\   col_float8 float8,
-        -- \\   col_bool bool,
-        -- \\   col_text text,
-        -- \\   col_bytea bytea,
-        -- \\   col_int2_arr smallint[],
-        -- \\   col_int4_arr integer[],
-        -- \\   col_int8_arr bigint[],
-        -- \\   col_float4_arr float4[],
-        -- \\   col_float8_arr float[],
-        -- \\   col_bool_arr bool[],
-        -- \\   col_text_arr text[],
-        -- \\   col_bytea_arr bytea[],
-        -- \\   col_enum custom_enum,
-        -- \\   col_enum_arr custom_enum[],
-        -- \\   col_uuid uuid,
-        -- \\   col_uuid_arr uuid[],
-        -- \\   col_numeric numeric,
-        -- \\   col_numeric_arr numeric[],
-        -- \\   col_timestamp timestamp,
-        -- \\   col_timestamp_arr timestamp[],
-        -- \\   col_json json,
-        -- \\   col_json_arr json[],
-        -- \\   col_jsonb jsonb,
-        -- \\   col_jsonb_arr jsonb[],
-        -- \\   col_char char,
-        -- \\   col_char_arr char[],
-        -- \\   col_charn char(3),
-        -- \\   col_charn_arr char(2)[],
-        -- \\   col_timestamptz timestamptz,
-        -- \\   col_timestamptz_arr timestamptz[],
-        -- \\   col_cidr cidr,
-        -- \\   col_cidr_arr cidr[],
-        -- \\   col_inet inet,
-        -- \\   col_inet_arr inet[],
-        -- \\   col_macaddr macaddr,
-        -- \\   col_macaddr_arr macaddr[],
-        -- \\   col_macaddr8 macaddr8,
-        -- \\   col_macaddr8_arr macaddr8[]
