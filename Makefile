@@ -1,6 +1,6 @@
 # Makefile
 
-phony: ch-create, dev-up, dev-down, test, test-ch, test-pg, build, run
+phony: ch-create, dev-up, dev-down, test, test-ch, test-pg, build, run, wal-logger
 
 CH_ADDR ?= localhost
 CH_PORT ?= 9000
@@ -25,7 +25,7 @@ dev-down:
 	docker-compose -f ./infra/compose.yml down -v
 
 test:
-	zig build test -Dopenssl=true \
+	zig build test \
   -Dopenssl_lib_path=/opt/homebrew/opt/openssl@3/lib \
   -Dopenssl_include_path=/opt/homebrew/opt/openssl@3/include \
 	-freference-trace=10
@@ -35,17 +35,23 @@ test-ch:
 	-freference-trace=10
 
 test-pg:
-	zig build pg_test -Dopenssl=true \
+	zig build pg_test \
   -Dopenssl_lib_path=/opt/homebrew/opt/openssl@3/lib \
   -Dopenssl_include_path=/opt/homebrew/opt/openssl@3/include \
 	-freference-trace=10
 
 build:
-	zig build -Dopenssl=true \
+	zig build \
   -Dopenssl_lib_path=/opt/homebrew/opt/openssl@3/lib \
   -Dopenssl_include_path=/opt/homebrew/opt/openssl@3/include
 
 run:
-	zig build run -Dopenssl=true \
+	zig build run \
   -Dopenssl_lib_path=/opt/homebrew/opt/openssl@3/lib \
   -Dopenssl_include_path=/opt/homebrew/opt/openssl@3/include
+
+wal-logger:
+	zig build wal-logger \
+	-Dopenssl_lib_path=/opt/homebrew/opt/openssl@3/lib \
+  -Dopenssl_include_path=/opt/homebrew/opt/openssl@3/include \
+	-freference-trace=10

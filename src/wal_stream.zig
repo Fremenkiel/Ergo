@@ -183,7 +183,7 @@ var mock_is_shutting_down = std.atomic.Value(bool).init(false);
 
 const t = @import("t.zig");
 
-test "startStreaming: read and parse correctly" {
+test "WalStream: read and parse correctly" {
     const allocator = testing.allocator;
     const io = testing.io;
 
@@ -301,7 +301,7 @@ test "startStreaming: read and parse correctly" {
     try testing.expectEqualStrings("US", country_column.old_value.?);
 }
 
-test "startStreaming: insert all types read correctly" {
+test "WalStream: insert all types read correctly" {
     const allocator = testing.allocator;
     const io = testing.io;
 
@@ -477,7 +477,7 @@ test "startStreaming: insert all types read correctly" {
     try testing.expectEqualStrings("{08:00:2b:01:02:03:04:05,08:00:2b:01:02:03:04:06}", col_macaddr8_arr_value.?);
 }
 
-test "startStreaming: update all types to null read correctly" {
+test "WalStream: update all types to null read correctly" {
     const allocator = testing.allocator;
     const io = testing.io;
 
@@ -691,7 +691,7 @@ test "startStreaming: update all types to null read correctly" {
     try testing.expectEqual(null, col_macaddr8_arr.new_value);
 }
 
-test "startStreaming: insert all types to null write correctly" {
+test "WalStream: insert all types to null write correctly" {
     const allocator = testing.allocator;
     const io = testing.io;
 

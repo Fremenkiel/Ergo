@@ -51,3 +51,6 @@ chmod 600 server.key
 zig build -Dopenssl=true \
   -Dopenssl_lib_path=/opt/homebrew/opt/openssl@3/lib \
   -Dopenssl_include_path=/opt/homebrew/opt/openssl@3/include
+
+# Nice to have
+https://www.postgresql.org/docs/current/protocol-logicalrep-message-formats.html

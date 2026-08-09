@@ -31,10 +31,8 @@ pub fn build(b: *std.Build) void {
     const openssl_lib_name = b.option([]const u8, "openssl_lib_name", "");
     const openssl_lib_path = b.option(std.Build.LazyPath, "openssl_lib_path", "");
     const openssl_include_path = b.option(std.Build.LazyPath, "openssl_include_path", "");
-    const openssl = b.option(bool, "openssl", "Enable OpenSSL/TLS support") orelse
-        (openssl_lib_name != null or openssl_lib_path != null or openssl_include_path != null);
 
-    const openssl_module = if (openssl) blk: {
+    const openssl_module = blk: {
         const t = b.addTranslateC(.{
             .root_source_file = b.path("src/pg/openssl.h"),
             .target = target,
@@ -42,7 +40,7 @@ pub fn build(b: *std.Build) void {
         });
         if (openssl_include_path) |p| t.addIncludePath(p);
         break :blk t.createModule();
-    } else b.createModule(.{ .root_source_file = b.path("src/pg/openssl_stub.zig") });
+    };
 
     const pg_module = b.addModule("pg", .{
         .target = target,
@@ -54,12 +52,10 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    if (openssl) {
-        if (openssl_lib_path) |p| pg_module.addLibraryPath(p);
-        pg_module.linkSystemLibrary("crypto", .{});
-        pg_module.linkSystemLibrary(openssl_lib_name orelse "ssl", .{});
-        pg_module.link_libc = true;
-    }
+    if (openssl_lib_path) |p| pg_module.addLibraryPath(p);
+    pg_module.linkSystemLibrary("crypto", .{});
+    pg_module.linkSystemLibrary(openssl_lib_name orelse "ssl", .{});
+    pg_module.link_libc = true;
 
     var column_names = false;
     const column_names_opt = b.option(bool, "column_names", "");
@@ -68,12 +64,9 @@ pub fn build(b: *std.Build) void {
         column_names = val;
     }
 
-    {
-        const options = b.addOptions();
-        options.addOption(bool, "openssl", openssl);
-        options.addOption(bool, "column_names", column_names);
-        pg_module.addOptions("config", options);
-    }
+    const options = b.addOptions();
+    options.addOption(bool, "column_names", column_names);
+    pg_module.addOptions("config", options);
 
     const exe = b.addExecutable(.{
         .name = "ergo",
@@ -156,4 +149,24 @@ pub fn build(b: *std.Build) void {
         debug_cmd.addArgs(args);
     }
 
+    // WAL logger util
+    const wal_logger = b.addExecutable(.{
+        .name = "wal_logger",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/wal_logger.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    wal_logger.root_module.addImport("pg", pg_module);
+    wal_logger.root_module.addImport("types", types_module);
+
+    const run_wal_logger = b.addRunArtifact(wal_logger);
+    
+    if (b.args) |args| {
+        run_wal_logger.addArgs(args);
+    }
+
+    const wal_logger_step = b.step("wal-logger", "Run the WAL logger utility");
+    wal_logger_step.dependOn(&run_wal_logger.step);
 }
