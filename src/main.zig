@@ -9,11 +9,12 @@ const posix = std.posix;
 const assert = std.debug.assert;
 
 const ch = @import("ch");
+const connection_manager = @import("connection_manager.zig");
 const wal_stream = @import("wal_stream.zig");
 const types = @import("types");
 
-const PgClient = @import("pg_client.zig").PgClient;
 const ChClient = @import("ch_client.zig").ChClient;
+const PgClient = @import("pg_client.zig").PgClient;
 const WalStream = wal_stream.WalStream;
 
 const application_name = "Ergo";
@@ -145,16 +146,26 @@ pub fn main(init: std.process.Init) !void {
     defer pg_client.deinit();
     defer pg_client.cancel();
 
+    var conn_manager = connection_manager.ConnectionManager.init(io);
+
     var processor = WalStream.init(
         allocator,
         io,
         &ch_client,
-        &pg_client, 
+        &pg_client,
+        &conn_manager,
         options.bulk_sync_duration,
         options.is_test
     );
     defer processor.deinit();
     defer pg_client.cancel();
+
+    const prober_thread = try std.Thread.spawn(
+        .{}, 
+        connection_manager.ConnectionManager.runProber, 
+        .{ &conn_manager, options.pg_host, options.pg_port }
+    );
+    defer prober_thread.detach();
 
     try processor.startStreaming();
     defer {

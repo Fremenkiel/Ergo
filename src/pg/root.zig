@@ -6,6 +6,7 @@ pub const conn = @import("conn.zig");
 pub const packet = @import("packet.zig");
 pub const parser = @import("parser.zig");
 pub const protocol = @import("protocol.zig");
+pub const stream = @import("stream.zig");
 
 pub const Error = @import("error.zig").Error;
 
@@ -36,7 +37,7 @@ InvalidMessage,
 
 pub const PgConfig = struct {
     host: []const u8,
-    port: ?u16 = null,
+    port: u16 = 5432,
     wal: []const u8 = "wal_slot",
     write_buffer: ?u16 = null,
     read_buffer: ?u16 = null,

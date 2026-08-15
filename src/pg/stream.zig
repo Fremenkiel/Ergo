@@ -28,18 +28,7 @@ pub const Stream = struct {
     pub fn init(allocator: mem.Allocator, io: Io, opts: PgConfig, ctx_: ?*openssl.SSL_CTX) !Stream {
         const is_unix = opts.host.len > 0 and opts.host[0] == '/';
 
-        const io_stream = try blk: {
-            if (is_unix) {
-                if (comptime Io.net.has_unix_sockets == false or std.posix.AF == void) {
-                    return error.UnixPathNotSupported;
-                }
-                const addr: Io.net.UnixAddress = try .init(opts.host);
-                break :blk addr.connect(io);
-            }
-            const port = opts.port orelse 5432;
-            const hostname: Io.net.HostName = try .init(opts.host);
-            break :blk hostname.connect(io, port, .{ .mode = .stream });
-        };
+        const io_stream = try attemptConnection(io, opts.host, opts.port);
         errdefer io_stream.close(io);
 
         if (is_unix == false) {
@@ -272,6 +261,20 @@ fn isHostName(host: []const u8) bool {
         return false;
     }
     return std.mem.findNone(u8, host, "0123456789.") != null;
+}
+
+pub fn attemptConnection(io: Io, host: []const u8, port: u16) !Io.net.Stream {
+    const is_unix = host.len > 0 and host[0] == '/';
+
+    if (is_unix) {
+        if (comptime Io.net.has_unix_sockets == false or std.posix.AF == void) {
+            return error.UnixPathNotSupported;
+        }
+        const addr: Io.net.UnixAddress = try .init(host);
+        return addr.connect(io);
+    }
+    const hostname: Io.net.HostName = try .init(host);
+    return hostname.connect(io, port, .{ .mode = .stream });
 }
 
 test "cancel stream while read" {

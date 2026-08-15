@@ -30,10 +30,10 @@ pub const PgClient = struct {
 
     parser: pg.parser.PgOutput,
 
-    conn: ?*pg.Conn,
+    conn: *pg.Conn,
 
     pub fn init(allocator: mem.Allocator, io: Io, opts: pg.PgConfig) !PgClient{
-        var conn = try createConn(allocator, io, opts);
+        var conn = try connect(allocator, io, opts);
         errdefer conn.deinit();
 
         return .{
@@ -49,41 +49,37 @@ pub const PgClient = struct {
     }
 
     pub fn deinit(self: *@This()) void {
-        if (self.conn) |conn| {
-            conn.deinit();
-            self.allocator.destroy(conn);
-        }
+        self.conn.deinit();
+        self.allocator.destroy(self.conn);
         self.parser.deinit();
     }
 
     pub fn cancel(self: *@This()) void {
-        if (self.conn) |conn| conn.cancel();
+        self.conn.cancel();
     }
 
     pub fn startFlow(self: *@This(), timeout_ms: i32) !void {
-        if (self.conn == null) return pg.PgError.WalConnectionNotInitialized;
-        try self.conn.?.reader.startWALFlow(self.opts.wal, timeout_ms);
+        try self.conn.reader.startWALFlow(self.opts.wal, timeout_ms);
     }
 
     pub fn endFlow(self: *@This()) !void {
-        if (self.conn == null) return pg.PgError.WalConnectionNotInitialized;
-        try self.conn.?.reader.endWALFlow(self.opts.wal);
+        try self.conn.reader.endWALFlow(self.opts.wal);
     }
 
     pub fn readWAL(self: *@This()) !?types.Transaction {
-        if (self.conn == null) return pg.PgError.WalConnectionNotInitialized;
-
         var transaction: ?types.Transaction = null;
 
         while(true) {
-            const msg = self.conn.?.reader.next() catch |err| switch (err) {
-                error.Timeout => {
-                    if (transaction == null) {
-                        return err;
-                    }
-                    continue; 
-                },
-                else => return err,
+            const msg = self.conn.reader.next() catch |err| {
+                switch (err) {
+                    error.Timeout => {
+                        if (transaction == null) {
+                            return err;
+                        }
+                        continue; 
+                    },
+                    else => return err,
+                }
             };
 
             switch (msg.type) {
@@ -113,7 +109,7 @@ pub const PgClient = struct {
                             const parse_response = try self.parser.decode(payload);
                             
                             // Proactively acknowledge this processed WAL chunk
-                            try self.conn.?.sendStandbyStatusUpdate(self.last_lsn, self.last_timestamp);
+                            try self.conn.sendStandbyStatusUpdate(self.last_lsn, self.last_timestamp);
 
                             if (parse_response) |res| {
                                 if (res.data) |row| {
@@ -168,7 +164,7 @@ pub const PgClient = struct {
                             }
 
                             if (reply_requested == 1) {
-                                try self.conn.?.sendStandbyStatusUpdate(self.last_lsn, self.last_timestamp);
+                                try self.conn.sendStandbyStatusUpdate(self.last_lsn, self.last_timestamp);
                             }
                         },
                         else => {}
@@ -218,14 +214,10 @@ pub const PgClient = struct {
     }
 
     pub fn sendCopyDone(self: *@This()) !void {
-        if (self.conn == null) {
-            return PgClientError.UnableToSendCopyDone;
-        }
-
-        try pg.protocol.CopyDone.write(&self.conn.?.stream);
+        try pg.protocol.CopyDone.write(&self.conn.stream);
     }
 
-    pub fn createConn(allocator: mem.Allocator, io:  Io, opts: pg.PgConfig) !*pg.Conn {
+    pub fn connect(allocator: mem.Allocator, io:  Io, opts: pg.PgConfig) !*pg.Conn {
         var conn = try allocator.create(pg.Conn);
         conn.* = pg.Conn.init(io, allocator, opts) catch |err| {
             std.debug.print("Failed to connect: {}\n", .{err});
@@ -233,15 +225,12 @@ pub const PgClient = struct {
         };
         errdefer allocator.destroy(conn);
 
-        conn.auth() catch |err| {
-            if (conn.err) |pg_err| {
-                std.debug.print("Failed to auth: {} {s}: {s}\n", .{err, pg_err.code, pg_err.message});
-            } else {
-                std.debug.print("Failed to auth: {}\n", .{err});
-            }
-            return err;
-        };
+        try conn.auth();
 
         return conn;
+    }
+
+    pub fn reconnect(self: *@This()) !void {
+        try self.conn.auth();
     }
 };

@@ -136,13 +136,21 @@ pub const PgClient = struct {
         return response;
     }
 
-    pub fn createConn(allocator: mem.Allocator, io: Io, opts: anytype) !*bool {
+    pub fn connect(allocator: mem.Allocator, io: Io, opts: anytype) !*bool {
         _ = io;
         _ = opts;
 
         const new_conn = try allocator.create(bool);
         new_conn.* = true;
         return new_conn;
+    }
+
+    pub fn reconnect(allocator: mem.Allocator, io: Io, opts: anytype) !void {
+        _ = io;
+        _ = opts;
+
+        const new_conn = try allocator.create(bool);
+        new_conn.* = true;
     }
 };
 

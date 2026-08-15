@@ -24,3 +24,4 @@ simulated time on all wal stream to speed up timeout
 Remove unmanaged hash map
 Change PK to take all coumns and save Map(String, String)
 Startup params based on env
+Reconnect handling on error while sending copy done.

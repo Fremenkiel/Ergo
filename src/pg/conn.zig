@@ -132,7 +132,9 @@ pub const Conn = struct {
         while (true) {
             const msg = try self.read();
             switch (msg.type) {
-                'Z' => return,
+                'Z' => {
+                    return;
+                },
                 'K' => {}, // TODO: BackendKeyData
                 else => return self.unexpectedDBMessage(),
             }

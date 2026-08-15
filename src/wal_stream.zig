@@ -7,11 +7,11 @@ const posix = std.posix;
 const assert = std.debug.assert;
 
 const pg = @import("pg");
-
 const types = @import("types");
 const _pg_client = @import("pg_client.zig");
 
 const ChClient = @import("ch_client.zig").ChClient;
+const ConnectionManager = @import("connection_manager.zig").ConnectionManager;
 const PgClient = _pg_client.PgClient;
 const PgClientError = _pg_client.PgClientError;
 
@@ -40,6 +40,7 @@ pub fn WalStreamT(comptime StreamChClient: type, comptime StreamPgClient: type) 
 
         ch_client: *StreamChClient,
         pg_client: *StreamPgClient,
+        connection_manager: *ConnectionManager,
 
         duration: Io.Duration,
         last_write_timestamp: Io.Timestamp,
@@ -50,13 +51,14 @@ pub fn WalStreamT(comptime StreamChClient: type, comptime StreamPgClient: type) 
         // only used for running child process tests 
         is_test: bool,
 
-        pub fn init(allocator: mem.Allocator, io: Io, ch_client: *StreamChClient, pg_client: *StreamPgClient, duration: ?i64, is_test: bool) @This() {
+        pub fn init(allocator: mem.Allocator, io: Io, ch_client: *StreamChClient, pg_client: *StreamPgClient, connection_manager: *ConnectionManager, duration: ?i64, is_test: bool) @This() {
             return .{
                 .allocator = allocator,
                 .io = io,
                 .duration = Io.Duration.fromMilliseconds(duration orelse 500),
                 .last_write_timestamp = Io.Clock.real.now(io),
                 .ch_client = ch_client,
+                .connection_manager = connection_manager,
                 .pg_client = pg_client,
                 .is_test = is_test,
             };
@@ -68,13 +70,11 @@ pub fn WalStreamT(comptime StreamChClient: type, comptime StreamPgClient: type) 
         }
 
         pub fn startStreaming(self: *@This()) !void {
-            self.pg_client.startFlow(read_timeout_ms) catch |err| switch (err) {
-                pg.PgError.WalConnectionNotInitialized => {
-                    self.pg_client.*.conn = try StreamPgClient.createConn(self.allocator, self.io, self.pg_client.*.opts);
+            self.pg_client.startFlow(read_timeout_ms) catch {
+                try self.connection_manager.reportDisconnectAndWait();
+                try self.pg_client.reconnect();
 
-                    try self.pg_client.startFlow(read_timeout_ms);
-                },
-                else => return err,
+                try self.pg_client.startFlow(read_timeout_ms);
             };
         }
 
@@ -107,11 +107,16 @@ pub fn WalStreamT(comptime StreamChClient: type, comptime StreamPgClient: type) 
                     }
                 }
 
-                var response = self.pg_client.readWAL() catch |err| switch (err) {
-                    error.WouldBlock, error.Timeout => {
-                        continue; 
-                    },
-                    else => return err,
+                var response = self.pg_client.readWAL() catch |err| {
+                    switch (err) {
+                        error.WouldBlock, error.Timeout => {
+                            continue; 
+                        },
+                        else => {
+                            try self.connection_manager.reportDisconnectAndWait();
+                        }
+                    }
+                    return err;
                 };
                 defer {
                     if (response) |*tx| {
