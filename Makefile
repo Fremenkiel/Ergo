@@ -1,6 +1,6 @@
 # Makefile
 
-phony: ch-create, dev-up, dev-down, test, test-ch, test-pg, build, run, wal-logger, rebuld-db
+phony: ch-create, dev-up, dev-down, db-up, db-down, ch-up, ch-down, test, test-ch, test-pg, build, run, wal-logger, rebuld-db
 
 CH_ADDR ?= localhost
 CH_PORT ?= 9000
@@ -23,6 +23,19 @@ dev-up:
 
 dev-down:
 	docker-compose -f ./infra/compose.yml down -v
+
+db-up: 
+	docker-compose -f ./infra/compose.yml up db -d --wait
+
+db-down:
+	docker-compose -f ./infra/compose.yml down db -v
+
+ch-up: 
+	docker-compose -f ./infra/compose.yml up -d ch --wait
+	make ch-create
+
+ch-down:
+	docker-compose -f ./infra/compose.yml down ch -v
 
 test:
 	zig build test \

@@ -15,6 +15,7 @@ const types = @import("types");
 
 const ChClient = @import("ch_client.zig").ChClient;
 const PgClient = @import("pg_client.zig").PgClient;
+const PgConfig = @import("pg").PgConfig;
 const WalStream = wal_stream.WalStream;
 
 const application_name = "Ergo";
@@ -132,7 +133,7 @@ pub fn main(init: std.process.Init) !void {
     try ch_client.connect();
     defer ch_client.disconnect();
 
-    var pg_client = try PgClient.init(allocator, io, .{
+    const pg_config: PgConfig = .{
         .port = options.pg_port,
         .host = options.pg_host,
         .wal = options.pg_wal,
@@ -142,11 +143,13 @@ pub fn main(init: std.process.Init) !void {
         .application_name = application_name,
         .timeout_ms = 10_000,
         .startup_parameters = null
-    });
+    };
+
+    var pg_client = try PgClient.init(allocator, io, pg_config);
     defer pg_client.deinit();
     defer pg_client.cancel();
 
-    var conn_manager = connection_manager.ConnectionManager.init(io);
+    var conn_manager = connection_manager.ConnectionManager.init(allocator, io, pg_config);
 
     var processor = WalStream.init(
         allocator,
@@ -163,7 +166,7 @@ pub fn main(init: std.process.Init) !void {
     const prober_thread = try std.Thread.spawn(
         .{}, 
         connection_manager.ConnectionManager.runProber, 
-        .{ &conn_manager, options.pg_host, options.pg_port }
+        .{ &conn_manager }
     );
     defer prober_thread.detach();
 

@@ -114,6 +114,10 @@ pub fn WalStreamT(comptime StreamChClient: type, comptime StreamPgClient: type) 
                         },
                         else => {
                             try self.connection_manager.reportDisconnectAndWait();
+                            try self.pg_client.reconnect();
+                            try self.pg_client.startFlow(read_timeout_ms);
+                            std.log.debug("connection regained\n", .{});
+                            continue;
                         }
                     }
                     return err;

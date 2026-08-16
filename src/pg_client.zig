@@ -231,6 +231,9 @@ pub const PgClient = struct {
     }
 
     pub fn reconnect(self: *@This()) !void {
-        try self.conn.auth();
+        self.conn.deinit();
+        self.allocator.destroy(self.conn);
+
+        self.conn = try connect(self.allocator, self.io, self.opts);
     }
 };

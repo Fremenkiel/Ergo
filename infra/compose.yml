@@ -37,8 +37,8 @@ services:
         limits:
           memory: 1024M
 
-  clickhouse:
-    container_name: clickhouse
+  ch:
+    container_name: ch
     image: clickhouse/clickhouse-server:24.12-alpine
     restart: always
     pull_policy: missing
