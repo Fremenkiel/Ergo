@@ -3,6 +3,7 @@ const std = @import("std");
 const Io = std.Io;
 const mem = std.mem;
 
+const ConnectionStates = @import("connection_manager.zig").ConnectionStates;
 const pg = @import("pg");
 const pg_client = @import("pg_client.zig");
 const types = @import("types");
@@ -145,12 +146,39 @@ pub const PgClient = struct {
         return new_conn;
     }
 
-    pub fn reconnect(allocator: mem.Allocator, io: Io, opts: anytype) !void {
-        _ = io;
-        _ = opts;
-
-        const new_conn = try allocator.create(bool);
+    pub fn reconnect(self: *@This()) !void {
+        const new_conn = try self.allocator.create(bool);
         new_conn.* = true;
+    }
+};
+
+pub const ConnectionManager = struct {
+    allocator: mem.Allocator,
+    io: Io,
+
+    state: ConnectionStates,
+    reconnect_timeout_ms: ?i64,
+
+    pub fn init(allocator: mem.Allocator, io: Io) @This() {
+        return .{
+            .allocator = allocator,
+            .io = io,
+            .state = .probing,
+            .reconnect_timeout_ms = null,
+        };
+    }
+
+    pub fn runProber(self: *@This()) !void {
+        _ = self;
+    }
+
+    pub fn reportDisconnectAndWait(self: *@This()) !void {
+        self.state = .probing;
+
+        if (self.reconnect_timeout_ms) |timeout| {
+            try Io.sleep(self.io, Io.Duration{ .nanoseconds = timeout * std.time.ns_per_ms }, .real);
+        }
+        self.state = .streaming;
     }
 };
 

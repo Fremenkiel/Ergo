@@ -123,8 +123,6 @@ pub const PgOutput = struct {
                 response.last_lsn = try reader.takeInt(u64, .big);
                 response.timestamp = Timestamp.decode(try reader.takeInt(u64, .big));
 
-                self.clear();
-
                 return response;
             },
             'R' => {
@@ -168,6 +166,11 @@ pub const PgOutput = struct {
                     try columns.append(self.allocator, .{ .name = try self.allocator.dupe(u8, column_name.?), .is_key = flag == 1 });
                 }
 
+                var existing_reg = self.table_reg.fetchRemove(rel_id);
+                if (existing_reg) |*kv| {
+                    kv.value.deinit(self.allocator);
+                }
+
                 try self.table_reg.put(rel_id, .{
                     .namespace = try self.allocator.dupe(u8, namespace.?),
                     .name = try self.allocator.dupe(u8, rel_name.?),
@@ -195,7 +198,7 @@ pub const PgOutput = struct {
                         .columns = try self.parseTupleData(&reader, columns, .Insert),
                     };
                 } else {
-                    std.debug.print("Error: Received insert for unknown relation ID {d}\n", .{rel_id});
+                    std.log.err("Received insert for unknown relation ID {d}\n", .{rel_id});
                 }
 
                 return response;

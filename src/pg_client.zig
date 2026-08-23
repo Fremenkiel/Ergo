@@ -136,8 +136,6 @@ pub const PgClient = struct {
                                     if (lsn > self.last_lsn) {
                                         self.last_lsn = lsn;
 
-                                        self.parser.clear();
-
                                         return transaction.?;
                                     }
                                 } else {

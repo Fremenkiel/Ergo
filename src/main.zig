@@ -151,7 +151,7 @@ pub fn main(init: std.process.Init) !void {
 
     var conn_manager = connection_manager.ConnectionManager.init(allocator, io, pg_config);
 
-    var processor = WalStream.init(
+    var streamer = WalStream.init(
         allocator,
         io,
         &ch_client,
@@ -160,7 +160,7 @@ pub fn main(init: std.process.Init) !void {
         options.bulk_sync_duration,
         options.is_test
     );
-    defer processor.deinit();
+    defer streamer.deinit();
     defer pg_client.cancel();
 
     const prober_thread = try std.Thread.spawn(
@@ -170,9 +170,9 @@ pub fn main(init: std.process.Init) !void {
     );
     defer prober_thread.detach();
 
-    try processor.startStreaming();
+    try streamer.startStreaming();
     defer {
-        processor.endStreaming() catch |err| {
+        streamer.endStreaming() catch |err| {
             const error_message = std.fmt.allocPrint(allocator, "Error: An error occurred while ending stream: {s}\n", .{@errorName(err)}) catch { 
                 // At this point, we are fucked.
                 @panic("All bets are off");
@@ -186,7 +186,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // Blocking
-    try processor.stream(&is_shutting_down);
+    try streamer.stream(&is_shutting_down);
 
     try Io.File.stdout().writeStreamingAll(io, shutdown_str);
     try Io.File.stdout().writeStreamingAll(io, "\n");

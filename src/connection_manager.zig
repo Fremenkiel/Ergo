@@ -77,7 +77,6 @@ pub const ConnectionManager = struct {
     }
 
     pub fn reportDisconnectAndWait(self: *@This()) !void {
-        std.log.debug("trigger disconnect\n", .{});
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
 
@@ -85,7 +84,6 @@ pub const ConnectionManager = struct {
         self.cond_probing.signal(self.io);
 
         while (self.state != .streaming) {
-            std.log.debug("state: {s}\n", .{@tagName(self.state)});
             try self.cond_streaming.wait(self.io, &self.mutex);
         }
     }
