@@ -244,6 +244,7 @@ test "Conn: auth trust (no pass)" {
 
     const opts: PgConfig = .{
         .host = "localhost",
+        .port = 5432,
         .database = "db",
         .username = "db_np",
         .application_name = "Ergo test",
@@ -261,6 +262,7 @@ test "Conn: auth unknown user" {
 
     const opts: PgConfig = .{
         .host = "localhost",
+        .port = 5432,
         .database = "db",
         .username = "does_not_exist",
         .application_name = "Ergo test",
@@ -280,6 +282,7 @@ test "Conn: auth cleartext password" {
     {
         const opts: PgConfig = .{
             .host = "localhost",
+            .port = 5432,
             .database = "db",
             .username = "db_ro",
             .application_name = "Ergo test",
@@ -295,6 +298,7 @@ test "Conn: auth cleartext password" {
     {
         const opts: PgConfig = .{
             .host = "localhost",
+            .port = 5432,
             .database = "db",
             .username = "db_ro",
             .password = "wrong",
@@ -311,6 +315,7 @@ test "Conn: auth cleartext password" {
     {
         const opts: PgConfig = .{
             .host = "localhost",
+            .port = 5432,
             .database = "db",
             .username = "db_ro",
             .password = "12345678",
@@ -331,6 +336,7 @@ test "Conn: auth scram-sha-256 password" {
     {
         const opts: PgConfig = .{
             .host = "localhost",
+            .port = 5432,
             .database = "db",
             .username = "db_ro_scram_sha256",
             .application_name = "Ergo test",
@@ -346,6 +352,7 @@ test "Conn: auth scram-sha-256 password" {
     {
         const opts: PgConfig = .{
             .host = "localhost",
+            .port = 5432,
             .database = "db",
             .username = "db_ro_scram_sha256",
             .password = "wrong",
@@ -362,6 +369,7 @@ test "Conn: auth scram-sha-256 password" {
     {
         const opts: PgConfig = .{
             .host = "localhost",
+            .port = 5432,
             .database = "db",
             .username = "db_ro_scram_sha256",
             .password = "12345678",
@@ -382,6 +390,7 @@ test "Conn: TLS required" {
     {
         const opts: PgConfig = .{
             .host = "localhost",
+            .port = 5432,
             .database = "db",
             .username = "db_ro_ssl",
             .application_name = "Ergo test",
@@ -398,6 +407,7 @@ test "Conn: TLS required" {
     {
         const opts: PgConfig = .{
             .host = "localhost",
+            .port = 5432,
             .database = "db",
             .username = "db_ro_ssl",
             .password = "12345678",
@@ -418,6 +428,7 @@ test "Conn: TLS verify-full" {
     {
         const opts: PgConfig = .{
             .host = "localhost",
+            .port = 5432,
             .database = "db",
             .application_name = "Ergo test",
             .startup_parameters = null,
@@ -430,6 +441,7 @@ test "Conn: TLS verify-full" {
     {
         const opts: PgConfig = .{
             .host = "localhost",
+            .port = 5432,
             .database = "db",
             .username = "db_ro_ssl",
             .password = "12345678",

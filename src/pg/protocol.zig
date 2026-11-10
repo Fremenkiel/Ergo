@@ -368,7 +368,7 @@ test "StartupMessage: write" {
     defer mock_stream.deinit();
 
     const TestStartupMessage = StartupMessageT(t.Stream);
-    try TestStartupMessage.write(allocator, &mock_stream, .{ .username = "james", .database = "doe", .host = "localhost", .application_name = "Ergo test", .startup_parameters = null });
+    try TestStartupMessage.write(allocator, &mock_stream, .{ .username = "james", .database = "doe", .host = "localhost", .port = 5432, .application_name = "Ergo test", .startup_parameters = null });
 
     var reader = Io.Reader.fixed(mock_stream.toString());
     const startup_protocol_length = try reader.takeInt(u32, .big);

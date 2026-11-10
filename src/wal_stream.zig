@@ -93,6 +93,7 @@ pub fn WalStreamT(comptime StreamChClient: type, comptime StreamPgClient: type, 
                 if (is_shutting_down) {
                     switch (self.status) {
                         .Idle => {
+                            flag.store(false, .seq_cst);
                             return;
                         },
                         .CopyData => {
@@ -113,9 +114,10 @@ pub fn WalStreamT(comptime StreamChClient: type, comptime StreamPgClient: type, 
                             continue; 
                         },
                         else => {
+                            std.log.debug("Got error: {s}", .{@errorName(err)});
                             try self.connection_manager.reportDisconnectAndWait();
                             try self.pg_client.reconnect();
-                            try self.pg_client.startFlow(read_timeout_ms);
+                            // try self.pg_client.startFlow(read_timeout_ms);
                             std.log.info("connection regained\n", .{});
                             continue;
                         }
@@ -838,18 +840,21 @@ pub fn runQuery(allocator: mem.Allocator, io: Io, db_name: []const u8, flag: *st
         "-a",
         "-f", "./test_fixtures/simple-query.sql"
     };
-    const pg_result_1 = try std.process.run(allocator, io, .{ 
-        .argv = &pg_argv,
-        .environ_map = &pg_env, 
-    });
-    defer {
-        allocator.free(pg_result_1.stdout);
-        allocator.free(pg_result_1.stderr);
-    }
 
-    if (pg_result_1.term != .exited or pg_result_1.term.exited != 0 or pg_result_1.stderr.len > 0) {
-        std.debug.print("Error: PSQL failed: {s}\n", .{pg_result_1.stderr});
-        return error.PsqlExecutionFailed;
+    {
+        const pg_result = try std.process.run(allocator, io, .{ 
+            .argv = &pg_argv,
+            .environ_map = &pg_env, 
+        });
+        defer {
+            allocator.free(pg_result.stdout);
+            allocator.free(pg_result.stderr);
+        }
+
+        if (pg_result.term != .exited or pg_result.term.exited != 0 or pg_result.stderr.len > 0) {
+            std.debug.print("Error: PSQL failed: {s}\n", .{pg_result.stderr});
+            return error.PsqlExecutionFailed;
+        }
     }
 
     var docker_kill_argv = [_][]const u8{
@@ -888,18 +893,39 @@ pub fn runQuery(allocator: mem.Allocator, io: Io, db_name: []const u8, flag: *st
         return error.DockerStartFailed;
     }
 
-    const pg_result_2 = try std.process.run(allocator, io, .{ 
-        .argv = &pg_argv,
-        .environ_map = &pg_env, 
+    var container_ready_check_argv = [_][]const u8{
+        "zsh", "-c",
+        "while ! pg_isready -h 127.0.0.1 -U postgres -d postgres > /dev/null 2>&1; do sleep 1; done;",
+    };
+    const container_ready_check_result = try std.process.run(allocator, io, .{
+        .argv = &container_ready_check_argv,
     });
     defer {
-        allocator.free(pg_result_2.stdout);
-        allocator.free(pg_result_2.stderr);
+        allocator.free(container_ready_check_result.stdout);
+        allocator.free(container_ready_check_result.stderr);
     }
 
-    if (pg_result_2.term != .exited or pg_result_2.term.exited != 0 or pg_result_2.stderr.len > 0) {
-        std.debug.print("Error: PSQL failed: {s}\n", .{pg_result_2.stderr});
-        return error.PsqlExecutionFailed;
+    if (container_ready_check_result.term != .exited or container_ready_check_result.term.exited != 0 or container_ready_check_result.stderr.len > 0) {
+        std.debug.print("Error: Container ready check failed: {s}\n", .{container_ready_check_result.stderr});
+        return error.ContainerReadyCheck;
+    }
+
+    std.debug.print("check complete", .{});
+
+    {
+        const pg_result = try std.process.run(allocator, io, .{ 
+            .argv = &pg_argv,
+            .environ_map = &pg_env, 
+        });
+        defer {
+            allocator.free(pg_result.stdout);
+            allocator.free(pg_result.stderr);
+        }
+
+        if (pg_result.term != .exited or pg_result.term.exited != 0 or pg_result.stderr.len > 0) {
+            std.debug.print("Error: PSQL failed: {s}\n", .{pg_result.stderr});
+            return error.PsqlExecutionFailed;
+        }
     }
 
     flag.store(true, .seq_cst);
@@ -962,14 +988,28 @@ test "WalStream: regain connection after disconnect" {
 
     mock_is_shutting_down.store(false, .seq_cst);
 
-    const query_thread = try std.Thread.spawn(
+    const stream_thread = try std.Thread.spawn(
         .{}, 
-        runQuery, 
-        .{ allocator, io, db_name, &mock_is_shutting_down }
+        TestWalStream.stream,
+        .{ &stream, &mock_is_shutting_down }
     );
-    defer query_thread.detach();
+    defer {
+        if (!mock_is_shutting_down.load(.seq_cst)) {
+            mock_is_shutting_down.store(true, .seq_cst);
+        }
 
-    try stream.stream(&mock_is_shutting_down);
+        stream.endStreaming() catch |err| {
+            std.log.err("Unable to end stream: {any}", .{err});
+        };
+        stream_thread.detach();
+    }
+
+    try runQuery(allocator, io, db_name, &mock_is_shutting_down);
+
+    while (stream.status != .Idle) {
+        try Io.sleep(io, .{ .nanoseconds = 5 * std.time.ns_per_ms }, .real);
+    }
+
     try stream.endStreaming();
 
     try testing.expectEqual(1, ch_client.written_logs.items.len);

@@ -37,7 +37,7 @@ InvalidMessage,
 
 pub const PgConfig = struct {
     host: []const u8,
-    port: u16 = 5432,
+    port: ?u16,
     wal: []const u8 = "wal_slot",
     write_buffer: ?u16 = null,
     read_buffer: ?u16 = null,

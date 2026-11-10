@@ -39,6 +39,9 @@ pub const Error = struct {
             };
 
             const value = data[pos + 1 .. value_end];
+
+            std.log.debug("marker: {x}, val: {s}", .{ data[pos], value});
+
             switch (data[pos]) {
                 'S' => err.severity = value,
                 'V' => err.severity2 = value,

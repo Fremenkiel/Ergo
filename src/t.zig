@@ -68,7 +68,16 @@ pub const ChClient = struct {
     }
 
     pub fn writeLog(self: *@This(), transactions: []types.Transaction) !void {
+        std.log.debug("writing log, transaction len: {d}", .{transactions.len});
         var copy_slice = try self.allocator.alloc(types.Transaction, transactions.len);
+        for (transactions) |*transaction| {
+            var new_val: []const u8 = "null";
+            if (transaction.rows.items[0].columns.items[0].new_value != null) { new_val = transaction.rows.items[0].columns.items[0].new_value.?; }
+            std.log.debug("row len: {d}, table name: {s}, action: {d}, col len: {d}, first col name: {s}, first col new_value: {s}", .{transaction.rows.items.len, transaction.rows.items[0].table_name, transaction.rows.items[0].action, transaction.rows.items[0].columns.items.len,
+                transaction.rows.items[0].columns.items[0].column_name,
+                new_val
+            });
+        }
         for (transactions, 0..) |*transaction, i| copy_slice[i] = try transaction.copy(self.allocator);
 
         try self.written_logs.appendSlice(self.allocator, copy_slice);

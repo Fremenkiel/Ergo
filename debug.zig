@@ -7,20 +7,9 @@ const debug = std.debug;
 
 const assert = debug.assert;
 
-const pg = @import("pg");
-const types = @import("types");
-const t = @import("src/t.zig");
-
-const ConnectionManager = @import("src/connection_manager.zig").ConnectionManager;
-const PgClient = @import("src/pg_client.zig").PgClient;
-const WalStreamT = @import("src/wal_stream.zig").WalStreamT;
-
-const Conn = pg.conn.Conn;
-const PgConfig = pg.PgConfig;
-
 var mock_is_shutting_down = std.atomic.Value(bool).init(false);
 
-pub fn runQuery(allocator: mem.Allocator, io: Io, env: std.process.Environ, db_name: []const u8, flag: *std.atomic.Value(bool)) !void {
+pub fn runQuery(allocator: mem.Allocator, io: Io, db_name: []const u8, flag: *std.atomic.Value(bool), env: std.process.Environ) !void {
     var pg_env = try std.process.Environ.createMap(env, allocator);
     defer pg_env.deinit();
     try pg_env.put("PGPASSWORD", "12345678");
@@ -34,19 +23,21 @@ pub fn runQuery(allocator: mem.Allocator, io: Io, env: std.process.Environ, db_n
         "-a",
         "-f", "./test_fixtures/simple-query.sql"
     };
-    const pg_result_1 = try std.process.run(allocator, io, .{ 
-        .argv = &pg_argv,
-        .environ_map = &pg_env, 
-    });
-    defer {
-        allocator.free(pg_result_1.stdout);
-        allocator.free(pg_result_1.stderr);
-    }
 
-    if (pg_result_1.term != .exited or pg_result_1.term.exited != 0 or pg_result_1.stderr.len > 0) {
-        std.debug.print("Error: PSQL failed: {s}\n", .{pg_result_1.stderr});
-        flag.store(true, .seq_cst);
-        return error.PsqlExecutionFailed;
+    {
+        const pg_result = try std.process.run(allocator, io, .{ 
+            .argv = &pg_argv,
+            .environ_map = &pg_env, 
+        });
+        defer {
+            allocator.free(pg_result.stdout);
+            allocator.free(pg_result.stderr);
+        }
+
+        if (pg_result.term != .exited or pg_result.term.exited != 0 or pg_result.stderr.len > 0) {
+            std.debug.print("Error: PSQL failed: {s}\n", .{pg_result.stderr});
+            return error.PsqlExecutionFailed;
+        }
     }
 
     var docker_kill_argv = [_][]const u8{
@@ -63,7 +54,6 @@ pub fn runQuery(allocator: mem.Allocator, io: Io, env: std.process.Environ, db_n
 
     if (docker_kill_result.term != .exited or docker_kill_result.term.exited != 0 or docker_kill_result.stderr.len > 0) {
         std.debug.print("Error: Docker failed: {s}\n", .{docker_kill_result.stderr});
-        flag.store(true, .seq_cst);
         return error.DockerKillFailed;
     }
 
@@ -83,23 +73,42 @@ pub fn runQuery(allocator: mem.Allocator, io: Io, env: std.process.Environ, db_n
 
     if (docker_start_result.term != .exited or docker_start_result.term.exited != 0 or docker_start_result.stderr.len > 0) {
         std.debug.print("Error: Docker failed: {s}\n", .{docker_start_result.stderr});
-        flag.store(true, .seq_cst);
         return error.DockerStartFailed;
     }
 
-    const pg_result_2 = try std.process.run(allocator, io, .{ 
-        .argv = &pg_argv,
-        .environ_map = &pg_env, 
+    var container_ready_check_argv = [_][]const u8{
+        "zsh", "-c",
+        "while ! pg_isready -h 127.0.0.1 -U postgres -d postgres > /dev/null 2>&1; do sleep 1; done;",
+    };
+    const container_ready_check_result = try std.process.run(allocator, io, .{
+        .argv = &container_ready_check_argv,
     });
     defer {
-        allocator.free(pg_result_2.stdout);
-        allocator.free(pg_result_2.stderr);
+        allocator.free(container_ready_check_result.stdout);
+        allocator.free(container_ready_check_result.stderr);
     }
 
-    if (pg_result_2.term != .exited or pg_result_2.term.exited != 0 or pg_result_2.stderr.len > 0) {
-        std.debug.print("Error: PSQL failed: {s}\n", .{pg_result_2.stderr});
-        flag.store(true, .seq_cst);
-        return error.PsqlExecutionFailed;
+    if (container_ready_check_result.term != .exited or container_ready_check_result.term.exited != 0 or container_ready_check_result.stderr.len > 0) {
+        std.debug.print("Error: Container ready check failed: {s}\n", .{container_ready_check_result.stderr});
+        return error.ContainerReadyCheck;
+    }
+
+    std.debug.print("check complete", .{});
+
+    {
+        const pg_result = try std.process.run(allocator, io, .{ 
+            .argv = &pg_argv,
+            .environ_map = &pg_env, 
+        });
+        defer {
+            allocator.free(pg_result.stdout);
+            allocator.free(pg_result.stderr);
+        }
+
+        if (pg_result.term != .exited or pg_result.term.exited != 0 or pg_result.stderr.len > 0) {
+            std.debug.print("Error: PSQL failed: {s}\n", .{pg_result.stderr});
+            return error.PsqlExecutionFailed;
+        }
     }
 
     flag.store(true, .seq_cst);
@@ -110,94 +119,5 @@ pub fn main(init: process.Init) !void {
     const io = init.io;
     const env = init.minimal.environ;
 
-    const pg_config: pg.PgConfig = .{
-        .port = 5432,
-        .host = "localhost",
-        .wal = "wal_slot",
-        .username = "db_rw",
-        .password = "12345678",
-        .database = "db",
-        .application_name = "Ergo test",
-        .timeout_ms = 10_000,
-        .startup_parameters = null
-    };
-
-    var pg_client = try PgClient.init(allocator, io, pg_config);
-    defer pg_client.deinit();
-    defer pg_client.cancel();
-
-    var ch_client = t.ChClient.init(allocator);
-    defer ch_client.deinit();
-
-    var connection_manager = ConnectionManager.init(allocator, io, pg_config);
-    const prober_thread = try std.Thread.spawn(
-        .{}, 
-        ConnectionManager.runProber, 
-        .{ &connection_manager }
-    );
-    defer prober_thread.detach();
-
-    const TestWalStream = WalStreamT(t.ChClient, PgClient, ConnectionManager);
-    var stream = TestWalStream.init(
-        allocator,
-        io, 
-        &ch_client,
-        &pg_client, 
-        &connection_manager,
-        null,
-        false,
-    );
-    defer stream.deinit();
-
-    std.log.info("Connection init", .{});
-
-    try stream.startStreaming();
-
-    mock_is_shutting_down.store(false, .seq_cst);
-
-    const query_thread = try std.Thread.spawn(
-        .{}, 
-        runQuery, 
-        .{ allocator, io, env, "db", &mock_is_shutting_down }
-    );
-    defer query_thread.detach();
-
-    try stream.stream(&mock_is_shutting_down);
-    try stream.endStreaming();
-
-    std.log.debug("written_logs len: {d}", .{ch_client.written_logs.items.len});
-    assert(2 == ch_client.written_logs.items.len);
-    assert(1 == ch_client.written_logs.items[0].rows.items.len);
-
-    const id_col = ch_client.written_logs.items[0].rows.items[0].columns.items[0];
-    const address_line_1_col = ch_client.written_logs.items[0].rows.items[0].columns.items[1];
-    const address_line_2_col = ch_client.written_logs.items[0].rows.items[0].columns.items[2];
-    const postal_code_col = ch_client.written_logs.items[0].rows.items[0].columns.items[3];
-    const city_col = ch_client.written_logs.items[0].rows.items[0].columns.items[4];
-    const country_col = ch_client.written_logs.items[0].rows.items[0].columns.items[5];
-
-    assert(mem.eql(u8, "id", id_col.column_name));
-    assert(null == id_col.old_value);
-    std.log.debug("{s}", .{id_col.new_value.?});
-    assert(mem.eql(u8, "1", id_col.new_value.?));
-
-    assert(mem.eql(u8, "address_line_1", address_line_1_col.column_name));
-    assert(null == address_line_1_col.old_value);
-    assert(mem.eql(u8, "1 Apple Park Way", address_line_1_col.new_value.?));
-
-    assert(mem.eql(u8, "address_line_2", address_line_2_col.column_name));
-    assert(null == address_line_2_col.old_value);
-    assert(null == address_line_2_col.new_value);
-
-    assert(mem.eql(u8, "postal_code", postal_code_col.column_name));
-    assert(null == postal_code_col.old_value);
-    assert(mem.eql(u8, "95014", postal_code_col.new_value.?));
-
-    assert(mem.eql(u8, "city", city_col.column_name));
-    assert(null == city_col.old_value);
-    assert(mem.eql(u8, "Cupertino", city_col.new_value.?));
-
-    assert(mem.eql(u8, "country", country_col.column_name));
-    assert(null == country_col.old_value);
-    assert(mem.eql(u8, "US", country_col.new_value.?));
+    try runQuery(allocator, io, "db", &mock_is_shutting_down, env);
 }

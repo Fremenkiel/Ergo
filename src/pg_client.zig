@@ -23,8 +23,8 @@ pub const PgClient = struct {
 
     opts: pg.PgConfig,
 
-    last_lsn: u64,
-    last_timestamp: i64,
+    last_lsn: u64 = 0,
+    last_timestamp: i64 = 0,
 
     server_status: pg.packet.ServerPacket,
 
@@ -40,8 +40,6 @@ pub const PgClient = struct {
             .allocator = allocator,
             .io = io,
             .opts = opts,
-            .last_lsn = 0,
-            .last_timestamp = 0,
             .server_status = .ReadyForQuery,
             .parser = .init(allocator),
             .conn = conn,
@@ -107,9 +105,6 @@ pub const PgClient = struct {
                             const payload = msg.data[25..];
 
                             const parse_response = try self.parser.decode(payload);
-                            
-                            // Proactively acknowledge this processed WAL chunk
-                            try self.conn.sendStandbyStatusUpdate(self.last_lsn, self.last_timestamp);
 
                             if (parse_response) |res| {
                                 if (res.data) |row| {
@@ -136,10 +131,14 @@ pub const PgClient = struct {
                                     if (lsn > self.last_lsn) {
                                         self.last_lsn = lsn;
 
+                                        try self.conn.sendStandbyStatusUpdate(lsn, server_timestamp);
+
                                         return transaction.?;
                                     }
                                 } else {
                                     if (start_lsn > self.last_lsn) {
+                                        try self.conn.sendStandbyStatusUpdate(start_lsn, server_timestamp);
+
                                         self.last_lsn = start_lsn;
                                     }
                                 }
@@ -170,6 +169,7 @@ pub const PgClient = struct {
                 },
                 'E' => {
                     const pg_err = pg.Error.init(msg.data);
+                    std.log.debug("{s}", .{ pg_err.code});
                     const err_msg = try std.fmt.allocPrint(self.allocator, "Error from server! Code: {s}, Message: {s}\n", .{pg_err.code, pg_err.message});
                     try std.Io.File.stderr().writeStreamingAll(self.io, err_msg);
                     return PgClientError.PostgresReplicationError;
@@ -235,3 +235,7 @@ pub const PgClient = struct {
         self.conn = try connect(self.allocator, self.io, self.opts);
     }
 };
+
+test "PgClient: ensure read acknowledge" {
+    // TODO: make this
+}

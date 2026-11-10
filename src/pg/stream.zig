@@ -1,17 +1,19 @@
-const std = @import("std");
 const builtin = @import("builtin");
+const std = @import("std");
+const assert = std.debug.assert;
+
 const openssl = @import("openssl");
+const phantom = @import("phantom");
+const Phantom = phantom.Phantom;
 
 const posix = std.posix;
-const testing = std.testing;
 const Io = std.Io;
 const mem = std.mem;
 
-const conn = @import("conn.zig");
-
-const Conn = conn.Conn;
+const Conn = @import("conn.zig").Conn;
 const PgConfig = @import("root.zig").PgConfig;
 const Reader = @import("reader.zig").Reader;
+const StartupMessage = @import("protocol.zig").StartupMessage;
 
 const printSSLError = @import("ssl.zig").printSSLError;
 
@@ -67,7 +69,7 @@ pub const Stream = struct {
                 var owned = false;
                 const h = opts.hostz orelse blk: {
                     owned = true;
-                    break :blk try allocator.dupeZ(u8, opts.host);
+                    break :blk try allocator.dupeSentinel(u8, opts.host, 0);
                 };
 
                 defer if (owned) {
@@ -263,7 +265,7 @@ fn isHostName(host: []const u8) bool {
     return std.mem.findNone(u8, host, "0123456789.") != null;
 }
 
-pub fn attemptConnection(io: Io, host: []const u8, port: u16) !Io.net.Stream {
+pub fn attemptConnection(io: Io, host: []const u8, port: ?u16) !Io.net.Stream {
     const is_unix = host.len > 0 and host[0] == '/';
 
     if (is_unix) {
@@ -273,8 +275,68 @@ pub fn attemptConnection(io: Io, host: []const u8, port: u16) !Io.net.Stream {
         const addr: Io.net.UnixAddress = try .init(host);
         return addr.connect(io);
     }
+    assert(port != null);
+
     const hostname: Io.net.HostName = try .init(host);
-    return hostname.connect(io, port, .{ .mode = .stream });
+    return hostname.connect(io, port.?, .{ .mode = .stream });
+}
+
+const testing = std.testing;
+
+test "stream: connect to localhost" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    const opts: PgConfig = .{
+        .port = 5432,
+        .host = "localhost",
+        .database = "db",
+        .application_name = "Ergo test",
+        .startup_parameters = null 
+    };
+
+    var stream = try Stream.init(allocator, io, opts, null);
+    defer stream.deinit(allocator);
+
+    var buf: [4096]u8 = undefined;
+
+    try StartupMessage.write(allocator, &stream, opts);
+
+    _ = try stream.read(&buf);
+
+    try testing.expectEqual('R', buf[0]);
+}
+
+test "stream: connect to socket" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    var database = try phantom.Phantom.init(allocator, io, "./test/template.db", "/tmp");
+    defer database.deinit();
+
+    try database.spawn();
+
+    const host = database.socket_path;
+    std.log.err("{s}", .{ host });
+
+    const opts: PgConfig = .{
+        .host = host,
+        .port = 5432,
+        .database = "public",
+        .application_name = "Ergo test",
+        .startup_parameters = null 
+    };
+
+    var stream = try Stream.init(allocator, io, opts, null);
+    defer stream.deinit(allocator);
+
+    var buf: [4096]u8 = undefined;
+
+    try StartupMessage.write(allocator, &stream, opts);
+
+    _ = try stream.read(&buf);
+
+    try testing.expectEqual('R', buf[0]);
 }
 
 test "cancel stream while read" {
@@ -288,7 +350,7 @@ test "cancel stream while read" {
         .application_name = "Ergo test",
         .startup_parameters = null 
     }, null);
-    defer allocator.free(stream.buffer);
+    defer stream.deinit(allocator);
 
     const pipes = try Io.Threaded.pipe2(.{ .CLOEXEC = true });
     defer {

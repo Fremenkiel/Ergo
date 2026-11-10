@@ -32,9 +32,9 @@
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
     .dependencies = .{
-        .metrics = .{
-            .url = "git+https://github.com/karlseguin/metrics.zig#6de29b83a750a06c438d268543e0e3c3c1b309da",
-            .hash = "metrics-0.0.0-W7G4eIegAQD4XxA9Co7Atbw59u_2zvxYf406AZuoAHPM",
+        .zpg_phantom = .{
+            .url = "https://github.com/Fremenkiel/zpg-phantom/archive/refs/tags/v0.1.0.tar.gz",
+            .hash = "zpg_phantom-0.0.0-DtLgaQp2AADap_O8dS_h4J8uxK44EVstXxWG4ay3dOIp",
         },
     },
     // Specifies the set of files and directories that are included in this package.

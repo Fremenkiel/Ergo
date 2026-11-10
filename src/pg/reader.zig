@@ -646,7 +646,8 @@ test "Reader: start/endFlow large overread" {
     try s.writeAll(&[_]u8{ 3, 0, 0, 0, 9, 1, 2, 3, 4, 5 });
 
     // 4rd message is huge
-    try s.writeAll(&[_]u8{ 4, 0, 0, 19, 140 } ++ "z" ** 5000);
+    const bytes = [_]u8{ 4, 0, 0, 19, 140 } ++ @as([5000]u8, @splat('z'));
+    try s.writeAll(&bytes);
 
     // 5th message is overread and does not fit into static
     try s.writeAll(&[_]u8{ 5, 0, 0, 0, 11, 255, 250, 245, 240, 235, 230, 225 });
@@ -665,7 +666,7 @@ test "Reader: start/endFlow large overread" {
     try testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4, 5 }, msg3.data);
 
     const msg4 = try reader.next();
-    try testing.expectEqualSlices(u8, "z" ** 5000, msg4.data);
+    try testing.expectEqualSlices(u8, &bytes, msg4.data);
     reader.endFlow() catch unreachable;
 
     const msg5 = try reader.next();
