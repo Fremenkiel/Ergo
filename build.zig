@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const Translator = @import("translate_c").Translator;
+
 pub fn build(b: *std.Build) void {
     const test_filter = b.option([]const u8, "test_filter", "Test filter");
     const openssl_lib_name = b.option([]const u8, "openssl_lib_name", "Open SSL lib name | ssl");
@@ -10,6 +12,19 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{
         .preferred_optimize_mode = .ReleaseSafe
     });
+
+    const translate_c = b.dependency("translate_c", .{});
+
+    const liblz4 = buildLibLz4(b, target, optimize);
+
+    const trans_liblz4: Translator = .init(translate_c, .{
+        .c_source_file = b.addWriteFiles().add("c.h",
+            \\#include <lz4/lz4.h>
+        ),
+        .target = target,
+        .optimize = optimize,
+    });
+    trans_liblz4.linkLibrary(liblz4);
 
     // remove this
     const types_module = b.createModule(.{
@@ -30,13 +45,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "types", .module = types_module },
+            .{ .name = "lz4", .module = trans_liblz4.mod },
         },
     });
-    ch_module.addCSourceFile(.{
-        .file = b.path("deps/lz4/lib/lz4.c"),
-        .flags = &[_][]const u8{"-std=c99"},
-    });
-    ch_module.addIncludePath(b.path("deps/lz4/lib"));
 
     // Pg Module
     const openssl_module = blk: {
@@ -51,7 +62,8 @@ pub fn build(b: *std.Build) void {
 
     const pg_module = b.addModule("pg", .{
         .target = target,
-        .optimize = optimize,
+        .optimize = .debug,
+        .strip = false,
         .root_source_file = b.path("src/pg/root.zig"),
         .imports = &.{
             .{ .name = "openssl", .module = openssl_module },
@@ -100,6 +112,7 @@ pub fn build(b: *std.Build) void {
     // CH test
     const ch_tests = b.addTest(.{
         .root_module = ch_module,
+        .filters = if (test_filter) |filter| &.{filter} else &.{}
     });
     const run_ch_tests = b.addRunArtifact(ch_tests);
 
@@ -109,6 +122,7 @@ pub fn build(b: *std.Build) void {
     // PG test
     const pg_tests = b.addTest(.{
         .root_module = pg_module,
+        .filters = if (test_filter) |filter| &.{filter} else &.{}
     });
     const run_pg_tests = b.addRunArtifact(pg_tests);
 
@@ -141,9 +155,10 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    debug_exe.root_module.addImport("pg", pg_module);
-    debug_exe.root_module.addImport("ch", ch_module);
-    debug_exe.root_module.addImport("types", types_module);
+    // debug_exe.root_module.addImport("pg", pg_module);
+    // debug_exe.root_module.addImport("ch", ch_module);
+    debug_exe.root_module.addImport("phantom", phantom.module("phantom"));
+    // debug_exe.root_module.addImport("types", types_module);
 
     b.installArtifact(debug_exe);
 
@@ -172,4 +187,27 @@ pub fn build(b: *std.Build) void {
 
     const wal_logger_step = b.step("wal-logger", "Run the WAL logger utility");
     wal_logger_step.dependOn(&run_wal_logger.step);
+}
+
+fn buildLibLz4(
+b: *std.Build,
+target: std.Build.ResolvedTarget,
+optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Compile {
+    const mod = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    mod.addCSourceFiles(.{
+        .root = b.path("deps/lz4/lib"),
+        .files = &.{ "lz4.c" },
+        .flags = &[_][]const u8{"-std=c99"},
+    });
+    const lib = b.addLibrary(.{
+        .name = "lz4",
+        .root_module = mod,
+    });
+    lib.installHeader(b.path("deps/lz4/lib/lz4.h"), "lz4/lz4.h");
+    return lib;
 }

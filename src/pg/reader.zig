@@ -646,8 +646,8 @@ test "Reader: start/endFlow large overread" {
     try s.writeAll(&[_]u8{ 3, 0, 0, 0, 9, 1, 2, 3, 4, 5 });
 
     // 4rd message is huge
-    const bytes = [_]u8{ 4, 0, 0, 19, 140 } ++ @as([5000]u8, @splat('z'));
-    try s.writeAll(&bytes);
+    const bytes = @as([5000]u8, @splat('z'));
+    try s.writeAll([_]u8{ 4, 0, 0, 19, 140 } ++ &bytes);
 
     // 5th message is overread and does not fit into static
     try s.writeAll(&[_]u8{ 5, 0, 0, 0, 11, 255, 250, 245, 240, 235, 230, 225 });

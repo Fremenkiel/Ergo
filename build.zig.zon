@@ -36,6 +36,10 @@
             .url = "https://github.com/Fremenkiel/zpg-phantom/archive/refs/tags/v0.1.0.tar.gz",
             .hash = "zpg_phantom-0.0.0-DtLgaQp2AADap_O8dS_h4J8uxK44EVstXxWG4ay3dOIp",
         },
+        .translate_c = .{
+            .url = "https://codeberg.org/ziglang/translate-c/archive/2.0.2.tar.gz",
+            .hash = "translate_c-2.0.2-Q_BUWvBNBwBgPKQJPblip6M7AHNK_IPNPmyv4rSIQMQc",
+        },
     },
     // Specifies the set of files and directories that are included in this package.
     // Only files and directories listed here are included in the `hash` that
