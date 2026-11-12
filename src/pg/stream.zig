@@ -1,21 +1,24 @@
 const builtin = @import("builtin");
+
 const std = @import("std");
-const assert = std.debug.assert;
-
-const openssl = @import("openssl");
-const phantom = @import("phantom");
-const Phantom = phantom.Phantom;
-
 const posix = std.posix;
 const Io = std.Io;
 const mem = std.mem;
+const assert = std.debug.assert;
+
+const phantom = @import("phantom");
+const Phantom = phantom.Phantom;
+
+const ssl = @import("ssl");
+const SSL = ssl.SSL;
+const SSL_CTX = ssl.SSL_CTX;
+
 
 const Conn = @import("conn.zig").Conn;
 const PgConfig = @import("root.zig").PgConfig;
 const Reader = @import("reader.zig").Reader;
 const StartupMessage = @import("protocol.zig").StartupMessage;
 
-const printSSLError = @import("ssl.zig").printSSLError;
 
 pub const Stream = struct {
     io: Io,
@@ -24,10 +27,9 @@ pub const Stream = struct {
     buffer: []u8,
     writer: *Io.Writer,
 
-    valid: bool,
-    ssl: ?*openssl.SSL,
+    ssl: ?*SSL,
 
-    pub fn init(allocator: mem.Allocator, io: Io, opts: PgConfig, ctx_: ?*openssl.SSL_CTX) !Stream {
+    pub fn init(allocator: mem.Allocator, io: Io, opts: PgConfig) !Stream {
         const io_stream = try attemptConnection(io, opts.host, opts.port);
         errdefer io_stream.close(io);
 
@@ -43,14 +45,13 @@ pub const Stream = struct {
 
         var stream: Stream = .{
             .ssl = null,
-            .valid = true,
             .stream = io_stream,
             .buffer = buffer,
             .writer = w,
             .io = io,
         };
 
-        if (ctx_) |ctx| {
+        if (opts.tls != .off)  {
             // PostgreSQL TLS starts off as a plain connection which we upgrade
             try stream.writeStream(&.{ 0, 0, 0, 8, 4, 210, 22, 47 });
             var buf = [1]u8{0};
@@ -59,61 +60,15 @@ pub const Stream = struct {
                 return error.SSLNotSupportedByServer;
             }
 
-            stream.ssl = openssl.SSL_new(ctx) orelse return error.SSLNewFailed;
-            errdefer openssl.SSL_free(stream.ssl);
-
-            if (isHostName(opts.host)) {
-                // don't send this for an ip address
-                var owned = false;
-                const h = opts.hostz orelse blk: {
-                    owned = true;
-                    break :blk try allocator.dupeSentinel(u8, opts.host, 0);
-                };
-
-                defer if (owned) {
-                    allocator.free(h);
-                };
-
-                if (openssl.SSL_set_tlsext_host_name(stream.ssl, h.ptr) != 1) {
-                    return error.SSLHostNameFailed;
-                }
-            }
-            switch (opts.tls) {
-                .verify_full => openssl.SSL_set_verify(stream.ssl, openssl.SSL_VERIFY_PEER, null),
-                else => {},
-            }
-
-            if (openssl.SSL_set_fd(stream.ssl, io_stream.socket.handle) != 1) {
-                return error.SSLSetFdFailed;
-            }
-
-            {
-                const ret = openssl.SSL_connect(stream.ssl);
-                if (ret != 1) {
-                    const verification_code = openssl.SSL_get_verify_result(stream.ssl);
-                    printSSLError();
-                    if (verification_code != openssl.X509_V_OK) {
-                        if (!builtin.is_test) {
-                            std.log.err("ssl verification error: {s}\n", .{openssl.X509_verify_cert_error_string(verification_code)});
-                        }
-                        return error.SSLCertificationVerificationError;
-                    }
-                    return error.SSLConnectFailed;
-                }
-            }
+            var ssl_context = try SSL.init(allocator, opts.host, opts.tls, io_stream.socket.handle);
+            stream.ssl = &ssl_context;
         }
 
         return stream;
     }
 
     pub fn deinit(self: *@This(), allocator: mem.Allocator) void {
-        if (self.ssl) |ssl| {
-            if (self.valid) {
-                _ = openssl.SSL_shutdown(ssl);
-                self.valid = false;
-            }
-            openssl.SSL_free(ssl);
-        }
+        if (self.ssl) |s| s.deinit();
         self.stream.close(self.io);
         allocator.free(self.buffer);
     }
@@ -135,13 +90,8 @@ pub const Stream = struct {
     }
 
     pub fn writeAll(self: *@This(), data: []const u8) !void {
-        if (self.ssl) |ssl| {
-            const result = openssl.SSL_write(ssl, data.ptr, @intCast(data.len));
-            if (result <= 0) {
-                self.valid = false;
-                return error.SSLWriteFailed;
-            }
-            return;
+        if (self.ssl) |s| {
+            return s.write(data);
         }
         return self.writeStream(data);
     }
@@ -157,14 +107,8 @@ pub const Stream = struct {
     }
 
     pub fn read(self: *Stream, buf: []u8) !usize {
-        if (self.ssl) |ssl| {
-            var read_len: usize = undefined;
-            const result = openssl.SSL_read_ex(ssl, buf.ptr, @intCast(buf.len), &read_len);
-            if (result <= 0) {
-                self.valid = false;
-                return error.SSLReadFailed;
-            }
-            return read_len;
+        if (self.ssl) |s| {
+            return s.read(buf);
         }
 
         return self.readStream(buf);
@@ -255,13 +199,6 @@ pub fn sendTerminate(stream: *Stream, io: Io) void {
     stream.writeAll(&.{ 'X', 0, 0, 0, 4 }) catch {};
 }
 
-fn isHostName(host: []const u8) bool {
-    if (std.mem.findScalar(u8, host, ':') != null) {
-        // IPv6
-        return false;
-    }
-    return std.mem.findNone(u8, host, "0123456789.") != null;
-}
 
 pub fn attemptConnection(io: Io, host: []const u8, port: ?u16) !Io.net.Stream {
     if (isUnix(host)) {
@@ -300,7 +237,7 @@ test "stream: connect to localhost" {
         .startup_parameters = null 
     };
 
-    var stream = try Stream.init(allocator, io, opts, null);
+    var stream = try Stream.init(allocator, io, opts);
     defer stream.deinit(allocator);
 
     var buf: [4096]u8 = undefined;
@@ -317,40 +254,33 @@ test "stream: connect to socket" {
     const io = testing.io;
 
     var database = try phantom.Phantom.init(allocator, io, "./test/template.db", "/tmp/ergo");
-    // errdefer database.deinit();
-    // defer database.deinit();
+    defer database.deinit();
 
     try database.spawn();
 
-    const host = database.socket_path;
-
-    const socket = try allocator.print("{s}/.s.PGSQL.5432", .{ host });
+    const socket = try allocator.print("{s}/.s.PGSQL.5432", .{ database.socket_path });
     defer allocator.free(socket);
 
     std.log.debug("{s}", .{ socket });
 
-    const addr: Io.net.UnixAddress = try .init(socket);
-    _ = try addr.connect(io);
+    const opts: PgConfig = .{
+        .host = socket,
+        .port = null,
+        .database = "db",
+        .application_name = "Ergo test",
+        .startup_parameters = null 
+    };
 
+    var stream = try Stream.init(allocator, io, opts);
+    defer stream.deinit(allocator);
 
-    // const opts: PgConfig = .{
-    //     .host = socket,
-    //     .port = null,
-    //     .database = "public",
-    //     .application_name = "Ergo test",
-    //     .startup_parameters = null 
-    // };
+    var buf: [4096]u8 = undefined;
 
-    // var stream = try Stream.init(allocator, io, opts, null);
-    // defer stream.deinit(allocator);
-    //
-    // var buf: [4096]u8 = undefined;
-    //
-    // try StartupMessage.write(allocator, &stream, opts);
-    //
-    // _ = try stream.read(&buf);
-    //
-    // try testing.expectEqual('R', buf[0]);
+    try StartupMessage.write(allocator, &stream, opts);
+
+    _ = try stream.read(&buf);
+
+    try testing.expectEqual('R', buf[0]);
 }
 
 test "cancel stream while read" {
@@ -363,7 +293,7 @@ test "cancel stream while read" {
         .database = "db",
         .application_name = "Ergo test",
         .startup_parameters = null 
-    }, null);
+    });
     defer allocator.free(stream.buffer);
 
     const pipes = try Io.Threaded.pipe2(.{ .CLOEXEC = true });

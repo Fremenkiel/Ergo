@@ -1,12 +1,16 @@
 const std = @import("std");
+const Build = std.Build;
+
+const assert = std.debug.assert;
 
 const Translator = @import("translate_c").Translator;
 
 pub fn build(b: *std.Build) void {
     const test_filter = b.option([]const u8, "test_filter", "Test filter");
+
     const openssl_lib_name = b.option([]const u8, "openssl_lib_name", "Open SSL lib name | ssl");
-    const openssl_lib_path = b.option(std.Build.LazyPath, "openssl_lib_path", "OpenSSL lib path | /opt/homebrew/opt/openssl@3/lib");
-    const openssl_include_path = b.option(std.Build.LazyPath, "openssl_include_path", "OpenSSL include path | /opt/homebrew/opt/openssl@3/include");
+    const openssl_lib_path = b.option(Build.LazyPath, "openssl_lib_path", "OpenSSL lib path | /opt/homebrew/opt/openssl@3/lib");
+    const openssl_include_path = b.option(Build.LazyPath, "openssl_include_path", "OpenSSL include path | /opt/homebrew/opt/openssl@3/include");
 
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{
@@ -15,16 +19,46 @@ pub fn build(b: *std.Build) void {
 
     const translate_c = b.dependency("translate_c", .{});
 
+    // lz4
     const liblz4 = buildLibLz4(b, target, optimize);
-
     const trans_liblz4: Translator = .init(translate_c, .{
-        .c_source_file = b.addWriteFiles().add("c.h",
-            \\#include <lz4/lz4.h>
-        ),
+        .c_source_file = b.path("deps/lz4/lib/lz4.h"),
         .target = target,
         .optimize = optimize,
     });
     trans_liblz4.linkLibrary(liblz4);
+
+    // openssl
+    const trans_libopenssl: Translator = .init(translate_c, .{
+        .c_source_file = b.addWriteFiles().add("c.h", 
+            \\ #include <openssl/ssl.h>
+            \\ #include <openssl/err.h>
+        ),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    if (openssl_include_path) |path| {
+        trans_libopenssl.addIncludePath(path);
+    }
+
+    if (openssl_lib_path) |path| {
+        trans_libopenssl.mod.addLibraryPath(path);
+    }
+
+    trans_libopenssl.mod.link_libc = true;
+    trans_libopenssl.mod.linkSystemLibrary(openssl_lib_name orelse "ssl", .{});
+    trans_libopenssl.mod.linkSystemLibrary("crypto", .{});
+
+    // ssl
+    const ssl_module = b.createModule(.{
+        .root_source_file = b.path("src/ssl/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "openssl", .module = trans_libopenssl.mod },
+        },
+    });
 
     // remove this
     const types_module = b.createModule(.{
@@ -50,33 +84,18 @@ pub fn build(b: *std.Build) void {
     });
 
     // Pg Module
-    const openssl_module = blk: {
-        const t = b.addTranslateC(.{
-            .root_source_file = b.path("src/pg/openssl.h"),
-            .target = target,
-            .optimize = optimize,
-        });
-        if (openssl_include_path) |p| t.addIncludePath(p);
-        break :blk t.createModule();
-    };
-
     const pg_module = b.addModule("pg", .{
         .target = target,
-        .optimize = .debug,
-        .strip = false,
         .root_source_file = b.path("src/pg/root.zig"),
         .imports = &.{
-            .{ .name = "openssl", .module = openssl_module },
+            .{ .name = "ssl", .module = ssl_module },
             .{ .name = "types", .module = types_module },
             .{ .name = "phantom", .module = phantom.module("phantom") },
         },
     });
 
-    if (openssl_lib_path) |p| pg_module.addLibraryPath(p);
-    pg_module.linkSystemLibrary("crypto", .{});
-    pg_module.linkSystemLibrary(openssl_lib_name orelse "ssl", .{});
-    pg_module.link_libc = true;
 
+    // WTF is this?
     var column_names = false;
     const column_names_opt = b.option(bool, "column_names", "");
 
@@ -155,7 +174,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    // debug_exe.root_module.addImport("pg", pg_module);
+    debug_exe.root_module.addImport("ssl", ssl_module);
+    debug_exe.root_module.addImport("pg", pg_module);
     // debug_exe.root_module.addImport("ch", ch_module);
     debug_exe.root_module.addImport("phantom", phantom.module("phantom"));
     // debug_exe.root_module.addImport("types", types_module);
@@ -199,15 +219,19 @@ optimize: std.builtin.OptimizeMode,
         .optimize = optimize,
         .link_libc = true,
     });
+
     mod.addCSourceFiles(.{
         .root = b.path("deps/lz4/lib"),
         .files = &.{ "lz4.c" },
         .flags = &[_][]const u8{"-std=c99"},
     });
+
     const lib = b.addLibrary(.{
         .name = "lz4",
         .root_module = mod,
     });
+
     lib.installHeader(b.path("deps/lz4/lib/lz4.h"), "lz4/lz4.h");
+
     return lib;
 }

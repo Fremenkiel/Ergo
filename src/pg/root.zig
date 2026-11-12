@@ -1,6 +1,7 @@
 const std = @import("std");
-
 const testing = std.testing;
+
+const ssl = @import("ssl");
 
 pub const conn = @import("conn.zig");
 pub const packet = @import("packet.zig");
@@ -59,11 +60,7 @@ pub const PgConfig = struct {
     application_name: []const u8,
     startup_parameters: ?std.hash_map.StringHashMap([]const u8),
 
-    pub const TLS = union(enum) {
-        off: void,
-        require: void,
-        verify_full: ?[]const u8,
-    };
+    pub const TLS = ssl.TLS;
 };
 
 test "tests:beforeAll" {

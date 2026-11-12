@@ -6,10 +6,8 @@ const mem = std.mem;
 const Io = std.Io;
 const testing = std.testing;
 
-const openssl = @import("openssl");
 const protocol = @import("protocol.zig");
 const root = @import("root.zig");
-const ssl = @import("ssl.zig");
 const types = @import("types.zig");
 
 const Auth = @import("auth.zig").Auth;
@@ -36,10 +34,6 @@ pub const State = enum {
 };
 
 pub const Conn = struct {
-    // If we own the ssl context (which only happens if the connection is
-    // created directly and NOT through a pool), then we have to free it
-    ssl_ctx: ?*openssl.SSL_CTX,
-
     // If we get a postgreSQL error, this will be set.
     err: ?Error,
 
@@ -73,16 +67,7 @@ pub const Conn = struct {
     };
 
     pub fn init(io: Io, allocator: mem.Allocator, opts: PgConfig) !@This() {
-        var ssl_ctx: ?*openssl.SSL_CTX = null;
-        switch (opts.tls) {
-            .off => {},
-            else => |tls_config| {
-                ssl_ctx = try ssl.initializeSSLContext(tls_config);
-            },
-        }
-        errdefer ssl.freeSSLContext(ssl_ctx);
-
-        var stream = try Stream.init(allocator, io, opts, ssl_ctx);
+        var stream = try Stream.init(allocator, io, opts);
         errdefer stream.deinit(allocator);
 
         const reader = try Reader.init(allocator, opts.read_buffer orelse 4096, stream);
@@ -90,7 +75,6 @@ pub const Conn = struct {
 
         return .{
             .err = null,
-            .ssl_ctx = ssl_ctx,
             .reader = reader,
             .stream = stream,
             .err_data = null,
@@ -112,7 +96,6 @@ pub const Conn = struct {
         self.reader.deinit();
 
         sendTerminate(&self.stream, self.io);
-        ssl.freeSSLContext(self.ssl_ctx);
         self.stream.deinit(self.allocator);
     }
 

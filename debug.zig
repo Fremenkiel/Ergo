@@ -7,8 +7,13 @@ const debug = std.debug;
 
 const assert = debug.assert;
 
+const ssl = @import("ssl");
+
 const phantom = @import("phantom");
 const Phantom = phantom.Phantom;
+const Pg = @import("pg");
+const Stream = Pg.stream.Stream;
+const StartupMessage = Pg.protocol.StartupMessage;
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
@@ -24,12 +29,22 @@ pub fn main(init: std.process.Init) !void {
 
     std.log.debug("{s}", .{ socket });
 
-    const addr: Io.net.UnixAddress = try .init(socket);
-    const stream = addr.connect(io) catch |err| {
-        std.debug.print("connect failed: {s}\n", .{@errorName(err)});
-        return err;
+    const opts: Pg.PgConfig = .{
+        .host = socket,
+        .port = null,
+        .database = "db",
+        .application_name = "Ergo test",
+        .startup_parameters = null 
     };
-    defer stream.close(io);
 
-    std.debug.print("connected successfully\n", .{});
+    var stream = try Stream.init(allocator, io, opts);
+    defer stream.deinit(allocator);
+
+    var buf: [4096]u8 = undefined;
+
+    try StartupMessage.write(allocator, &stream, opts);
+
+    _ = try stream.read(&buf);
+
+    assert('R' == buf[0]);
 }

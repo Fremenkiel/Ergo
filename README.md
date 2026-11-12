@@ -59,3 +59,10 @@ https://www.postgresql.org/docs/current/protocol-logicalrep-message-formats.html
 
 # TODO
 descrie the ergo-pgoutput extension and the install process
+
+# Init db
+Defaults: port 5432, data directory ~/.local/share/ergo/postgres18. Override with:
+
+```bash
+PGPORT=5433 ./tools/init-local-postgres.sh /path/to/data
+```
