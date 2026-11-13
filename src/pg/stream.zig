@@ -253,15 +253,17 @@ test "stream: connect to socket" {
     const allocator = testing.allocator;
     const io = testing.io;
 
-    var database = try phantom.Phantom.init(allocator, io, "./test/template.db", "/tmp/ergo");
+    var database = try phantom.Phantom.init(allocator, io, "./test/template.db", "/tmp/ergo", .{
+        .log_level = .{
+            .fatal = .warn,
+        },
+    });
     defer database.deinit();
 
     try database.spawn();
 
     const socket = try allocator.print("{s}/.s.PGSQL.5432", .{ database.socket_path });
     defer allocator.free(socket);
-
-    std.log.debug("{s}", .{ socket });
 
     const opts: PgConfig = .{
         .host = socket,

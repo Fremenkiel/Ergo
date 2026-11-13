@@ -19,7 +19,7 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const io = init.io;
 
-    var database = try phantom.Phantom.init(allocator, io, "./test/template.db", "/tmp/ergo");
+    var database = try phantom.Phantom.init(allocator, io, "./test/template.db", "/tmp/ergo", .{});
     defer database.deinit();
 
     try database.spawn();

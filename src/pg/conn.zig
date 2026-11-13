@@ -6,6 +6,8 @@ const mem = std.mem;
 const Io = std.Io;
 const testing = std.testing;
 
+const phantom = @import("phantom");
+
 const protocol = @import("protocol.zig");
 const root = @import("root.zig");
 const types = @import("types.zig");
@@ -66,6 +68,8 @@ pub const Conn = struct {
         cache_name: ?[]const u8 = null,
     };
 
+    // todo: redo this (Kevin)
+    // I don't like the config
     pub fn init(io: Io, allocator: mem.Allocator, opts: PgConfig) !@This() {
         var stream = try Stream.init(allocator, io, opts);
         errdefer stream.deinit(allocator);
@@ -222,12 +226,27 @@ pub const Conn = struct {
 
 const t = @import("t.zig");
 test "Conn: auth trust (no pass)" {
+    testing.log_level = .err;
+    defer testing.log_level = .warn;
+
     const allocator = testing.allocator;
     const io = testing.io;
 
+    var database = try phantom.Phantom.init(allocator, io, "./test/template.db", "/tmp/ergo", .{
+        .log_level = .{
+            .fatal = .warn
+        },
+    });
+    defer database.deinit();
+
+    try database.spawn();
+
+    const socket = try allocator.print("{s}/.s.PGSQL.5432", .{ database.socket_path });
+    defer allocator.free(socket);
+
     const opts: PgConfig = .{
-        .host = "localhost",
-        .port = 5432,
+        .host = socket,
+        .port = null,
         .database = "db",
         .username = "db_np",
         .application_name = "Ergo test",
@@ -240,12 +259,27 @@ test "Conn: auth trust (no pass)" {
 }
 
 test "Conn: auth unknown user" {
+    testing.log_level = .err;
+    defer testing.log_level = .warn;
+
     const allocator = testing.allocator;
     const io = testing.io;
 
+    var database = try phantom.Phantom.init(allocator, io, "./test/template.db", "/tmp/ergo", .{
+        .log_level = .{
+            .fatal = .warn
+        },
+    });
+    defer database.deinit();
+
+    try database.spawn();
+
+    const socket = try allocator.print("{s}/.s.PGSQL.5432", .{ database.socket_path });
+    defer allocator.free(socket);
+
     const opts: PgConfig = .{
-        .host = "localhost",
-        .port = 5432,
+        .host = socket,
+        .port = null,
         .database = "db",
         .username = "does_not_exist",
         .application_name = "Ergo test",
@@ -254,18 +288,34 @@ test "Conn: auth unknown user" {
 
     var conn = try Conn.init(io, allocator, opts);
     defer conn.deinit();
+
     try testing.expectError(error.PG, conn.auth());
     try testing.expectEqual(true, std.mem.find(u8, conn.err.?.message, "user \"does_not_exist\"") != null);
 }
 
 test "Conn: auth cleartext password" {
+    testing.log_level = .err;
+    defer testing.log_level = .warn;
+
     const allocator = testing.allocator;
     const io = testing.io;
 
+    var database = try phantom.Phantom.init(allocator, io, "./test/template.db", "/tmp/ergo", .{
+        .log_level = .{
+            .fatal = .warn
+        },
+    });
+    defer database.deinit();
+
+    try database.spawn();
+
+    const socket = try allocator.print("{s}/.s.PGSQL.5432", .{ database.socket_path });
+    defer allocator.free(socket);
+
     {
         const opts: PgConfig = .{
-            .host = "localhost",
-            .port = 5432,
+            .host = socket,
+            .port = null,
             .database = "db",
             .username = "db_ro",
             .application_name = "Ergo test",
@@ -280,8 +330,8 @@ test "Conn: auth cleartext password" {
 
     {
         const opts: PgConfig = .{
-            .host = "localhost",
-            .port = 5432,
+            .host = socket,
+            .port = null,
             .database = "db",
             .username = "db_ro",
             .password = "wrong",
@@ -297,8 +347,8 @@ test "Conn: auth cleartext password" {
 
     {
         const opts: PgConfig = .{
-            .host = "localhost",
-            .port = 5432,
+            .host = socket,
+            .port = null,
             .database = "db",
             .username = "db_ro",
             .password = "12345678",
@@ -313,13 +363,28 @@ test "Conn: auth cleartext password" {
 }
 
 test "Conn: auth scram-sha-256 password" {
+    testing.log_level = .err;
+    defer testing.log_level = .warn;
+
     const allocator = testing.allocator;
     const io = testing.io;
 
+    var database = try phantom.Phantom.init(allocator, io, "./test/template.db", "/tmp/ergo", .{
+        .log_level = .{
+            .fatal = .warn
+        },
+    });
+    defer database.deinit();
+
+    try database.spawn();
+
+    const socket = try allocator.print("{s}/.s.PGSQL.5432", .{ database.socket_path });
+    defer allocator.free(socket);
+
     {
         const opts: PgConfig = .{
-            .host = "localhost",
-            .port = 5432,
+            .host = socket,
+            .port = null,
             .database = "db",
             .username = "db_ro_scram_sha256",
             .application_name = "Ergo test",
@@ -334,8 +399,8 @@ test "Conn: auth scram-sha-256 password" {
 
     {
         const opts: PgConfig = .{
-            .host = "localhost",
-            .port = 5432,
+            .host = socket,
+            .port = null,
             .database = "db",
             .username = "db_ro_scram_sha256",
             .password = "wrong",
@@ -351,8 +416,8 @@ test "Conn: auth scram-sha-256 password" {
 
     {
         const opts: PgConfig = .{
-            .host = "localhost",
-            .port = 5432,
+            .host = socket,
+            .port = null,
             .database = "db",
             .username = "db_ro_scram_sha256",
             .password = "12345678",

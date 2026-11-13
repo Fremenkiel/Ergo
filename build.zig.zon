@@ -33,8 +33,8 @@
     // internet connectivity.
     .dependencies = .{
         .zpg_phantom = .{
-            .url = "https://github.com/Fremenkiel/zpg-phantom/archive/refs/tags/v0.1.0.tar.gz",
-            .hash = "zpg_phantom-0.0.0-DtLgaQp2AADap_O8dS_h4J8uxK44EVstXxWG4ay3dOIp",
+            .url = "https://github.com/Fremenkiel/zpg-phantom/archive/refs/tags/v0.1.2.tar.gz",
+            .hash = "zpg_phantom-0.0.0-DtLgaXiVAAC64TspQaV71RG8GwtkrTQbssEUOSAsFhty",
         },
         .translate_c = .{
             .url = "https://codeberg.org/ziglang/translate-c/archive/2.0.2.tar.gz",
