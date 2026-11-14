@@ -19,7 +19,11 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const io = init.io;
 
-    var database = try phantom.Phantom.init(allocator, io, "./test/template.db", "/tmp/ergo", .{});
+    var database = try phantom.Phantom.init(allocator, io, "./test/template.db", "/tmp/ergo", .{
+        .log_level = .{
+            .fatal = .warn
+        },
+    });
     defer database.deinit();
 
     try database.spawn();
@@ -27,24 +31,27 @@ pub fn main(init: std.process.Init) !void {
     const socket = try allocator.print("{s}/.s.PGSQL.5432", .{ database.socket_path });
     defer allocator.free(socket);
 
-    std.log.debug("{s}", .{ socket });
-
-    const opts: Pg.PgConfig = .{
+    var stream = try Stream.init(allocator, io, .{ 
         .host = socket,
         .port = null,
         .database = "db",
         .application_name = "Ergo test",
         .startup_parameters = null 
-    };
+    });
+    defer allocator.free(stream.buffer);
 
-    var stream = try Stream.init(allocator, io, opts);
-    defer stream.deinit(allocator);
+    const socket_handle = stream.stream.socket.handle;
+    defer Io.Threaded.closeFd(socket_handle);
 
-    var buf: [4096]u8 = undefined;
+    const pipes = try Io.Threaded.pipe2(.{ .CLOEXEC = true });
+    defer {
+        Io.Threaded.closeFd(pipes[0]);
+        Io.Threaded.closeFd(pipes[1]);
+    }
 
-    try StartupMessage.write(allocator, &stream, opts);
+    stream.stream.socket.handle = pipes[0];
 
-    _ = try stream.read(&buf);
+    var buf: [256]u8 = undefined;
 
-    assert('R' == buf[0]);
+    assert(error.Timeout == stream.readWithTimeout(&buf, 250));
 }

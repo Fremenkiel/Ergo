@@ -26,6 +26,8 @@ Change PK to take all coumns and save Map(String, String)
 Startup params based on env
 Reconnect handling on error while sending copy done.
 
+- CH SSL
+
 ## Tests to do
 pg_client
 connection manager

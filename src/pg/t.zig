@@ -12,17 +12,6 @@ const Message = @import("reader.zig").Message;
 const Reader = @import("reader.zig").Reader;
 const State = @import("conn.zig").State;
 
-pub const test_opts: PgConfig = .{
-    .port = 5432,
-    .host = "localhost",
-    .username = "db_rw",
-    .password = "12345678",
-    .database = "db",
-    .application_name = "Ergo",
-    .timeout_ms = 10_000,
-    .startup_parameters = null,
-};
-
 pub fn getRandom(io: Io) std.Random.DefaultPrng {
     var seed: u64 = undefined;
     std.Io.random(io, std.mem.asBytes(&seed));

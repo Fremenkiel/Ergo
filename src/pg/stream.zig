@@ -27,7 +27,7 @@ pub const Stream = struct {
     buffer: []u8,
     writer: *Io.Writer,
 
-    ssl: ?*SSL,
+    ssl: ?SSL,
 
     pub fn init(allocator: mem.Allocator, io: Io, opts: PgConfig) !Stream {
         const io_stream = try attemptConnection(io, opts.host, opts.port);
@@ -60,15 +60,21 @@ pub const Stream = struct {
                 return error.SSLNotSupportedByServer;
             }
 
-            var ssl_context = try SSL.init(allocator, opts.host, opts.tls, io_stream.socket.handle);
-            stream.ssl = &ssl_context;
+            stream.ssl = try SSL.init(
+                allocator,
+                opts.host,
+                opts.tls,
+                io_stream.socket.handle
+            );
         }
 
         return stream;
     }
 
     pub fn deinit(self: *@This(), allocator: mem.Allocator) void {
-        if (self.ssl) |s| s.deinit();
+        if (self.ssl) |*s| {
+            s.deinit();
+        }
         self.stream.close(self.io);
         allocator.free(self.buffer);
     }
@@ -90,7 +96,7 @@ pub const Stream = struct {
     }
 
     pub fn writeAll(self: *@This(), data: []const u8) !void {
-        if (self.ssl) |s| {
+        if (self.ssl) |*s| {
             return s.write(data);
         }
         return self.writeStream(data);
@@ -107,7 +113,7 @@ pub const Stream = struct {
     }
 
     pub fn read(self: *Stream, buf: []u8) !usize {
-        if (self.ssl) |s| {
+        if (self.ssl) |*s| {
             return s.read(buf);
         }
 
@@ -289,14 +295,29 @@ test "cancel stream while read" {
     const allocator = testing.allocator;
     const io = testing.io;
 
+    var database = try phantom.Phantom.init(allocator, io, "./test/template.db", "/tmp/ergo", .{
+        .log_level = .{
+            .fatal = .warn
+        },
+    });
+    defer database.deinit();
+
+    try database.spawn();
+
+    const socket = try allocator.print("{s}/.s.PGSQL.5432", .{ database.socket_path });
+    defer allocator.free(socket);
+
     var stream = try Stream.init(allocator, io, .{ 
-        .port = 5432,
-        .host = "localhost",
+        .host = socket,
+        .port = null,
         .database = "db",
         .application_name = "Ergo test",
         .startup_parameters = null 
     });
     defer allocator.free(stream.buffer);
+
+    const socket_handle = stream.stream.socket.handle;
+    defer Io.Threaded.closeFd(socket_handle);
 
     const pipes = try Io.Threaded.pipe2(.{ .CLOEXEC = true });
     defer {

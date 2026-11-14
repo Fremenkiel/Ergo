@@ -8,6 +8,8 @@ const testing = std.testing;
 
 const assert = std.debug.assert;
 
+const phantom = @import("phantom");
+
 const _conn = @import("conn.zig");
 const packet = @import("packet.zig");
 const stream = @import("stream.zig");
@@ -732,10 +734,25 @@ test "Reader: read with timeout" {
     const allocator = testing.allocator;
     const io = testing.io;
 
+    var database = try phantom.Phantom.init(allocator, io, "./test/template.db", "/tmp/ergo", .{
+        .log_level = .{
+            .fatal = .warn
+        },
+    });
+    defer database.deinit();
+
+    try database.spawn();
+
+    const socket = try allocator.print("{s}/.s.PGSQL.5432", .{ database.socket_path });
+    defer allocator.free(socket);
+
     const R = ReaderT(*stream.Stream);
 
-    var conn_stream = try stream.Stream.init(allocator, io, .{ .port = 5432, .host = "localhost", .database = "db", .application_name = "Ergo test", .startup_parameters = null });
+    var conn_stream = try stream.Stream.init(allocator, io, .{ .port = null, .host = socket, .database = "db", .application_name = "Ergo test", .startup_parameters = null });
     defer allocator.free(conn_stream.buffer);
+
+    const socket_handle = conn_stream.stream.socket.handle;
+    defer Io.Threaded.closeFd(socket_handle);
 
     const pipes = try Io.Threaded.pipe2(.{ .CLOEXEC = true });
     defer {

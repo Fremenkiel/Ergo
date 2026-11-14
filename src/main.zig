@@ -3,19 +3,24 @@ const builtin = @import("builtin");
 
 const Io = std.Io;
 const mem = std.mem;
+const Allocator = mem.Allocator;
 const testing = std.testing;
 const posix = std.posix;
 
 const assert = std.debug.assert;
 
+const config = @import("config/root.zig");
+const CliParser = config.CliParser;
+
 const ch = @import("ch");
 const connection_manager = @import("connection_manager.zig");
-const wal_stream = @import("wal_stream.zig");
 const types = @import("types");
 
 const ChClient = @import("ch_client.zig").ChClient;
 const PgClient = @import("pg_client.zig").PgClient;
 const PgConfig = @import("pg").PgConfig;
+
+const wal_stream = @import("wal_stream.zig");
 const WalStream = wal_stream.WalStream;
 
 const application_name = "Ergo";
@@ -23,123 +28,56 @@ const application_name = "Ergo";
 const ready_str = "Service ready";
 const shutdown_str = "Shutdown signal caught. Exiting cleanly.";
 
-const Options = struct {
-    ch_host: []const u8 = "localhost",
-    ch_port: u16 = 9000,
-    ch_user: []const u8 = "default",
-    ch_pass: []const u8 = "clickhouse",
-    ch_db: []const u8 = "audit_log",
-
-    pg_host: []const u8 = "localhost",
-    pg_port: u16 = 5432,
-    pg_user: []const u8 = "db_rw",
-    pg_pass: []const u8 = "12345678",
-    pg_db: []const u8 = "db",
-    pg_wal: []const u8 = "wal_slot",
-
-    is_test: bool = false,
-    bulk_sync_duration: u32 = 500,
-    user: []const u8,
-
-    fn init(allocator: mem.Allocator, environ_map: *std.process.Environ.Map) !Options {
-        const os_user = environ_map.get("USER");
-
-        assert(os_user != null);
-
-        var options: Options = .{
-            .ch_host = try allocator.dupe(u8, environ_map.get("CH_HOST") orelse "localhost"),
-            .ch_user = try allocator.dupe(u8, environ_map.get("CH_USER") orelse "default"),
-            .ch_pass = try allocator.dupe(u8, environ_map.get("CH_PASS") orelse "clickhouse"),
-            .ch_db = try allocator.dupe(u8, environ_map.get("CH_DB") orelse "audit_log"),
-
-            .pg_host = try allocator.dupe(u8, environ_map.get("PG_HOST") orelse "localhost"),
-            .pg_user = try allocator.dupe(u8, environ_map.get("PG_USER") orelse "db_rw"),
-            .pg_pass = try allocator.dupe(u8, environ_map.get("PG_PASS") orelse "12345678"),
-            .pg_db = try allocator.dupe(u8, environ_map.get("PG_DB") orelse "db"),
-            .pg_wal = try allocator.dupe(u8, environ_map.get("PG_WAL") orelse "wal_slot"),
-
-            .user = try allocator.dupe(u8, os_user.?)
-        };
-
-        if (environ_map.get("ERGO_TEST")) |is_test| {
-            options.is_test = mem.eql(u8, "1", is_test);
-        }
-        if (environ_map.get("BULK_SYNC_DURATION")) |bulk_sync_duration| {
-            options.bulk_sync_duration = try std.fmt.parseInt(u32, bulk_sync_duration, 10);
-        }
-
-        if (environ_map.get("CH_PORT")) |ch_port| {
-            options.ch_port = try std.fmt.parseInt(u16, ch_port, 10);
-        }
-
-        if (environ_map.get("PG_PORT")) |pg_port| {
-            options.pg_port = try std.fmt.parseInt(u16, pg_port, 10);
-        }
-
-        return options;
-    }
-
-    fn deinit(self: *@This(), allocator: mem.Allocator) void {
-        allocator.free(self.ch_host);
-        allocator.free(self.ch_user);
-        allocator.free(self.ch_pass);
-        allocator.free(self.ch_db);
-
-        allocator.free(self.pg_host);
-        allocator.free(self.pg_user);
-        allocator.free(self.pg_pass);
-        allocator.free(self.pg_db);
-
-        allocator.free(self.user);
-    }
-};
-
+// todo: redo this (Kevin)
 var is_shutting_down = std.atomic.Value(bool).init(false);
 
 fn handleSignel(sig: std.posix.SIG) callconv(.c) void {
-    _ = sig;
-
-    is_shutting_down.store(true, .seq_cst);
+    switch (sig) {
+        .TERM => is_shutting_down.store(true, .seq_cst),
+    }
 }
 
 pub fn main(init: std.process.Init) !void {
-    const allocator: mem.Allocator = init.arena.allocator();
+    const allocator: Allocator = init.arena.allocator();
     const io = init.io;
+
+    const os_user = init.environ_map.get("USER");
+    assert(os_user != null);
+
+    const conf = try config.load(allocator, io, init.minimal.args, init.environ_map);
 
     var act = std.posix.Sigaction{
         .handler = .{ .handler = handleSignel },
         .mask = std.posix.sigemptyset(),
         .flags = 0
     };
+
     std.posix.sigaction(std.posix.SIG.INT, &act, null);
     std.posix.sigaction(std.posix.SIG.TERM, &act, null);
-
-    var options: Options = try .init(allocator, init.environ_map);
-    defer options.deinit(allocator);
 
     try Io.File.stdout().writeStreamingAll(io, ready_str);
     try Io.File.stdout().writeStreamingAll(io, "\n");
 
     var ch_client = ChClient.init(allocator, io, .{
-        .host = options.ch_host,
-        .port = options.ch_port,
-        .username = options.ch_user,
-        .password = options.ch_pass,
-        .database = options.ch_db,
+        .host = conf.clickhouse.host,
+        .port = conf.clickhouse.port,
+        .database = conf.clickhouse.database,
+        .username = conf.clickhouse.user,
+        .password = conf.clickhouse.password,
         .application_name = application_name,
-    }, options.user);
+    }, os_user);
     defer ch_client.deinit();
 
     try ch_client.connect();
     defer ch_client.disconnect();
 
     const pg_config: PgConfig = .{
-        .port = options.pg_port,
-        .host = options.pg_host,
-        .wal = options.pg_wal,
-        .username = options.pg_user,
-        .password = options.pg_pass,
-        .database = options.pg_db,
+        .host = conf.postgres.host,
+        .port = conf.postgres.port,
+        .database = conf.postgres.database,
+        .username = conf.postgres.user,
+        .password = conf.postgres.password,
+        .wal = conf.postgres.slot,
         .application_name = application_name,
         .timeout_ms = 10_000,
         .startup_parameters = null
@@ -157,8 +95,8 @@ pub fn main(init: std.process.Init) !void {
         &ch_client,
         &pg_client,
         &conn_manager,
-        options.bulk_sync_duration,
-        options.is_test
+        conf.replication.flush_interval_ms,
+        conf.app.is_test
     );
     defer streamer.deinit();
     defer pg_client.cancel();
@@ -194,7 +132,7 @@ pub fn main(init: std.process.Init) !void {
     std.process.exit(0);
 }
 
-fn setupChildProcess(allocator: mem.Allocator, io: Io, db_name: []const u8, wal_name: []const u8) !std.process.Child {
+fn setupChildProcess(allocator: Allocator, io: Io, db_name: []const u8, wal_name: []const u8) !std.process.Child {
     var env = try std.process.Environ.createMap(std.testing.environ, allocator);
     defer env.deinit();
 

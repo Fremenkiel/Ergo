@@ -57,10 +57,14 @@ pub const SSL = struct {
         assert(tls != .off);
 
         const ctx = try initializeContext(tls);
-        errdefer openssl.SSL_CTX_free(ctx);
+
+        const ssl_connection = openssl.SSL_new(ctx) orelse {
+            openssl.SSL_CTX_free(ctx);
+            return SSLError.SSLNewFailed;
+        };
 
         var ssl_context = SSL{
-            .ssl = openssl.SSL_new(ctx) orelse return SSLError.SSLNewFailed,
+            .ssl = ssl_connection,
             .ctx = ctx,
             .status = .Initialized
         };
@@ -70,10 +74,13 @@ pub const SSL = struct {
             const owned_host = try allocator.dupeSentinel(u8, host, 0);
             defer allocator.free(owned_host);
 
-            try ssl_context.setHostName(host.ptr);
+            if (openssl.SSL_set_tlsext_host_name(ssl_context.ssl, owned_host.ptr) != 1) {
+                return SetHostNameError.SSLHostNameFailed;
+            }
         }
 
         ssl_context.setVerify(tls);
+
         try ssl_context.setFd(handle);
         try ssl_context.connect();
 
@@ -86,15 +93,9 @@ pub const SSL = struct {
         if (self.status != .Invalid) {
             _ = openssl.SSL_shutdown(self.ssl);
         }
+
         openssl.SSL_free(self.ssl);
-
         openssl.SSL_CTX_free(self.ctx);
-    }
-
-    fn setHostName(self: *@This(), host: [*]const u8) !void {
-        if (openssl.SSL_set_tlsext_host_name(self.ssl, host) != 1) {
-            return SetHostNameError.SSLHostNameFailed;
-        }
     }
 
     fn setVerify(self: *@This(), tls: TLS) void {
@@ -116,7 +117,7 @@ pub const SSL = struct {
             const verification_code = openssl.SSL_get_verify_result(self.ssl);
             printSSLError();
             if (verification_code != openssl.X509_V_OK) {
-                if (!builtin.is_test) {
+                if (builtin.is_test == false) {
                     std.log.err("ssl verification error: {s}\n", .{openssl.X509_verify_cert_error_string(verification_code)});
                 }
                 return ConnectError.SSLCertificationVerificationError;
@@ -129,6 +130,7 @@ pub const SSL = struct {
         const result = openssl.SSL_write(self.ssl, data.ptr, @intCast(data.len));
         if (result <= 0) {
             self.status = .Invalid;
+            printSSLError();
             return WriteError.SSLWriteFailed;
         }
     }
@@ -187,14 +189,14 @@ fn initializeContext(config: TLS) InitializeContextError!*SSL_CTX {
 }
 
 fn printSSLError() void {
-    if (builtin.is_test) return;
-    const bio = openssl.BIO_new(openssl.BIO_s_mem());
-    defer _ = openssl.BIO_free(bio);
-    openssl.ERR_print_errors(bio);
-    var buf: [*]u8 = undefined;
-    const len: usize = @intCast(openssl.BIO_get_mem_data(bio, &buf));
-    if (len > 0) {
-        std.debug.print("{s}\n", .{buf[0..len]});
+    if (builtin.is_test == true) return;
+    var err: c_ulong = openssl.ERR_get_error();
+    while (err != 0) {
+        const str = openssl.ERR_error_string(err, 0);
+
+        std.log.err("{s}", .{ str });
+
+        err = openssl.ERR_get_error();
     }
 }
 
