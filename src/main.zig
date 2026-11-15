@@ -10,7 +10,7 @@ const posix = std.posix;
 const assert = std.debug.assert;
 
 const config = @import("config/root.zig");
-const CliParser = config.CliParser;
+const Config = config.Config;
 
 const ch = @import("ch");
 const connection_manager = @import("connection_manager.zig");
@@ -44,7 +44,9 @@ pub fn main(init: std.process.Init) !void {
     const os_user = init.environ_map.get("USER");
     assert(os_user != null);
 
-    const conf = try config.load(allocator, io, init.minimal.args, init.environ_map);
+    const conf = allocator.create(Config);
+    defer allocator.destroy(conf);
+    try config.load(allocator, io, config, init.minimal.args, init.environ_map);
 
     var act = std.posix.Sigaction{
         .handler = .{ .handler = handleSignel },

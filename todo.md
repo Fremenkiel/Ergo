@@ -27,6 +27,7 @@ Startup params based on env
 Reconnect handling on error while sending copy done.
 
 - CH SSL
+- Document pgoutput, how to update, what changed.
 
 ## Tests to do
 pg_client

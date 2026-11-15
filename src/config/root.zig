@@ -5,7 +5,6 @@ const Allocator = mem.Allocator;
 const Environ = std.process.Environ;
 
 const cli = @import("cli.zig");
-const CliArgs = cli.CliArgs;
 
 const env = @import("env.zig");
 const toml = @import("toml.zig");
@@ -23,7 +22,8 @@ pub const Config = struct {
         database:       []const u8,
         user:           []const u8,
         password:       []const u8,
-        sslmode:        []const u8,
+        // sslmode:        []const u8,
+        sslmode:        SslMode,
         slot:           []const u8,
         publication:    []const u8,
     };
@@ -38,24 +38,53 @@ pub const Config = struct {
     };
 
     const ReplicationConfig = struct {
-        batch_size:         usize,
-        flush_interval_ms:  u32,
+        batch_size:         u16,
+        flush_interval_ms:  u16,
     };
 
 };
 
-const LoadError = cli.ParseError || toml.ParseError || env.ApplyEnvError;
+pub const SslModeError = error{
+InvalidValue,
+InvalidVariant,
+};
 
-pub fn load(allocator: Allocator, io: Io, argv: []const []const u8, environ_map: *Environ.Map) LoadError!Config {
-    var conf: Config = .{};
+pub const SslMode = union(enum) {
+    off: void,
+    require: void,
+    verify_full: ?[]const u8,
 
-    const args = try cli.parse(argv);
+    pub fn create(variant_name: []const u8, value: ?[]const u8) SslModeError!@This() {
+        const info = @typeInfo(SslMode).@"union";
 
-    try toml.loadToml(allocator, io, &conf, args.config);
+        inline for (
+        info.field_names,
+        info.field_types,
+    ) |variant, Payload| {
+            if (mem.eql(u8, variant, variant_name)) {
+                if (Payload == void) {
+                    if (value != null) return SslModeError.InvalidValue;
 
-    try env.applyEnv(&conf, environ_map);
+                    return @unionInit(SslMode, variant, {});
+                } else {
+                    return @unionInit(SslMode, variant, value);
+                }
+            }
+        }
+        return SslModeError.InvalidVariant;
+    }
+};
 
-    cli.applyArgs(&conf, args);
+const LoadError = cli.ParseArgsError || toml.LoadTomlError || env.ApplyEnvError;
+
+pub fn load(allocator: Allocator, io: Io, conf: *Config, argv: []const []const u8, environ_map: *Environ.Map) LoadError!void {
+    const args = try cli.parseArgs(argv);
+
+    try toml.loadToml(allocator, io, conf, args.config);
+
+    try env.applyEnv(conf, environ_map);
+
+    cli.applyArgs(conf, args);
 }
 
 test "test:main:beforeAll" {
