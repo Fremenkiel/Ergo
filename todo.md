@@ -28,6 +28,8 @@ Reconnect handling on error while sending copy done.
 
 - CH SSL
 - Document pgoutput, how to update, what changed.
+- Validate config
+- config.root tests
 
 ## Tests to do
 pg_client
