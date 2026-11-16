@@ -34,6 +34,7 @@ var is_shutting_down = std.atomic.Value(bool).init(false);
 fn handleSignel(sig: std.posix.SIG) callconv(.c) void {
     switch (sig) {
         .TERM => is_shutting_down.store(true, .seq_cst),
+        else => {},
     }
 }
 
@@ -41,12 +42,14 @@ pub fn main(init: std.process.Init) !void {
     const allocator: Allocator = init.arena.allocator();
     const io = init.io;
 
-    const os_user = init.environ_map.get("USER");
-    assert(os_user != null);
+    const os_user = if (init.environ_map.get("USER")) |user| user else @panic("Os user not found");
 
-    const conf = allocator.create(Config);
-    defer allocator.destroy(conf);
-    try config.load(allocator, io, config, init.minimal.args, init.environ_map);
+    const conf = try Config.init(allocator);
+    defer conf.deinit(allocator);
+
+    conf.* = .{};
+
+    try config.load(allocator, io, conf, init.minimal.args, init.environ_map);
 
     var act = std.posix.Sigaction{
         .handler = .{ .handler = handleSignel },
@@ -98,7 +101,7 @@ pub fn main(init: std.process.Init) !void {
         &pg_client,
         &conn_manager,
         conf.replication.flush_interval_ms,
-        conf.app.is_test
+        conf.is_test
     );
     defer streamer.deinit();
     defer pg_client.cancel();

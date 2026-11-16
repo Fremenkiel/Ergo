@@ -30,6 +30,7 @@ Reconnect handling on error while sending copy done.
 - Document pgoutput, how to update, what changed.
 - Validate config
 - config.root tests
+- cli help 
 
 ## Tests to do
 pg_client

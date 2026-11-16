@@ -1,6 +1,7 @@
 const std = @import("std");
 const fmt = std.fmt;
 const mem = std.mem;
+const Allocator = mem.Allocator;
 const Environ = std.process.Environ;
 
 const root = @import("root.zig");
@@ -10,53 +11,65 @@ const SslMode = root.SslMode;
 pub const ApplyEnvError = error{
 InvalidSslMode,
 InvalidSslPath,
-} || GetEnvError || root.SslModeError;
+} || GetEnvError || root.SslModeError || Allocator.Error;
 
 pub fn applyEnv(
-        target: *Config,
-        map: *Environ.Map,
+allocator: Allocator,
+target: *Config,
+map: *Environ.Map,
     ) ApplyEnvError!void {
     if (try getEnv([]const u8, map, "ERGO_POSTGRES_HOST")) |h| {
-        target.postgres.host = h;
+        if (target.postgres.host.len > 0) allocator.free(target.postgres.host);
+        target.postgres.host = try allocator.dupe(u8, h);
     }
     if (try getEnv(u16, map, "ERGO_POSTGRES_PORT")) |p| {
         target.postgres.port = p;
     }
     if (try getEnv([]const u8, map, "ERGO_POSTGRES_DATABASE")) |d| {
-        target.postgres.database = d;
+        if (target.postgres.database.len > 0) allocator.free(target.postgres.database);
+        target.postgres.database = try allocator.dupe(u8, d);
     }
     if (try getEnv([]const u8, map, "ERGO_POSTGRES_USER")) |u| {
-        target.postgres.user = u;
+        if (target.postgres.user.len > 0) allocator.free(target.postgres.user);
+        target.postgres.user = try allocator.dupe(u8, u);
     }
     if (try getEnv([]const u8, map, "ERGO_POSTGRES_PASSWORD")) |p| {
-        target.postgres.password = p;
+        if (target.postgres.password.len > 0) allocator.free(target.postgres.password);
+        target.postgres.password = try allocator.dupe(u8, p);
     }
     if (try getEnv([]const u8, map, "ERGO_POSTGRES_SSLMODE_TYPE")) |t| {
-        const path = try getEnv([]const u8, map, "ERGO_POSTGRES_SSLMODE_PATH");
+        if (target.postgres.sslmode == .verify_full and target.postgres.sslmode.verify_full != null) allocator.free(target.postgres.sslmode.verify_full.?);
+        const path = if (try getEnv([]const u8, map, "ERGO_POSTGRES_SSLMODE_PATH")) |path| try allocator.dupe(u8, path) else null;
 
         target.postgres.sslmode = try SslMode.create(t, path);
     }
     if (try getEnv([]const u8, map, "ERGO_POSTGRES_SLOT")) |s| {
-        target.postgres.slot = s;
+        if (target.postgres.slot.len > 0) allocator.free(target.postgres.slot);
+        target.postgres.slot = try allocator.dupe(u8, s);
     }
     if (try getEnv([]const u8, map, "ERGO_POSTGRES_PUBLICATION")) |p| {
-        target.postgres.publication = p;
+        if (target.postgres.publication.len > 0) allocator.free(target.postgres.publication);
+        target.postgres.publication = try allocator.dupe(u8, p);
     }
 
     if (try getEnv([]const u8, map, "ERGO_CLICKHOUSE_HOST")) |h| {
-        target.clickhouse.host = h;
+        if (target.clickhouse.host.len > 0) allocator.free(target.clickhouse.host);
+        target.clickhouse.host = try allocator.dupe(u8, h);
     }
     if (try getEnv(u16, map, "ERGO_CLICKHOUSE_PORT")) |p| {
         target.clickhouse.port = p;
     }
     if (try getEnv([]const u8, map, "ERGO_CLICKHOUSE_DATABASE")) |d| {
-        target.clickhouse.database = d;
+        if (target.clickhouse.database.len > 0) allocator.free(target.clickhouse.database);
+        target.clickhouse.database = try allocator.dupe(u8, d);
     }
     if (try getEnv([]const u8, map, "ERGO_CLICKHOUSE_USER")) |u| {
-        target.clickhouse.user = u;
+        if (target.clickhouse.user.len > 0) allocator.free(target.clickhouse.user);
+        target.clickhouse.user = try allocator.dupe(u8, u);
     }
     if (try getEnv([]const u8, map, "ERGO_CLICKHOUSE_PASSWORD")) |p| {
-        target.clickhouse.password = p;
+        if (target.clickhouse.password.len > 0) allocator.free(target.clickhouse.password);
+        target.clickhouse.password = try allocator.dupe(u8, p);
     }
     if (try getEnv(bool, map, "ERGO_CLICKHOUSE_SECURE")) |s| {
         target.clickhouse.secure = s;
@@ -125,10 +138,12 @@ test "apply env: ensure correct set" {
         try environ_map.put("ERGO_REPLICATION_BATCH_SIZE", "500");
         try environ_map.put("ERGO_REPLICATION_FLUSH_INTERVAL_MS", "360");
 
-        const config = try allocator.create(Config);
-        defer allocator.destroy(config);
+        const config = try Config.init(allocator);
+        defer config.deinit(allocator);
 
-        try applyEnv(config, &environ_map);
+        config.* = .{};
+
+        try applyEnv(allocator, config, &environ_map);
 
         try testing.expectEqualSlices(u8, "localhost", config.postgres.host);
         try testing.expectEqual(1234, config.postgres.port);
@@ -156,10 +171,12 @@ test "apply env: ensure correct set" {
 
         try environ_map.put("ERGO_POSTGRES_SSLMODE_TYPE", "off");
 
-        const config = try allocator.create(Config);
-        defer allocator.destroy(config);
+        const config = try Config.init(allocator);
+        defer config.deinit(allocator);
 
-        try applyEnv(config, &environ_map);
+        config.* = .{};
+
+        try applyEnv(allocator, config, &environ_map);
 
         try testing.expect(config.postgres.sslmode == .off);
     }
@@ -170,10 +187,12 @@ test "apply env: ensure correct set" {
 
         try environ_map.put("ERGO_POSTGRES_SSLMODE_TYPE", "verify_full");
 
-        const config = try allocator.create(Config);
-        defer allocator.destroy(config);
+        const config = try Config.init(allocator);
+        defer config.deinit(allocator);
 
-        try applyEnv(config, &environ_map);
+        config.* = .{};
+
+        try applyEnv(allocator, config, &environ_map);
 
         try testing.expect(config.postgres.sslmode == .verify_full);
         try testing.expectEqual(null, config.postgres.sslmode.verify_full);
@@ -186,10 +205,12 @@ test "apply env: ensure correct set" {
         try environ_map.put("ERGO_POSTGRES_SSLMODE_TYPE", "verify_full");
         try environ_map.put("ERGO_POSTGRES_SSLMODE_PATH", "./ca.crt");
 
-        const config = try allocator.create(Config);
-        defer allocator.destroy(config);
+        const config = try Config.init(allocator);
+        defer config.deinit(allocator);
 
-        try applyEnv(config, &environ_map);
+        config.* = .{};
+
+        try applyEnv(allocator, config, &environ_map);
 
         try testing.expect(config.postgres.sslmode == .verify_full);
         try testing.expectEqualSlices(u8, "./ca.crt", config.postgres.sslmode.verify_full.?);
@@ -205,8 +226,10 @@ test "get env: invalid type" {
 
         try environ_map.put("ERGO_POSTGRES_PORT", "NOT_VALID");
 
-        const config = try allocator.create(Config);
-        defer allocator.destroy(config);
+        const config = try Config.init(allocator);
+        defer config.deinit(allocator);
+
+        config.* = .{};
 
         try testing.expectEqual(GetEnvError.InvalidNumber, getEnv(u16, &environ_map, "ERGO_POSTGRES_PORT"));
     }
@@ -217,8 +240,10 @@ test "get env: invalid type" {
 
         try environ_map.put("ERGO_CLICKHOUSE_SECURE", "NOT_VALID");
 
-        const config = try allocator.create(Config);
-        defer allocator.destroy(config);
+        const config = try Config.init(allocator);
+        defer config.deinit(allocator);
+
+        config.* = .{};
 
         try testing.expectEqual(GetEnvError.InvalidBoolean, getEnv(bool, &environ_map, "ERGO_CLICKHOUSE_SECURE"));
     }
@@ -229,8 +254,10 @@ test "get env: invalid type" {
 
         try environ_map.put("ERGO_INVALID_TYPE", "12.34");
 
-        const config = try allocator.create(Config);
-        defer allocator.destroy(config);
+        const config = try Config.init(allocator);
+        defer config.deinit(allocator);
+
+        config.* = .{};
 
         try testing.expectEqual(GetEnvError.InvalidType, getEnv(f16, &environ_map, "ERGO_INVALID_TYPE"));
     }

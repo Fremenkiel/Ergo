@@ -50,7 +50,10 @@ target: *T,
 sub_path: []const u8
     ) ParseFileError!void {
     const cwd = Dir.cwd();
-    const file = try cwd.openFile(io, sub_path, .{ .mode = .read_only });
+    const file = cwd.openFile(io, sub_path, .{ .mode = .read_only }) catch |err| switch (err) {
+        File.OpenError.FileNotFound => return,
+        else => return err,
+    };
     defer file.close(io);
 
     var buf: [4096]u8 = undefined;
