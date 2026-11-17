@@ -7,13 +7,14 @@ const debug = std.debug;
 
 const assert = debug.assert;
 
-const ssl = @import("ssl");
+const ergo = @import("src/ergo.zig");
 
 const phantom = @import("phantom");
 const Phantom = phantom.Phantom;
-const Pg = @import("pg");
-const Stream = Pg.stream.Stream;
-const StartupMessage = Pg.protocol.StartupMessage;
+
+const TestProcess = @import("src/testing/test_process.zig").TestProcess;
+
+const t = @import("src/t.zig");
 
 const Config = struct {
     host: []const u8 = undefined,
@@ -21,11 +22,89 @@ const Config = struct {
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
+    const io = init.io;
 
-    const config = try allocator.create(Config);
-    defer allocator.destroy(config);
+    var database = try Phantom.init(allocator, io, "./test/template.db", "/tmp/ergo", .{
+        .log_level = .{
+            .fatal = .warn,
+        },
+    });
+    defer database.deinit();
 
-    config.* = .{};
+    try database.spawn();
 
-    std.log.debug("{d}", .{ config.host.len });
+    const socket = try allocator.print("{s}/.s.PGSQL.5432", .{ database.socket_path });
+    defer allocator.free(socket);
+
+    const db_name = try t.genereateDbName(allocator, io);
+    defer allocator.free(db_name);
+
+    try t.createTestDb(allocator, io, db_name);
+    defer t.teardownTestDb(allocator, io, db_name) catch {};
+
+    var env_map = try init.minimal.environ.createMap(allocator);
+    defer env_map.deinit();
+
+    var test_process = try TestProcess.spawn(allocator, io, &env_map, .{
+        .argv = &[_][]const u8{
+            "./zig-out/bin/ergo",
+            "--config", "./test/config.toml",
+            "--postgres-host", socket,
+            "--clickhouse-db", db_name,
+            "--is-test"
+        },
+        .readiness = .pipe,
+    });
+    errdefer test_process.deinit();
+
+    try test_process.waitUntilReady(.{ .timeout_ms = 5_000 });
+
+    // var child = try spawnChildProcess(io, db_name, socket);
+    // errdefer {
+    //     if (child.id) |pid| {
+    //         std.posix.kill(pid, std.posix.SIG.TERM) catch {};
+    //     }
+    // }
+    // const stderr_thread = try std.Thread.spawn(.{}, monitorStderr, .{
+    //     child.stderr.?.handle,
+    //     child.id.?,
+    //     &child_has_error
+    // });
+    // stderr_thread.detach();
+
+    const term = try test_process.terminate();
+
+    assert(term == .exited);
+    assert(0 == term.exited);
+
+    // make sure all connections are closed and no slots are hanging.
+    try env_map.put("PGPASSWORD", "postgres");
+
+    const pg_assert_query = try std.fmt.allocPrint(allocator, "SELECT * FROM pg_stat_activity WHERE datname = '{s}' AND application_name = '{s}';", .{db_name, ergo.application_name});
+    defer allocator.free(pg_assert_query);
+
+    var pg_assert_argv = [_][]const u8{ 
+        "psql",
+        "-h", "127.0.0.1",
+        "-p", "5432",
+        "-U", "postgres",
+        "-d", db_name,
+        "-q", "-t", "-A", // Formatting
+        "-c", pg_assert_query,
+    };
+    const pg_assert_result = try std.process.run(allocator, io, .{ 
+        .argv = &pg_assert_argv,
+        .environ_map = &env_map, 
+    });
+    defer {
+        allocator.free(pg_assert_result.stdout);
+        allocator.free(pg_assert_result.stderr);
+    }
+
+    if (pg_assert_result.term != .exited or pg_assert_result.term.exited != 0 or pg_assert_result.stderr.len > 0) {
+        std.debug.print("Error: unable to select pg data: {s}\n", .{pg_assert_result.stderr});
+        return error.PgSelectError;
+    }
+
+    assert(mem.eql(u8, "", pg_assert_result.stdout));
 }

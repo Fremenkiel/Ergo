@@ -115,9 +115,11 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+
     exe.root_module.addImport("pg", pg_module);
     exe.root_module.addImport("ch", ch_module);
     exe.root_module.addImport("types", types_module);
+    exe.root_module.addImport("phantom", phantom.module("phantom"));
     
     b.installArtifact(exe);
 

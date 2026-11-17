@@ -193,8 +193,6 @@ pub const ConnectionManager = struct {
 
 pub fn genereateDbName(allocator: mem.Allocator, io: Io) ![]const u8 {
     const db_name = try std.fmt.allocPrint(allocator, "test_db_{d}", .{std.Io.Clock.real.now(io).toNanoseconds()});
-    errdefer allocator.free(db_name);
-
     return db_name;
 }
 
@@ -305,7 +303,6 @@ pub fn createTestPgDb(allocator: mem.Allocator, io: Io, db_name: []const u8) !vo
 
 pub fn createTestDb(allocator: mem.Allocator, io: Io, db_name: []const u8) !void {
     try createTestChDb(allocator, io, db_name);
-    try createTestPgDb(allocator, io, db_name);
 }
 
 pub fn teardownTestChDb(allocator: mem.Allocator, io: Io, db_name: []const u8) !void {
@@ -394,8 +391,7 @@ pub fn teardownTestPgDb(allocator: mem.Allocator, io: Io, db_name: []const u8, w
     }
 }
 
-pub fn teardownTestDb(allocator: mem.Allocator, io: Io, db_name: []const u8, wal_name: []const u8) !void {
+pub fn teardownTestDb(allocator: mem.Allocator, io: Io, db_name: []const u8) !void {
     try teardownTestChDb(allocator, io, db_name);
-    try teardownTestPgDb(allocator, io, db_name, wal_name);
 }
 

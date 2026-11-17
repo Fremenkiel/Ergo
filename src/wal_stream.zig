@@ -82,9 +82,9 @@ pub fn WalStreamT(comptime StreamChClient: type, comptime StreamPgClient: type, 
             return self.pg_client.endFlow();
         }
 
-        pub fn stream(self: *@This(), flag: *std.atomic.Value(bool)) !void {
+        pub fn stream(self: *@This(), shutdown_event: *Io.Event) !void {
             while (true) {
-                const is_shutting_down = flag.load(.seq_cst);
+                const is_shutting_down = shutdown_event.isSet();
                 const duration_passed = self.last_write_timestamp.addDuration(self.duration).toMilliseconds() < Io.Clock.real.now(self.io).toMilliseconds();
                 if ((is_shutting_down or duration_passed) and self.log_array.items.len > 0) {
                     try self.flush();
@@ -93,7 +93,7 @@ pub fn WalStreamT(comptime StreamChClient: type, comptime StreamPgClient: type, 
                 if (is_shutting_down) {
                     switch (self.status) {
                         .Idle => {
-                            flag.store(false, .seq_cst);
+                            shutdown_event.reset();
                             return;
                         },
                         .CopyData => {
@@ -151,9 +151,7 @@ pub fn WalStreamT(comptime StreamChClient: type, comptime StreamPgClient: type, 
                                         try std.Io.File.stdout().writeStreamingAll(self.io, sync_marker_str);
                                         try Io.File.stdout().writeStreamingAll(self.io, "\n");
 
-                                        while (!flag.load(.seq_cst)) {
-                                            try Io.sleep(self.io, Io.Duration{ .nanoseconds = 10 * std.time.ns_per_ms }, .real);
-                                        }
+                                        try shutdown_event.wait(self.io);
                                     }
                                 }
 
