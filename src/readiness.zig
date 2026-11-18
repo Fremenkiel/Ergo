@@ -6,9 +6,16 @@ const Environ = std.process.Environ;
 
 const NofityError = fmt.ParseIntError || File.Writer.Error;
 
+pub const State = enum(u8) {
+    Ready,
+    Failed,
+    Exited,
+};
+
 pub fn notify(
 io: Io,
-env_map: *Environ.Map
+env_map: *Environ.Map,
+state: State
 ) !void {
     const fd_string = env_map.get("ERGO_READINESS_FD") orelse return;
 
@@ -20,5 +27,9 @@ env_map: *Environ.Map
     };
     defer file.close(io);
 
-    try file.writeStreamingAll(io, &.{0x01});
+    switch (state) {
+        .Ready => try file.writeStreamingAll(io, &.{0x01}),
+        .Exited => try file.writeStreamingAll(io, &.{0x02}),
+        .Failed => try file.writeStreamingAll(io, &.{0x03}),
+    }
 }

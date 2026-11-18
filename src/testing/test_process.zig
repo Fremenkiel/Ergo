@@ -67,7 +67,6 @@ pub const TestProcess = struct {
             .argv = options.argv,
             .cwd = options.cwd,
             .environ_map = env,
-
             .stdout = .inherit,
             .stderr = .inherit,
         });
@@ -134,16 +133,13 @@ pub const TestProcess = struct {
         var byte: [1]u8 = undefined;
 
         while (true) {
-            const n = try file.readStreaming(
+            _ = try file.readStreaming(
             io,
             &.{byte[0..]},
             );
 
-            if (n == 1) return byte[0];
+            return byte[0];
         }
-    }
-
-    pub fn wait() !void {
     }
 
     pub fn terminate(self: *@This()) TerminateError!Child.Term {
@@ -164,9 +160,6 @@ pub const TestProcess = struct {
         if (self.child.id) |pid| {
             std.posix.kill(pid, std.posix.SIG.TERM) catch @panic("Unable to terminate child process");
         }
-
-        const term = self.child.wait(self.io) catch @panic("Child termination failed");
-        if (term != .exited or term.exited != 0) @panic("Child process termination failed");
 
         self.state = .exited;
     }

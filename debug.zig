@@ -44,40 +44,30 @@ pub fn main(init: std.process.Init) !void {
 
     var env_map = try init.minimal.environ.createMap(allocator);
     defer env_map.deinit();
+    std.log.debug("setup complete", .{});
 
     var test_process = try TestProcess.spawn(allocator, io, &env_map, .{
         .argv = &[_][]const u8{
             "./zig-out/bin/ergo",
             "--config", "./test/config.toml",
             "--postgres-host", socket,
-            "--clickhouse-db", db_name,
+            "--clickhouse-database", db_name,
             "--is-test"
         },
         .readiness = .pipe,
     });
     errdefer test_process.deinit();
+    std.log.debug("spawned", .{});
 
     try test_process.waitUntilReady(.{ .timeout_ms = 5_000 });
-
-    // var child = try spawnChildProcess(io, db_name, socket);
-    // errdefer {
-    //     if (child.id) |pid| {
-    //         std.posix.kill(pid, std.posix.SIG.TERM) catch {};
-    //     }
-    // }
-    // const stderr_thread = try std.Thread.spawn(.{}, monitorStderr, .{
-    //     child.stderr.?.handle,
-    //     child.id.?,
-    //     &child_has_error
-    // });
-    // stderr_thread.detach();
+    std.log.debug("ready", .{});
 
     const term = try test_process.terminate();
+    std.log.debug("terminated", .{});
 
     assert(term == .exited);
     assert(0 == term.exited);
 
-    // make sure all connections are closed and no slots are hanging.
     try env_map.put("PGPASSWORD", "postgres");
 
     const pg_assert_query = try std.fmt.allocPrint(allocator, "SELECT * FROM pg_stat_activity WHERE datname = '{s}' AND application_name = '{s}';", .{db_name, ergo.application_name});
@@ -85,10 +75,9 @@ pub fn main(init: std.process.Init) !void {
 
     var pg_assert_argv = [_][]const u8{ 
         "psql",
-        "-h", "127.0.0.1",
-        "-p", "5432",
+        "-h", database.socket_path,
         "-U", "postgres",
-        "-d", db_name,
+        "-d", "db",
         "-q", "-t", "-A", // Formatting
         "-c", pg_assert_query,
     };
@@ -100,6 +89,7 @@ pub fn main(init: std.process.Init) !void {
         allocator.free(pg_assert_result.stdout);
         allocator.free(pg_assert_result.stderr);
     }
+    std.log.debug("executed", .{});
 
     if (pg_assert_result.term != .exited or pg_assert_result.term.exited != 0 or pg_assert_result.stderr.len > 0) {
         std.debug.print("Error: unable to select pg data: {s}\n", .{pg_assert_result.stderr});

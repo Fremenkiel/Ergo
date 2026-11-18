@@ -23,6 +23,7 @@ pub fn main(init: std.process.Init) !void {
     const allocator: Allocator = init.arena.allocator();
     const io = init.io;
     var env_map = init.environ_map;
+    errdefer readiness.notify(io, env_map, .Failed) catch {};
 
     const os_user = if (env_map.get("USER")) |user| user else @panic("Os user not found");
 
@@ -39,13 +40,12 @@ pub fn main(init: std.process.Init) !void {
     var app = try Ergo.init(allocator, io, conf, os_user);
     defer app.deinit();
 
-    try readiness.notify(io, env_map);
+    try readiness.notify(io, env_map, .Ready);
 
     // Blocking
     try app.run();
 
-    try Io.File.stdout().writeStreamingAll(io, shutdown_str);
-    try Io.File.stdout().writeStreamingAll(io, "\n");
+    // try readiness.notify(io, env_map, .Exited);
 
     std.process.exit(0);
 }
@@ -140,13 +140,7 @@ test "main: ensure correct shutdown" {
     const allocator = testing.allocator;
     const io = testing.io;
 
-    // var child_has_error = std.atomic.Value(bool).init(false);
-
-    var database = try phantom.Phantom.init(allocator, io, "./test/template.db", "/tmp/ergo", .{
-        .log_level = .{
-            .fatal = .warn,
-        },
-    });
+    var database = try phantom.Phantom.init(allocator, io, "./test/template.db", "/tmp/ergo", .{});
     defer database.deinit();
 
     try database.spawn();
@@ -168,27 +162,14 @@ test "main: ensure correct shutdown" {
             "./zig-out/bin/ergo",
             "--config", "./test/config.toml",
             "--postgres-host", socket,
-            "--clickhouse-db", db_name,
+            "--clickhouse-database", db_name,
             "--is-test"
         },
         .readiness = .pipe,
     });
-    errdefer test_process.deinit();
+    defer test_process.deinit();
 
-    try test_process.waitUntilReady(.{ .timeout_ms = 5_000 });
-
-    // var child = try spawnChildProcess(io, db_name, socket);
-    // errdefer {
-    //     if (child.id) |pid| {
-    //         std.posix.kill(pid, std.posix.SIG.TERM) catch {};
-    //     }
-    // }
-    // const stderr_thread = try std.Thread.spawn(.{}, monitorStderr, .{
-    //     child.stderr.?.handle,
-    //     child.id.?,
-    //     &child_has_error
-    // });
-    // stderr_thread.detach();
+    try test_process.waitUntilReady(.{ .timeout_ms = 1_000 });
 
     const term = try test_process.terminate();
 
@@ -205,10 +186,9 @@ test "main: ensure correct shutdown" {
 
     var pg_assert_argv = [_][]const u8{ 
         "psql",
-        "-h", "127.0.0.1",
-        "-p", "5432",
+        "-h", database.socket_path,
         "-U", "postgres",
-        "-d", db_name,
+        "-d", "db",
         "-q", "-t", "-A", // Formatting
         "-c", pg_assert_query,
     };

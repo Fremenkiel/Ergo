@@ -163,7 +163,10 @@ pub fn parseArgs(allocator: Allocator, argv: Args) ParseArgsError!CliArgs {
 
             if (!mem.startsWith(u8, a, "--")) return ParseArgsError.UnexpectedArgument;
 
-            const option = meta.stringToEnum(Options, a[2..]) orelse return ParseArgsError.UnknownOption;
+            const option = meta.stringToEnum(Options, a[2..]) orelse {
+                std.log.err("unknown option: {s}", .{ a });
+                return ParseArgsError.UnknownOption;
+            };
 
             switch (option) {
                 .config => args.config = try allocator.dupe(u8, try nextValue(&it)),

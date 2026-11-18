@@ -23,7 +23,7 @@ const PgError = @import("root.zig").PgError;
 // to everyone else, this is our reader
 pub const Reader = ReaderT(stream.Stream);
 
-const default_timeout_ms: i32 = 5;
+const default_timeout_ms: i32 = 1_000;
 
 pub const Message = struct {
     type: u8,

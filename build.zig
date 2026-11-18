@@ -112,7 +112,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
-            .optimize = optimize,
+            .optimize = .debug,
         }),
     });
 
@@ -160,6 +160,7 @@ pub fn build(b: *std.Build) void {
     exe_tests.root_module.addImport("pg", pg_module);
 
     const run_exe_tests = b.addRunArtifact(exe_tests);
+    // run_exe_tests.stdio = .inherit;
     const test_step = b.step("test", "Run tests");
 
     test_step.dependOn(b.getInstallStep());

@@ -31,7 +31,7 @@ pub const Ergo = struct {
 
     shutdown_event: Io.Event = .unset,
 
-    pub fn init(allocator: Allocator, io: Io, config: *Config, os_user: []const u8) !@This() {
+    pub fn init(allocator: Allocator, io: Io, config: *Config, os_user: []const u8) !*@This() {
         var ch_client = ChClient.init(allocator, io, .{
             .host = config.clickhouse.host,
             .port = config.clickhouse.port,
@@ -85,7 +85,9 @@ pub const Ergo = struct {
 
         posix.sigprocmask(posix.SIG.BLOCK, &mask, null);
 
-        var ergo: @This() = .{
+        var ergo = try allocator.create(Ergo);
+
+        ergo.* = .{
             .allocator = allocator,
             .io = io,
             .clickhouse_client = ch_client,
@@ -95,7 +97,7 @@ pub const Ergo = struct {
             .sigcall_future = null,
         };
 
-        ergo.sigcall_future = try io.concurrent(waitForSignal, .{ &ergo, mask });
+        ergo.sigcall_future = try io.concurrent(waitForSignal, .{ ergo, mask });
 
         try ergo.streamer.startStreaming();
 
@@ -109,6 +111,7 @@ pub const Ergo = struct {
 
         if (self.sigcall_future) |*fut| {
             fut.cancel(self.io);
+            self.sigcall_future = null;
         }
 
         defer self.streamer.deinit();
@@ -118,6 +121,8 @@ pub const Ergo = struct {
 
         defer self.clickhouse_client.disconnect();
         defer self.clickhouse_client.deinit();
+
+        self.allocator.destroy(self);
     }
 
     pub fn waitForSignal(self: *@This(), mask: posix.sigset_t) void {
@@ -126,11 +131,6 @@ pub const Ergo = struct {
 
         if (std.c.sigwait(&signals, &signal) == 0) {
             self.shutdown_event.set(self.io);
-        }
-
-        if (self.sigcall_future) |*fut| {
-            fut.await(self.io);
-            self.sigcall_future = null;
         }
     }
 

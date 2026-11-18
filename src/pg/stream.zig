@@ -120,6 +120,7 @@ pub const Stream = struct {
         return self.readStream(buf);
     }
 
+    // todo: redo with async select (kevin)
     pub fn readWithTimeout(self: *@This(), buffer: []u8, timeout_ms: i32) !usize {
         var fds = [_]std.posix.pollfd{
             .{ .fd = self.stream.socket.handle, .events = std.posix.POLL.IN, .revents = 0 },

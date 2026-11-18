@@ -17,7 +17,7 @@ const PgClientError = _pg_client.PgClientError;
 
 pub const sync_marker_str = "SYNC_MARKER_REACHED";
 pub const submit_marker_str = "CH_DATA_SUBMITTED_MARKER";
-const read_timeout_ms = 5;
+const read_timeout_ms = 1_000;
 
 pub const WalStreamError = error{
 FailedWhileShutdown,
@@ -84,13 +84,12 @@ pub fn WalStreamT(comptime StreamChClient: type, comptime StreamPgClient: type, 
 
         pub fn stream(self: *@This(), shutdown_event: *Io.Event) !void {
             while (true) {
-                const is_shutting_down = shutdown_event.isSet();
                 const duration_passed = self.last_write_timestamp.addDuration(self.duration).toMilliseconds() < Io.Clock.real.now(self.io).toMilliseconds();
-                if ((is_shutting_down or duration_passed) and self.log_array.items.len > 0) {
+                if ((shutdown_event.isSet() or duration_passed) and self.log_array.items.len > 0) {
                     try self.flush();
                 }
 
-                if (is_shutting_down) {
+                if (shutdown_event.isSet()) {
                     switch (self.status) {
                         .Idle => {
                             shutdown_event.reset();
