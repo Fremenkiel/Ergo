@@ -15,9 +15,6 @@ BEGIN
 
     DELETE FROM addresses WHERE id = 1;
 
-    -- TEST HALT
-    INSERT INTO test_sync_marker (id) VALUES (1);
-
     INSERT INTO addresses (id, address_line_1, postal_code, city, country) 
     OVERRIDING SYSTEM VALUE VALUES (2, 'Googleplex', '94043', 'Mountain View', 'US');
 

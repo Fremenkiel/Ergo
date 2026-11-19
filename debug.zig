@@ -36,7 +36,7 @@ pub fn main(init: std.process.Init) !void {
     const socket = try allocator.print("{s}/.s.PGSQL.5432", .{ database.socket_path });
     defer allocator.free(socket);
 
-    const db_name = try t.genereateDbName(allocator, io);
+    const db_name = try t.randomDbName(allocator, io);
     defer allocator.free(db_name);
 
     try t.createTestDb(allocator, io, db_name);

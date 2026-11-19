@@ -14,6 +14,8 @@ const PgConfig = @import("pg").PgConfig;
 const ConnectionManager = @import("connection_manager.zig").ConnectionManager;
 const WalStream = @import("wal_stream.zig").WalStream;
 
+const test_hooks = @import("test_hooks.zig");
+
 pub const application_name = "Ergo";
 
 pub const Ergo = struct {
@@ -63,6 +65,12 @@ pub const Ergo = struct {
 
         var conn_manager = ConnectionManager.init(allocator, io, pg_config);
 
+        var barrier: test_hooks.TransactionReceivedBarrier = .{};
+
+        const barrier_prt = if(config.test_pause_at) |test_pause_at| switch (test_pause_at) {
+            .transaction_received_before_enqueue => &barrier,
+        } else null;
+
         const streamer = WalStream.init(
         allocator,
         io,
@@ -70,7 +78,7 @@ pub const Ergo = struct {
         &pg_client,
         &conn_manager,
         config.replication.flush_interval_ms,
-        config.is_test
+        barrier_prt,
         );
 
         const prober_thread = try Thread.spawn(

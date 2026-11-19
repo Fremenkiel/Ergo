@@ -12,6 +12,7 @@ const Environ = Environ;
 
 const root = @import("root.zig");
 const Config = root.Config;
+const TestPauseOptions = root.TestPauseOptions;
 const SslMode = root.SslMode;
 
 const Entry = struct {
@@ -261,26 +262,27 @@ IntegerOutOfRange,
 };
 
 fn convertToml(comptime T: type, value: Value) ConvertTomlError!?T {
-    if (T == []const u8) {
-        return switch (value) {
+    switch (T) {
+        []const u8 => return switch (value) {
             .string => |s| s,
             else => error.InvalidValueType,
-        };
-    }
-    if (T == bool) {
+        },
+        bool => 
         return switch (value) {
             .boolean => |b| b,
             else => error.InvalidValueType,
-        };
-    }
-    switch (@typeInfo(T)) {
-        .int => return switch (value) {
-            .integer => |n| std.math.cast(T, n) orelse
-            error.IntegerOutOfRange,
-            else => error.InvalidValueType,
         },
-        .optional => |info| return try convertToml(info.child, value),
-        else => @compileError("Unsupported type: " ++ @typeName(T)),
+        // not supported in toml config, only for test.
+        TestPauseOptions => return null,
+        else => switch (@typeInfo(T)) {
+            .int => return switch (value) {
+                .integer => |n| std.math.cast(T, n) orelse
+                error.IntegerOutOfRange,
+                else => error.InvalidValueType,
+            },
+            .optional => |info| return try convertToml(info.child, value),
+            else => @compileError("Unsupported type: " ++ @typeName(T)),
+        }
     }
 }
 

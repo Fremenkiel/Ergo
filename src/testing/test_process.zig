@@ -8,6 +8,8 @@ const Child = process.Child;
 const Environ = process.Environ;
 const posix = std.posix;
 
+const stdout = @import("../stdout.zig");
+
 const SpawnError = ReadinessPipeError || Allocator.Error || process.SpawnError;
 
 const WaitUntilReadyError = error{
@@ -30,14 +32,14 @@ pub const TestProcess = struct {
 
     state: State = .starting,
 
-    pub const State = enum {
+    pub const State = enum(u8) {
         starting,
         ready,
         exited,
         failed,
     };
 
-    pub const Readiness = enum {
+    pub const Readiness = enum(u8) {
         pipe,
         none,
     };
@@ -67,7 +69,7 @@ pub const TestProcess = struct {
             .argv = options.argv,
             .cwd = options.cwd,
             .environ_map = env,
-            .stdout = .inherit,
+            .stdout = .pipe,
             .stderr = .inherit,
         });
 
@@ -113,7 +115,7 @@ pub const TestProcess = struct {
                     else => return err,
                 };
 
-                if (byte != 0x01) return WaitUntilReadyError.InvalidReadySignal;
+                if (byte != @backingInt(stdout.State.ready)) return WaitUntilReadyError.InvalidReadySignal;
 
                 self.state = .ready;
             },

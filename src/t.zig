@@ -2,6 +2,7 @@ const std = @import("std");
 
 const Io = std.Io;
 const mem = std.mem;
+const Allocator = mem.Allocator;
 
 const ConnectionStates = @import("connection_manager.zig").ConnectionStates;
 const pg = @import("pg");
@@ -191,9 +192,19 @@ pub const ConnectionManager = struct {
     }
 };
 
-pub fn genereateDbName(allocator: mem.Allocator, io: Io) ![]const u8 {
-    const db_name = try std.fmt.allocPrint(allocator, "test_db_{d}", .{std.Io.Clock.real.now(io).toNanoseconds()});
-    return db_name;
+const random_bytes_count = 12;
+const db_name_len = std.base64.url_safe.Encoder.calcSize(random_bytes_count);
+
+pub fn randomDbName(allocator: Allocator, io: Io) Allocator.Error![]const u8 {
+    var random_bytes: [random_bytes_count]u8 = undefined;
+    io.random(&random_bytes);
+    var db_name: [db_name_len]u8 = undefined;
+    _ = std.base64.url_safe.Encoder.encode(&db_name, &random_bytes);
+
+    var sanitized_db_name: [db_name_len]u8 = undefined;
+    _ = mem.replace(u8, &db_name, "-", "_", &sanitized_db_name);
+
+    return try allocator.dupe(u8, &sanitized_db_name);
 }
 
 pub fn createTestChDb(allocator: mem.Allocator, io: Io, db_name: []const u8) !void {

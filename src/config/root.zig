@@ -17,7 +17,7 @@ pub const Config = struct {
     clickhouse:     ClickhouseConfig = .{},
     replication:    ReplicationConfig = .{},
 
-    is_test:        bool = false,
+    test_pause_at:  ?TestPauseOptions = null,
     
     const PostgresConfig = struct {
         host:           []const u8 = "",
@@ -65,6 +65,10 @@ pub const Config = struct {
         allocator.destroy(self);
     }
 
+};
+
+pub const TestPauseOptions = enum {
+    transaction_received_before_enqueue,
 };
 
 pub const SslModeError = error{
@@ -138,7 +142,7 @@ test "load: ensure toml read" {
     try load(allocator, io, conf, argv, &env_map);
 
     try testing.expectEqualSlices(u8, "localhost", conf.postgres.host);
-    try testing.expectEqual(5432, conf.postgres.port);
+    try testing.expectEqual(null, conf.postgres.port);
     try testing.expectEqualSlices(u8, "db", conf.postgres.database);
     try testing.expectEqualSlices(u8, "db_rw", conf.postgres.user);
     try testing.expectEqualSlices(u8, "12345678", conf.postgres.password);
@@ -148,7 +152,7 @@ test "load: ensure toml read" {
     try testing.expectEqualSlices(u8, "db_pub", conf.postgres.publication);
 
     try testing.expectEqualSlices(u8, "localhost", conf.clickhouse.host);
-    try testing.expectEqual(8443, conf.clickhouse.port);
+    try testing.expectEqual(9000, conf.clickhouse.port);
     try testing.expectEqualSlices(u8, "db", conf.clickhouse.database);
     try testing.expectEqualSlices(u8, "default", conf.clickhouse.user);
     try testing.expectEqualSlices(u8, "clickhouse", conf.clickhouse.password);
@@ -166,15 +170,6 @@ test "load: ensure env override" {
         .vector = &[_][*:0]const u8{ 
             "ergo"
         }};
-
-    var tmp_dir = testing.tmpDir(.{});
-    defer tmp_dir.cleanup();
-
-    const file = try tmp_dir.dir.createFile(io, "config.toml", .{});
-    file.close(io);
-
-    const file_path = try allocator.print(".zig-cache/tmp/{s}/config.toml", .{ tmp_dir.sub_path });
-    defer allocator.free(file_path);
 
     var env_map = try std.process.Environ.createMap(std.testing.environ, allocator);
     defer env_map.deinit();
@@ -231,13 +226,19 @@ test "load: ensure argv override" {
     const allocator = testing.allocator;
     const io = testing.io;
 
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    const file = try tmp_dir.dir.createFile(io, "config.toml", .{});
+    file.close(io);
+
     const argv: std.process.Args = .{
         .vector = &[_][*:0]const u8{ 
             "ergo",
-            "--config", "config.toml",
+            "--config", ".zig-cache/tmp/" ++ tmp_dir.sub_path ++ "/config.toml",
 
             "--help",
-            "--is-test",
+            "--test-pause-at=transaction_received_before_enqueue",
 
             "--postgres-host", "localhost",
             "--postgres-port", "5432",
@@ -256,15 +257,6 @@ test "load: ensure argv override" {
             "--replication-batch-size", "500",
             "--replication-flush-interval-ms", "360",
         }};
-
-    var tmp_dir = testing.tmpDir(.{});
-    defer tmp_dir.cleanup();
-
-    const file = try tmp_dir.dir.createFile(io, "config.toml", .{});
-    file.close(io);
-
-    const file_path = try allocator.print(".zig-cache/tmp/{s}/config.toml", .{ tmp_dir.sub_path });
-    defer allocator.free(file_path);
 
     var env_map = try std.process.Environ.createMap(std.testing.environ, allocator);
     defer env_map.deinit();
@@ -292,6 +284,8 @@ test "load: ensure argv override" {
 
     try testing.expectEqual(500, conf.replication.batch_size);
     try testing.expectEqual(360, conf.replication.flush_interval_ms);
+
+    try testing.expectEqual(.transaction_received_before_enqueue, conf.test_pause_at.?);
 }
 
 test "load: ensure correct override order" {
@@ -304,7 +298,7 @@ test "load: ensure correct override order" {
             "--config", "./test/config.toml",
 
             "--help",
-            "--is-test",
+            "--test-pause-at=transaction_received_before_enqueue",
 
             "--postgres-host", "arg",
             "--postgres-port", "5555",
@@ -370,7 +364,7 @@ test "load: ensure correct override order" {
     try testing.expectEqual(7777, conf.replication.batch_size);
     try testing.expectEqual(8888, conf.replication.flush_interval_ms);
 
-    try testing.expectEqual(true, conf.is_test);
+    try testing.expectEqual(.transaction_received_before_enqueue, conf.test_pause_at.?);
 }
 
 test "load: ensure correct validation" {

@@ -8,7 +8,9 @@ const assert = std.debug.assert;
 
 const pg = @import("pg");
 const types = @import("types");
+// todo: refactor (kevin)
 const _pg_client = @import("pg_client.zig");
+const test_hooks = @import("test_hooks.zig");
 
 const ChClient = @import("ch_client.zig").ChClient;
 const ConnectionManager = @import("connection_manager.zig").ConnectionManager;
@@ -49,9 +51,17 @@ pub fn WalStreamT(comptime StreamChClient: type, comptime StreamPgClient: type, 
         status: StreamStatus = .Idle,
 
         // only used for running child process tests 
-        is_test: bool,
+        transaction_received_barrier: ?*test_hooks.TransactionReceivedBarrier = null,
 
-        pub fn init(allocator: mem.Allocator, io: Io, ch_client: *StreamChClient, pg_client: *StreamPgClient, connection_manager: *StreamConnectionManager, duration: ?i64, is_test: bool) @This() {
+        pub fn init(
+        allocator: mem.Allocator,
+        io: Io,
+        ch_client: *StreamChClient,
+        pg_client: *StreamPgClient,
+        connection_manager: *StreamConnectionManager,
+        duration: ?i64,
+        barrier: ?*test_hooks.TransactionReceivedBarrier
+        ) @This() {
             return .{
                 .allocator = allocator,
                 .io = io,
@@ -60,7 +70,7 @@ pub fn WalStreamT(comptime StreamChClient: type, comptime StreamPgClient: type, 
                 .ch_client = ch_client,
                 .connection_manager = connection_manager,
                 .pg_client = pg_client,
-                .is_test = is_test,
+                .transaction_received_barrier = barrier,
             };
         }
 
@@ -135,29 +145,39 @@ pub fn WalStreamT(comptime StreamChClient: type, comptime StreamPgClient: type, 
                         
                         if (response) |*tx| {
                             if (tx.rows.items.len > 0) {
-                                // Test hook
-                                if (self.is_test) {
-                                    var marker_idx: ?usize = null;
-                                    for (tx.rows.items, 0..) |*row, i| {
-                                        if (std.mem.eql(u8, "public.test_sync_marker", row.table_name)) {
-                                            marker_idx = i;
-                                            break;
-                                        }
-                                    }
-
-                                    if (marker_idx) |idx| {
-                                        _ = tx.rows.orderedRemove(idx);
-                                        try std.Io.File.stdout().writeStreamingAll(self.io, sync_marker_str);
-                                        try Io.File.stdout().writeStreamingAll(self.io, "\n");
-
-                                        try shutdown_event.wait(self.io);
-                                    }
+                                if (self.transaction_received_barrier) |barrier| {
+                                    try barrier.reach(self.io, shutdown_event);
                                 }
 
                                 const transaction = try tx.copy(self.allocator);
                                 try self.log_array.append(self.allocator, transaction);
                             }
                         }
+                        // if (response) |*tx| {
+                        //     if (tx.rows.items.len > 0) {
+                        //         // Test hook
+                        //         if (self.is_test) {
+                        //             var marker_idx: ?usize = null;
+                        //             for (tx.rows.items, 0..) |*row, i| {
+                        //                 if (std.mem.eql(u8, "public.test_sync_marker", row.table_name)) {
+                        //                     marker_idx = i;
+                        //                     break;
+                        //                 }
+                        //             }
+                        //
+                        //             if (marker_idx) |idx| {
+                        //                 _ = tx.rows.orderedRemove(idx);
+                        //                 try std.Io.File.stdout().writeStreamingAll(self.io, sync_marker_str);
+                        //                 try Io.File.stdout().writeStreamingAll(self.io, "\n");
+                        //
+                        //                 try shutdown_event.wait(self.io);
+                        //             }
+                        //         }
+                        //
+                        //         const transaction = try tx.copy(self.allocator);
+                        //         try self.log_array.append(self.allocator, transaction);
+                        //     }
+                        // }
 
                     },
                     pg.packet.ServerPacket.Keepalive => {},
@@ -179,10 +199,11 @@ pub fn WalStreamT(comptime StreamChClient: type, comptime StreamPgClient: type, 
 
             self.last_write_timestamp = Io.Clock.real.now(self.io);
 
-            if (self.is_test) {
-                try std.Io.File.stdout().writeStreamingAll(self.io, submit_marker_str);
-                try Io.File.stdout().writeStreamingAll(self.io, "\n");
-            }
+            // todo: refactor to use test_hook (kevin)
+            // if (self.is_test) {
+            //     try std.Io.File.stdout().writeStreamingAll(self.io, submit_marker_str);
+            //     try Io.File.stdout().writeStreamingAll(self.io, "\n");
+            // }
         }
     };
 }
@@ -316,7 +337,7 @@ const t = @import("t.zig");
 //     const allocator = testing.allocator;
 //     const io = testing.io;
 //
-//     const db_name = try t.genereateDbName(allocator, io);
+//     const db_name = try t.randomDbName(allocator, io);
 //     defer allocator.free(db_name);
 //
 //     try t.createTestPgDb(allocator, io, db_name);
@@ -495,7 +516,7 @@ const t = @import("t.zig");
 //     const allocator = testing.allocator;
 //     const io = testing.io;
 //
-//     const db_name = try t.genereateDbName(allocator, io);
+//     const db_name = try t.randomDbName(allocator, io);
 //     defer allocator.free(db_name);
 //
 //     try t.createTestPgDb(allocator, io, db_name);
@@ -712,7 +733,7 @@ const t = @import("t.zig");
 //     const allocator = testing.allocator;
 //     const io = testing.io;
 //
-//     const db_name = try t.genereateDbName(allocator, io);
+//     const db_name = try t.randomDbName(allocator, io);
 //     defer allocator.free(db_name);
 //
 //     try t.createTestChDb(allocator, io, db_name);
@@ -823,223 +844,223 @@ const t = @import("t.zig");
 //     );
 // }
 //
-pub fn runQuery(allocator: mem.Allocator, io: Io, db_name: []const u8, flag: *std.atomic.Value(bool)) !void {
-    var pg_env = try std.process.Environ.createMap(std.testing.environ, allocator);
-    defer pg_env.deinit();
-    try pg_env.put("PGPASSWORD", "12345678");
-
-    var pg_argv = [_][]const u8{
-        "psql",
-        "-h", "127.0.0.1",
-        "-p", "5432",
-        "-U", "db_rw",
-        "-d", db_name,
-        "-a",
-        "-f", "./test_fixtures/simple-query.sql"
-    };
-
-    {
-        const pg_result = try std.process.run(allocator, io, .{ 
-            .argv = &pg_argv,
-            .environ_map = &pg_env, 
-        });
-        defer {
-            allocator.free(pg_result.stdout);
-            allocator.free(pg_result.stderr);
-        }
-
-        if (pg_result.term != .exited or pg_result.term.exited != 0 or pg_result.stderr.len > 0) {
-            std.debug.print("Error: PSQL failed: {s}\n", .{pg_result.stderr});
-            return error.PsqlExecutionFailed;
-        }
-    }
-
-    var docker_kill_argv = [_][]const u8{
-        "docker",
-        "kill", "db"
-    };
-    const docker_kill_result = try std.process.run(allocator, io, .{ 
-        .argv = &docker_kill_argv,
-    });
-    defer {
-        allocator.free(docker_kill_result.stdout);
-        allocator.free(docker_kill_result.stderr);
-    }
-
-    if (docker_kill_result.term != .exited or docker_kill_result.term.exited != 0 or docker_kill_result.stderr.len > 0) {
-        std.debug.print("Error: Docker failed: {s}\n", .{docker_kill_result.stderr});
-        return error.DockerKillFailed;
-    }
-
-    try Io.sleep(io, .{ .nanoseconds = 5 * std.time.ns_per_ms }, .real);
-
-    var docker_start_argv = [_][]const u8{
-        "docker",
-        "start", "db"
-    };
-    const docker_start_result = try std.process.run(allocator, io, .{ 
-        .argv = &docker_start_argv,
-    });
-    defer {
-        allocator.free(docker_start_result.stdout);
-        allocator.free(docker_start_result.stderr);
-    }
-
-    if (docker_start_result.term != .exited or docker_start_result.term.exited != 0 or docker_start_result.stderr.len > 0) {
-        std.debug.print("Error: Docker failed: {s}\n", .{docker_start_result.stderr});
-        return error.DockerStartFailed;
-    }
-
-    var container_ready_check_argv = [_][]const u8{
-        "zsh", "-c",
-        "while ! pg_isready -h 127.0.0.1 -U postgres -d postgres > /dev/null 2>&1; do sleep 1; done;",
-    };
-    const container_ready_check_result = try std.process.run(allocator, io, .{
-        .argv = &container_ready_check_argv,
-    });
-    defer {
-        allocator.free(container_ready_check_result.stdout);
-        allocator.free(container_ready_check_result.stderr);
-    }
-
-    if (container_ready_check_result.term != .exited or container_ready_check_result.term.exited != 0 or container_ready_check_result.stderr.len > 0) {
-        std.debug.print("Error: Container ready check failed: {s}\n", .{container_ready_check_result.stderr});
-        return error.ContainerReadyCheck;
-    }
-
-    std.debug.print("check complete", .{});
-
-    {
-        const pg_result = try std.process.run(allocator, io, .{ 
-            .argv = &pg_argv,
-            .environ_map = &pg_env, 
-        });
-        defer {
-            allocator.free(pg_result.stdout);
-            allocator.free(pg_result.stderr);
-        }
-
-        if (pg_result.term != .exited or pg_result.term.exited != 0 or pg_result.stderr.len > 0) {
-            std.debug.print("Error: PSQL failed: {s}\n", .{pg_result.stderr});
-            return error.PsqlExecutionFailed;
-        }
-    }
-
-    flag.store(true, .seq_cst);
-}
-
-test "WalStream: regain connection after disconnect" {
-    const allocator = testing.allocator;
-    const io = testing.io;
-
-    const db_name = try t.genereateDbName(allocator, io);
-    defer allocator.free(db_name);
-
-    try t.createTestPgDb(allocator, io, db_name);
-
-    const wal_name = try std.fmt.allocPrint(allocator, "wal_slot_{s}", .{db_name});
-    defer allocator.free(wal_name);
-
-    defer t.teardownTestPgDb(allocator, io, db_name, wal_name) catch {};
-
-    const pg_config: pg.PgConfig = .{
-        .port = 5432,
-        .host = "localhost",
-        .wal = wal_name,
-        .username = "db_rw",
-        .password = "12345678",
-        .database = db_name,
-        .application_name = "Ergo test",
-        .timeout_ms = 10_000,
-        .startup_parameters = null
-    };
-
-    var pg_client = try PgClient.init(allocator, io, pg_config);
-    defer pg_client.deinit();
-    defer pg_client.cancel();
-
-    var ch_client = t.ChClient.init(allocator);
-    defer ch_client.deinit();
-
-    var connection_manager = ConnectionManager.init(allocator, io, pg_config);
-    const prober_thread = try std.Thread.spawn(
-        .{}, 
-        ConnectionManager.runProber, 
-        .{ &connection_manager }
-    );
-    defer prober_thread.detach();
-
-    const TestWalStream = WalStreamT(t.ChClient, PgClient, ConnectionManager);
-    var stream = TestWalStream.init(
-        allocator,
-        io, 
-        &ch_client,
-        &pg_client, 
-        &connection_manager,
-        null,
-        false,
-    );
-    defer stream.deinit();
-
-    try stream.startStreaming();
-
-    mock_is_shutting_down.store(false, .seq_cst);
-
-    const stream_thread = try std.Thread.spawn(
-        .{}, 
-        TestWalStream.stream,
-        .{ &stream, &mock_is_shutting_down }
-    );
-    defer {
-        if (!mock_is_shutting_down.load(.seq_cst)) {
-            mock_is_shutting_down.store(true, .seq_cst);
-        }
-
-        stream.endStreaming() catch |err| {
-            std.log.err("Unable to end stream: {any}", .{err});
-        };
-        stream_thread.detach();
-    }
-
-    try runQuery(allocator, io, db_name, &mock_is_shutting_down);
-
-    while (stream.status != .Idle) {
-        try Io.sleep(io, .{ .nanoseconds = 5 * std.time.ns_per_ms }, .real);
-    }
-
-    try stream.endStreaming();
-
-    try testing.expectEqual(1, ch_client.written_logs.items.len);
-    try testing.expectEqual(1, ch_client.written_logs.items[0].rows.items.len);
-
-    const id_col = ch_client.written_logs.items[0].rows.items[0].columns.items[0];
-    const address_line_1_col = ch_client.written_logs.items[0].rows.items[0].columns.items[1];
-    const address_line_2_col = ch_client.written_logs.items[0].rows.items[0].columns.items[2];
-    const postal_code_col = ch_client.written_logs.items[0].rows.items[0].columns.items[3];
-    const city_col = ch_client.written_logs.items[0].rows.items[0].columns.items[4];
-    const country_col = ch_client.written_logs.items[0].rows.items[0].columns.items[5];
-
-    try testing.expectEqualStrings("id", id_col.column_name);
-    try testing.expectEqual(null, id_col.old_value);
-    try testing.expectEqualStrings("1", id_col.new_value.?);
-
-    try testing.expectEqualStrings("address_line_1", address_line_1_col.column_name);
-    try testing.expectEqual(null, address_line_1_col.old_value);
-    try testing.expectEqualStrings("1 Apple Park Way", address_line_1_col.new_value.?);
-
-    try testing.expectEqualStrings("address_line_2", address_line_2_col.column_name);
-    try testing.expectEqual(null, address_line_2_col.old_value);
-    try testing.expectEqual(null, address_line_2_col.new_value);
-
-    try testing.expectEqualStrings("postal_code", postal_code_col.column_name);
-    try testing.expectEqual(null, postal_code_col.old_value);
-    try testing.expectEqualStrings("95014", postal_code_col.new_value.?);
-
-    try testing.expectEqualStrings("city", city_col.column_name);
-    try testing.expectEqual(null, city_col.old_value);
-    try testing.expectEqualStrings("Cupertino", city_col.new_value.?);
-
-    try testing.expectEqualStrings("country", country_col.column_name);
-    try testing.expectEqual(null, country_col.old_value);
-    try testing.expectEqualStrings("US", country_col.new_value.?);
-}
+// pub fn runQuery(allocator: mem.Allocator, io: Io, db_name: []const u8, flag: *std.atomic.Value(bool)) !void {
+//     var pg_env = try std.process.Environ.createMap(std.testing.environ, allocator);
+//     defer pg_env.deinit();
+//     try pg_env.put("PGPASSWORD", "12345678");
+//
+//     var pg_argv = [_][]const u8{
+//         "psql",
+//         "-h", "127.0.0.1",
+//         "-p", "5432",
+//         "-U", "db_rw",
+//         "-d", db_name,
+//         "-a",
+//         "-f", "./test_fixtures/simple-query.sql"
+//     };
+//
+//     {
+//         const pg_result = try std.process.run(allocator, io, .{ 
+//             .argv = &pg_argv,
+//             .environ_map = &pg_env, 
+//         });
+//         defer {
+//             allocator.free(pg_result.stdout);
+//             allocator.free(pg_result.stderr);
+//         }
+//
+//         if (pg_result.term != .exited or pg_result.term.exited != 0 or pg_result.stderr.len > 0) {
+//             std.debug.print("Error: PSQL failed: {s}\n", .{pg_result.stderr});
+//             return error.PsqlExecutionFailed;
+//         }
+//     }
+//
+//     var docker_kill_argv = [_][]const u8{
+//         "docker",
+//         "kill", "db"
+//     };
+//     const docker_kill_result = try std.process.run(allocator, io, .{ 
+//         .argv = &docker_kill_argv,
+//     });
+//     defer {
+//         allocator.free(docker_kill_result.stdout);
+//         allocator.free(docker_kill_result.stderr);
+//     }
+//
+//     if (docker_kill_result.term != .exited or docker_kill_result.term.exited != 0 or docker_kill_result.stderr.len > 0) {
+//         std.debug.print("Error: Docker failed: {s}\n", .{docker_kill_result.stderr});
+//         return error.DockerKillFailed;
+//     }
+//
+//     try Io.sleep(io, .{ .nanoseconds = 5 * std.time.ns_per_ms }, .real);
+//
+//     var docker_start_argv = [_][]const u8{
+//         "docker",
+//         "start", "db"
+//     };
+//     const docker_start_result = try std.process.run(allocator, io, .{ 
+//         .argv = &docker_start_argv,
+//     });
+//     defer {
+//         allocator.free(docker_start_result.stdout);
+//         allocator.free(docker_start_result.stderr);
+//     }
+//
+//     if (docker_start_result.term != .exited or docker_start_result.term.exited != 0 or docker_start_result.stderr.len > 0) {
+//         std.debug.print("Error: Docker failed: {s}\n", .{docker_start_result.stderr});
+//         return error.DockerStartFailed;
+//     }
+//
+//     var container_ready_check_argv = [_][]const u8{
+//         "zsh", "-c",
+//         "while ! pg_isready -h 127.0.0.1 -U postgres -d postgres > /dev/null 2>&1; do sleep 1; done;",
+//     };
+//     const container_ready_check_result = try std.process.run(allocator, io, .{
+//         .argv = &container_ready_check_argv,
+//     });
+//     defer {
+//         allocator.free(container_ready_check_result.stdout);
+//         allocator.free(container_ready_check_result.stderr);
+//     }
+//
+//     if (container_ready_check_result.term != .exited or container_ready_check_result.term.exited != 0 or container_ready_check_result.stderr.len > 0) {
+//         std.debug.print("Error: Container ready check failed: {s}\n", .{container_ready_check_result.stderr});
+//         return error.ContainerReadyCheck;
+//     }
+//
+//     std.debug.print("check complete", .{});
+//
+//     {
+//         const pg_result = try std.process.run(allocator, io, .{ 
+//             .argv = &pg_argv,
+//             .environ_map = &pg_env, 
+//         });
+//         defer {
+//             allocator.free(pg_result.stdout);
+//             allocator.free(pg_result.stderr);
+//         }
+//
+//         if (pg_result.term != .exited or pg_result.term.exited != 0 or pg_result.stderr.len > 0) {
+//             std.debug.print("Error: PSQL failed: {s}\n", .{pg_result.stderr});
+//             return error.PsqlExecutionFailed;
+//         }
+//     }
+//
+//     flag.store(true, .seq_cst);
+// }
+//
+// test "WalStream: regain connection after disconnect" {
+//     const allocator = testing.allocator;
+//     const io = testing.io;
+//
+//     const db_name = try t.randomDbName(allocator, io);
+//     defer allocator.free(db_name);
+//
+//     try t.createTestPgDb(allocator, io, db_name);
+//
+//     const wal_name = try std.fmt.allocPrint(allocator, "wal_slot_{s}", .{db_name});
+//     defer allocator.free(wal_name);
+//
+//     defer t.teardownTestPgDb(allocator, io, db_name, wal_name) catch {};
+//
+//     const pg_config: pg.PgConfig = .{
+//         .port = 5432,
+//         .host = "localhost",
+//         .wal = wal_name,
+//         .username = "db_rw",
+//         .password = "12345678",
+//         .database = db_name,
+//         .application_name = "Ergo test",
+//         .timeout_ms = 10_000,
+//         .startup_parameters = null
+//     };
+//
+//     var pg_client = try PgClient.init(allocator, io, pg_config);
+//     defer pg_client.deinit();
+//     defer pg_client.cancel();
+//
+//     var ch_client = t.ChClient.init(allocator);
+//     defer ch_client.deinit();
+//
+//     var connection_manager = ConnectionManager.init(allocator, io, pg_config);
+//     const prober_thread = try std.Thread.spawn(
+//         .{}, 
+//         ConnectionManager.runProber, 
+//         .{ &connection_manager }
+//     );
+//     defer prober_thread.detach();
+//
+//     const TestWalStream = WalStreamT(t.ChClient, PgClient, ConnectionManager);
+//     var stream = TestWalStream.init(
+//         allocator,
+//         io, 
+//         &ch_client,
+//         &pg_client, 
+//         &connection_manager,
+//         null,
+//         false,
+//     );
+//     defer stream.deinit();
+//
+//     try stream.startStreaming();
+//
+//     mock_is_shutting_down.store(false, .seq_cst);
+//
+//     const stream_thread = try std.Thread.spawn(
+//         .{}, 
+//         TestWalStream.stream,
+//         .{ &stream, &mock_is_shutting_down }
+//     );
+//     defer {
+//         if (!mock_is_shutting_down.load(.seq_cst)) {
+//             mock_is_shutting_down.store(true, .seq_cst);
+//         }
+//
+//         stream.endStreaming() catch |err| {
+//             std.log.err("Unable to end stream: {any}", .{err});
+//         };
+//         stream_thread.detach();
+//     }
+//
+//     try runQuery(allocator, io, db_name, &mock_is_shutting_down);
+//
+//     while (stream.status != .Idle) {
+//         try Io.sleep(io, .{ .nanoseconds = 5 * std.time.ns_per_ms }, .real);
+//     }
+//
+//     try stream.endStreaming();
+//
+//     try testing.expectEqual(1, ch_client.written_logs.items.len);
+//     try testing.expectEqual(1, ch_client.written_logs.items[0].rows.items.len);
+//
+//     const id_col = ch_client.written_logs.items[0].rows.items[0].columns.items[0];
+//     const address_line_1_col = ch_client.written_logs.items[0].rows.items[0].columns.items[1];
+//     const address_line_2_col = ch_client.written_logs.items[0].rows.items[0].columns.items[2];
+//     const postal_code_col = ch_client.written_logs.items[0].rows.items[0].columns.items[3];
+//     const city_col = ch_client.written_logs.items[0].rows.items[0].columns.items[4];
+//     const country_col = ch_client.written_logs.items[0].rows.items[0].columns.items[5];
+//
+//     try testing.expectEqualStrings("id", id_col.column_name);
+//     try testing.expectEqual(null, id_col.old_value);
+//     try testing.expectEqualStrings("1", id_col.new_value.?);
+//
+//     try testing.expectEqualStrings("address_line_1", address_line_1_col.column_name);
+//     try testing.expectEqual(null, address_line_1_col.old_value);
+//     try testing.expectEqualStrings("1 Apple Park Way", address_line_1_col.new_value.?);
+//
+//     try testing.expectEqualStrings("address_line_2", address_line_2_col.column_name);
+//     try testing.expectEqual(null, address_line_2_col.old_value);
+//     try testing.expectEqual(null, address_line_2_col.new_value);
+//
+//     try testing.expectEqualStrings("postal_code", postal_code_col.column_name);
+//     try testing.expectEqual(null, postal_code_col.old_value);
+//     try testing.expectEqualStrings("95014", postal_code_col.new_value.?);
+//
+//     try testing.expectEqualStrings("city", city_col.column_name);
+//     try testing.expectEqual(null, city_col.old_value);
+//     try testing.expectEqualStrings("Cupertino", city_col.new_value.?);
+//
+//     try testing.expectEqualStrings("country", country_col.column_name);
+//     try testing.expectEqual(null, country_col.old_value);
+//     try testing.expectEqualStrings("US", country_col.new_value.?);
+// }

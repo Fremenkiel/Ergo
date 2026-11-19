@@ -10,6 +10,7 @@ const assert = std.debug.assert;
 
 const root = @import("root.zig");
 const Config = root.Config;
+const TestPauseOptions = root.TestPauseOptions;
 const SslMode = root.SslMode;
 
 const ApplyArgsError = MergeError;
@@ -90,7 +91,7 @@ const CliArgs = struct {
     replication:    ReplicationArgs = .{},
 
     help:           bool = false,
-    is_test:        bool = false,
+    test_pause_at:  ?TestPauseOptions = null,
 
     const PostgresArgs = struct {
         host:               ?[]const u8 = null,
@@ -139,12 +140,13 @@ const Options = enum {
     @"replication-flush-interval-ms",
 
     help,
-    @"is-test",
+    @"test-pause-at",
 };
 
 pub const ParseArgsError = error{
 UnexpectedArgument,
 UnknownOption,
+InvalidOption,
 } || NextValueError || fmt.ParseIntError || root.SslModeError || Allocator.Error;
 
 pub fn parseArgs(allocator: Allocator, argv: Args) ParseArgsError!CliArgs {
@@ -161,9 +163,14 @@ pub fn parseArgs(allocator: Allocator, argv: Args) ParseArgsError!CliArgs {
         if (arg) |a| {
             i += 1;
 
-            if (!mem.startsWith(u8, a, "--")) return ParseArgsError.UnexpectedArgument;
+            var ait = mem.splitScalar(u8, a, '=');
 
-            const option = meta.stringToEnum(Options, a[2..]) orelse {
+            const opt = ait.next() orelse return ParseArgsError.InvalidOption;
+            const val = ait.next();
+
+            if (!mem.startsWith(u8, opt, "--")) return ParseArgsError.UnexpectedArgument;
+
+            const option = meta.stringToEnum(Options, opt[2..]) orelse {
                 std.log.err("unknown option: {s}", .{ a });
                 return ParseArgsError.UnknownOption;
             };
@@ -200,7 +207,17 @@ pub fn parseArgs(allocator: Allocator, argv: Args) ParseArgsError!CliArgs {
                 .@"replication-flush-interval-ms" => args.replication.flush_interval_ms = try fmt.parseInt(u16, try nextValue(&it), 10),
 
                 .help => args.help = true,
-                .@"is-test" => args.is_test = true,
+                .@"test-pause-at" => {
+                    if (val) |v| {
+                        const test_option = meta.stringToEnum(TestPauseOptions, v) orelse {
+                            std.log.err("unknown test pause option: {s}", .{ v });
+                            return ParseArgsError.UnknownOption;
+                        };
+                        args.test_pause_at = test_option;
+                        continue;
+                    }
+                    return ParseArgsError.MissingValue;
+                }
             }
         } else break;
     }
@@ -231,7 +248,7 @@ test "parse: ensure connect mapping" {
                 "--config", "config.toml",
 
                 "--help",
-                "--is-test",
+                "--test-pause-at=transaction_received_before_enqueue",
 
                 "--postgres-host", "localhost",
                 "--postgres-port", "1234",
@@ -268,7 +285,7 @@ test "parse: ensure connect mapping" {
 
         try testing.expectEqualSlices(u8, "config.toml", args.config.?);
         try testing.expectEqual(true, args.help);
-        try testing.expectEqual(true, args.is_test);
+        try testing.expectEqual(.transaction_received_before_enqueue, args.test_pause_at.?);
 
         try testing.expectEqualSlices(u8, "localhost", args.postgres.host.?);
         try testing.expectEqual(1234, args.postgres.port.?);
@@ -358,7 +375,7 @@ test "parse: no argv" {
 
     try testing.expectEqual(null, args.config);
     try testing.expectEqual(false, args.help);
-    try testing.expectEqual(false, args.is_test);
+    try testing.expectEqual(null, args.test_pause_at);
 
     try testing.expectEqual(null, args.postgres.host);
     try testing.expectEqual(null, args.postgres.port);
@@ -405,7 +422,7 @@ test "parse: invalid types" {
         const argv: std.process.Args = .{
             .vector = &[_][*:0]const u8{ 
             "ergo",
-            "--is-test", "not-valid",
+            "--test-pause-at=transaction_received_before_enqueue", "not-valid",
         }};
 
         try testing.expectEqual(ParseArgsError.UnexpectedArgument, parseArgs(allocator, argv));
