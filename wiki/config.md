@@ -112,7 +112,7 @@ ERGO_POSTGRES_SSLMODE_PATH=./ca.crt
 --replication-flush-interval-ms 360
 
 --help
---is-test
+--test-pause-at=transaction_received_before_enqueue
 ```
 
 ### Ssl mode
